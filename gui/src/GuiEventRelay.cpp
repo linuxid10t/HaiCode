@@ -101,8 +101,26 @@ GuiEventRelay::attach()
         if (!is_active_session(sid)) return;
 
         std::string finish_reason = data.value("finish_reason", "");
+        int32 input_tokens  = 0;
+        int32 output_tokens = 0;
+        if (data.contains("usage") && data["usage"].is_object()) {
+            input_tokens  = data["usage"].value("input",  0);
+            output_tokens = data["usage"].value("output", 0);
+        }
         BMessage msg(MSG_STEP_ENDED);
         msg.AddString("finish_reason", finish_reason.c_str());
+        msg.AddInt32("usage_input",  input_tokens);
+        msg.AddInt32("usage_output", output_tokens);
+        main_window_.SendMessage(&msg);
+    });
+
+    // StepStarted → MSG_STEP_STARTED (so the UI can flip the thinking
+    // indicator on before the first text delta arrives)
+    bus_.subscribe(EventType::StepStarted, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_STEP_STARTED);
         main_window_.SendMessage(&msg);
     });
 
@@ -114,6 +132,19 @@ GuiEventRelay::attach()
         std::string error = data.value("error", "");
         BMessage msg(MSG_STEP_FAILED);
         msg.AddString("error", error.c_str());
+        main_window_.SendMessage(&msg);
+    });
+
+    // PlanProposed → MSG_PLAN_PROPOSED
+    bus_.subscribe(EventType::PlanProposed, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        std::string plan = data.value("plan", "");
+        std::string path = data.value("path", "");
+        BMessage msg(MSG_PLAN_PROPOSED);
+        msg.AddString("plan", plan.c_str());
+        msg.AddString("path", path.c_str());
         main_window_.SendMessage(&msg);
     });
 

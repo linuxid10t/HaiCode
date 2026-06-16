@@ -65,6 +65,9 @@ public:
     void update_title(const std::string& session_id, const std::string& title);
     void update_directory(const std::string& session_id, const std::string& directory);
     void update_cost(const std::string& session_id, double cost, const TokenUsage& tokens);
+    // Patch the "mode" field inside the session's model_json blob. No-op if the
+    // session does not exist. mode_str should be "build" or "plan".
+    void update_mode(const std::string& session_id, const std::string& mode_str);
     void delete_session(const std::string& session_id);
 
     void append_message(const std::string& session_id,

@@ -5,9 +5,11 @@
 static const uint32 MSG_TEXT_DELTA     = 'TXdl';
 static const uint32 MSG_TOOL_CALLED    = 'TLcl';
 static const uint32 MSG_TOOL_RESULT    = 'TLrs';
+static const uint32 MSG_STEP_STARTED   = 'STst';
 static const uint32 MSG_STEP_ENDED     = 'STen';
 static const uint32 MSG_STEP_FAILED    = 'STfl';
 static const uint32 MSG_PERMISSION_REQ = 'PRrq';
+static const uint32 MSG_PLAN_PROPOSED  = 'PLpr';   // plan_str + path_str
 
 // UI → Engine / UI internal
 static const uint32 MSG_SUBMIT_PROMPT  = 'PMpt';
@@ -15,6 +17,8 @@ static const uint32 MSG_INTERRUPT      = 'INTr';
 static const uint32 MSG_NEW_SESSION    = 'NSes';
 static const uint32 MSG_SELECT_SESSION = 'SLss';
 static const uint32 MSG_PERMISSION_REP = 'PRrp';  // reply from PermissionWindow
+static const uint32 MSG_TOGGLE_MODE    = 'TGmd';  // mode button pressed
+static const uint32 MSG_PLAN_DECISION  = 'PLdc';  // reply from PlanReviewWindow (approved bool)
 
 // Settings
 static const uint32 MSG_SHOW_SETTINGS   = 'SHst';

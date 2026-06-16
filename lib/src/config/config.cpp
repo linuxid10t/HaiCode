@@ -141,6 +141,25 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 if (s.is_string())
                     cfg.instructions.push_back(s.get<std::string>());
         }
+
+        // Per-model context-window overrides: {"models": {"foo": 128000, ...}}
+        if (j.contains("models") && j["models"].is_object()) {
+            for (auto& [k, v] : j["models"].items()) {
+                if (v.is_number_integer())
+                    cfg.model_contexts[k] = v.get<int>();
+            }
+        }
+
+        // web_search tool config: {"web_search": {"engine": "ddg_lite", "max_results": 5}}
+        if (j.contains("web_search") && j["web_search"].is_object()) {
+            auto& ws = j["web_search"];
+            if (ws.contains("engine") && ws["engine"].is_string())
+                cfg.web_search_engine = ws["engine"].get<std::string>();
+            if (ws.contains("max_results") && ws["max_results"].is_number_integer()) {
+                int n = ws["max_results"].get<int>();
+                if (n > 0) cfg.web_search_max_results = n;
+            }
+        }
     } catch (...) {}
 
     return cfg;
@@ -166,6 +185,12 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.permissions.push_back(r);
     for (auto& s : overlay.instructions)
         result.instructions.push_back(s);
+    for (auto& [k, v] : overlay.model_contexts)
+        result.model_contexts[k] = v;
+    if (!overlay.web_search_engine.empty())
+        result.web_search_engine = overlay.web_search_engine;
+    if (overlay.web_search_max_results > 0)
+        result.web_search_max_results = overlay.web_search_max_results;
     return result;
 }
 

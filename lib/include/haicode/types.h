@@ -29,4 +29,8 @@ struct PermissionRule {
     PermissionEffect effect;
 };
 
+// Per-session operating mode. Build = full tool access; Plan = read-only +
+// propose_plan only, until the user approves the plan and flips to Build.
+enum class SessionMode { Build, Plan };
+
 } // namespace haicode

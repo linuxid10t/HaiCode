@@ -42,6 +42,13 @@ public:
     void submit_prompt(const std::string& session_id, const std::string& text);
     void interrupt(const std::string& session_id);
 
+    // Per-session Plan/Build mode. Persisted into model_json so it survives
+    // process restarts; also cached in session_modes_ for synchronous reads.
+    void      set_mode(const std::string& session_id, SessionMode mode);
+    SessionMode get_mode(const std::string& session_id);
+
+    const AppConfig& config() const { return config_; }
+
 private:
     void agentic_loop(const std::string& session_id);
 
@@ -55,6 +62,7 @@ private:
     std::map<std::string, std::thread> runner_threads_;
     std::map<std::string, std::atomic<bool>*> interrupt_flags_;
     std::map<std::string, bool> session_running_;  // true while agentic_loop is executing
+    std::map<std::string, SessionMode> session_modes_;
     std::mutex mu_;
 };
 

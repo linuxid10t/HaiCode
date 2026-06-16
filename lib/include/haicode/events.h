@@ -33,6 +33,7 @@ enum class EventType {
     InterruptRequested,
     PermissionRequested,
     PermissionGranted,
+    PlanProposed,
 };
 
 struct BaseEvent {

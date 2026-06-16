@@ -43,21 +43,25 @@ struct PendingPermission {
 
 enum class EngineEventKind {
     TextDelta,
+    StepStarted,
     StepEnded,
     StepFailed,
     ToolCalled,
     ToolResult,
     SessionsChanged,
-    PermissionReq
+    PermissionReq,
+    PlanProposed
 };
 
 struct EngineEvent {
     EngineEventKind kind;
     std::string session_id;
     std::string str1;   // text delta, tool name, error, etc.
-    std::string str2;   // tool output or call_id
+    std::string str2;   // tool output or call_id (or path for PlanProposed)
+    std::string str3;   // plan markdown for PlanProposed
     bool bool1 = false; // success flag for tool results
-    int int1   = 0;     // token count for StepEnded
+    int int1   = 0;     // input tokens for StepEnded
+    int int2   = 0;     // output tokens for StepEnded
     PendingPermission* perm = nullptr;
 };
 
@@ -114,6 +118,12 @@ private:
     void render_input();
     void render_statusbar();
     void render_permission_overlay();
+    void render_plan_overlay();
+    void render_thinking_indicator();
+
+    // Mode toggle
+    void toggle_mode();
+    void refresh_mode();
 
     // Chat helpers
     void append_line(const ChatLine& line);
@@ -167,12 +177,26 @@ private:
 
     // --- Status ---
     bool engine_running_ = false;
+    bool thinking_       = false;  // true between submit and first text delta
     int  total_tokens_   = 0;
+    int  last_prompt_input_  = 0;
+    int  last_prompt_output_ = 0;
+    int  session_input_total_   = 0;
+    int  session_output_total_  = 0;
+    int  current_context_tokens_ = 0;
+    int  max_context_            = 0;
 
     // --- Permission overlay ---
     bool              perm_visible_ = false;
     PendingPermission perm_pending_;
     int               perm_sel_ = 0;        // 0=once, 1=always, 2=deny
+
+    // --- Plan-review overlay ---
+    bool         plan_visible_ = false;
+    std::string  plan_text_;
+    std::string  plan_path_;
+    std::string  plan_session_id_;
+    int          plan_scroll_ = 0;
 
     // Focus: 0=sessions pane, 1=chat+input pane
     int focus_ = 1;

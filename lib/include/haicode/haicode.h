@@ -16,4 +16,6 @@ std::shared_ptr<Provider> make_openai_provider(const std::string& api_key,
                                                 const std::string& base_url = "");
 // Register all built-in tools into a registry
 void register_builtin_tools(ToolRegistry& registry);
+// Register web_search and web_extract tools. Called by register_builtin_tools.
+void register_web_tools(ToolRegistry& registry);
 } // namespace haicode

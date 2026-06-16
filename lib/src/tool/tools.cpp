@@ -1,7 +1,9 @@
 #include <haicode/tool.h>
+#include <haicode/util.h>
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <ctime>
 #include <algorithm>
 #include <array>
 #include <memory>
@@ -16,6 +18,9 @@
 #include <sys/stat.h>
 
 namespace haicode {
+
+// Defined in web_tools.cpp — registered through register_builtin_tools.
+void register_web_tools(ToolRegistry& registry);
 
 static const size_t MAX_OUTPUT = 100 * 1024;
 
@@ -638,12 +643,6 @@ public:
 };
 
 // ---- ExternalTerminalTool ----
-//
-// Spawns a new Haiku Terminal window with the user's command. The bash tool
-// wraps everything in `timeout ... sh -c '...' 2>&1` and reads stdout via a
-// pipe, which makes interactive TUI/REPL programs unusable. This tool
-// double-forks so the engine doesn't hold the child or its pipes open, and
-// the window stays open after the command exits.
 
 class ExternalTerminalTool : public Tool {
 public:
@@ -720,6 +719,74 @@ public:
     }
 };
 
+// ---- ProposePlanTool ----
+//
+// Only meaningful in Plan mode (the engine filters it out of tool_defs in
+// Build mode). Writes the plan markdown to <project_dir>/.haicode/plans/
+// and returns the path so the engine can surface it in the PlanProposed
+// event. The engine ends the turn after this tool runs.
+
+class ProposePlanTool : public Tool {
+public:
+    std::string name() const override { return "propose_plan"; }
+    std::string description() const override {
+        return "Submit an implementation plan for user approval. Only available "
+               "in Plan mode. After calling this, stop and wait for the user "
+               "to approve before making any changes.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"plan", {{"type", "string"}, {"description", "Full plan as markdown. Cover context, recommended approach, files to modify (with paths), existing utilities to reuse (with paths), and verification steps."}}}
+            }},
+            {"required", nlohmann::json::array({"plan"})}
+        };
+    }
+    std::string required_permission() const override { return "propose_plan"; }
+    std::string resource(const nlohmann::json& /*input*/, const ToolContext& ctx) const override {
+        // Fixed destination under the project's .haicode/plans/ — no user-controlled
+        // path component to abuse, so we surface the directory as the resource.
+        return ctx.working_dir.empty() ? "." : ctx.working_dir;
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string plan = input.value("plan", "");
+        if (plan.empty())
+            return {false, "", "propose_plan: missing or empty 'plan'."};
+
+        // Build <project_dir>/.haicode/plans/plan_YYYYMMDD_HHMMSS_<rand>.md
+        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        // Strip trailing slash from base for clean concatenation
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        std::string plans_dir = base + "/.haicode/plans";
+
+        char ts[32];
+        time_t now_t = time(nullptr);
+        struct tm tmv;
+        localtime_r(&now_t, &tmv);
+        strftime(ts, sizeof(ts), "%Y%m%d_%H%M%S", &tmv);
+
+        // 4 hex chars of randomness to avoid collisions when two plans land
+        // inside the same second.
+        char rand_suffix[8];
+        std::snprintf(rand_suffix, sizeof(rand_suffix), "%04x",
+                      static_cast<unsigned>(util::now_ms() & 0xFFFF));
+
+        std::string path = plans_dir + "/plan_" + ts + "_" + rand_suffix + ".md";
+
+        std::string err = atomic_write(path, plan);
+        if (!err.empty())
+            return {false, "", err};
+
+        nlohmann::json out = {
+            {"path",          path},
+            {"bytes_written", plan.size()}
+        };
+        return {true, out.dump(2), ""};
+    }
+};
+
 // Registration function
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
@@ -730,6 +797,11 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<GrepTool>());
     registry.register_tool(std::make_shared<LsTool>());
     registry.register_tool(std::make_shared<ExternalTerminalTool>());
+    registry.register_tool(std::make_shared<ProposePlanTool>());
+    // web_search and web_extract live in web_tools.cpp; pull them in through
+    // their own registration entry point so this file doesn't need to know
+    // about HttpClient.
+    register_web_tools(registry);
 }
 
 } // namespace haicode

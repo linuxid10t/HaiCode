@@ -35,9 +35,10 @@ public:
                   const std::string& body,
                   SSECallback callback);
 
-    // Simple GET
+    // Simple GET. timeout_seconds caps the whole transfer (default 60s).
     std::string get(const std::string& url,
-                    const std::map<std::string, std::string>& headers);
+                    const std::map<std::string, std::string>& headers,
+                    long timeout_seconds = 60);
 
     void cancel();
 

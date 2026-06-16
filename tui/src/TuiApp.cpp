@@ -7,6 +7,7 @@
 
 #include "TuiApp.h"
 #include <haicode/events.h>
+#include <haicode/model_info.h>
 
 #include <ncurses.h>
 #include <unistd.h>
@@ -18,6 +19,7 @@
 #include <cassert>
 #include <algorithm>
 #include <sstream>
+#include <cstdio>
 #include <nlohmann/json.hpp>
 
 using namespace haicode;
@@ -138,15 +140,31 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::StepStarted, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::StepStarted;
+        ev.session_id = j.value("session_id", "");
+        push_engine_event(std::move(ev));
+    });
+
     bus_.subscribe(events::EventType::StepEnded, [this](const json& j) {
         EngineEvent ev;
         ev.kind       = EngineEventKind::StepEnded;
         ev.session_id = j.value("session_id", "");
         ev.str1       = j.value("finish_reason", "");
         if (j.contains("usage") && j["usage"].is_object()) {
-            ev.int1 = j["usage"].value("input", 0)
-                    + j["usage"].value("output", 0);
+            ev.int1 = j["usage"].value("input", 0);
+            ev.int2 = j["usage"].value("output", 0);
         }
+        push_engine_event(std::move(ev));
+    });
+
+    bus_.subscribe(events::EventType::PlanProposed, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::PlanProposed;
+        ev.session_id = j.value("session_id", "");
+        ev.str3       = j.value("plan", "");
+        ev.str2       = j.value("path", "");
         push_engine_event(std::move(ev));
     });
 
@@ -227,7 +245,7 @@ void TuiApp::process_engine_events() {
         if (!ev.session_id.empty() && ev.session_id != active_session_id_) {
             // Event for a different session — ignore for display but track tokens
             if (ev.kind == EngineEventKind::StepEnded) {
-                total_tokens_ += ev.int1;
+                total_tokens_ += ev.int1 + ev.int2;
             }
             continue;
         }
@@ -235,12 +253,24 @@ void TuiApp::process_engine_events() {
         switch (ev.kind) {
         case EngineEventKind::TextDelta:
             engine_running_ = true;
+            thinking_ = false;
             append_text_delta(ev.str1);
+            break;
+
+        case EngineEventKind::StepStarted:
+            engine_running_ = true;
+            thinking_ = true;
             break;
 
         case EngineEventKind::StepEnded:
             engine_running_ = false;
-            total_tokens_  += ev.int1;
+            thinking_ = false;
+            last_prompt_input_   += ev.int1;
+            last_prompt_output_  += ev.int2;
+            session_input_total_ += ev.int1;
+            session_output_total_+= ev.int2;
+            total_tokens_        += ev.int1 + ev.int2;
+            if (ev.int1 > 0) current_context_tokens_ = ev.int1;
             end_streaming();
             // Refresh session list (title may have changed)
             sessions_ = store_.list();
@@ -248,6 +278,7 @@ void TuiApp::process_engine_events() {
 
         case EngineEventKind::StepFailed:
             engine_running_ = false;
+            thinking_ = false;
             end_streaming();
             append_line({ LineType::System,
                           std::string("[Error] ") + ev.str1 });
@@ -255,6 +286,7 @@ void TuiApp::process_engine_events() {
 
         case EngineEventKind::ToolCalled:
             engine_running_ = true;
+            thinking_ = false;
             end_streaming();
             append_tool_called(ev.str1, ev.str2);
             break;
@@ -271,6 +303,14 @@ void TuiApp::process_engine_events() {
             perm_pending_ = *ev.perm;
             perm_sel_     = 0;
             perm_visible_ = true;
+            break;
+
+        case EngineEventKind::PlanProposed:
+            plan_text_      = ev.str3;
+            plan_path_      = ev.str2;
+            plan_session_id_= ev.session_id;
+            plan_scroll_    = 0;
+            plan_visible_   = true;
             break;
         }
     }
@@ -303,9 +343,26 @@ void TuiApp::select_session(int idx) {
     chat_scroll_ = 0;
     streaming_   = false;
     engine_running_ = false;
+    thinking_       = false;
     total_tokens_   = sessions_[idx].tokens.input + sessions_[idx].tokens.output;
+    last_prompt_input_  = 0;
+    last_prompt_output_ = 0;
+    session_input_total_   = sessions_[idx].tokens.input;
+    session_output_total_  = sessions_[idx].tokens.output;
+    current_context_tokens_ = 0;
 
     load_history(active_session_id_);
+
+    // Compute max context from current model + provider
+    std::string model_id    = config_.model;
+    std::string provider_id = "anthropic";
+    try {
+        auto mj = json::parse(sessions_[idx].model_json);
+        model_id    = mj.value("id", model_id);
+        provider_id = mj.value("provider_id", provider_id);
+    } catch (...) {}
+    max_context_ = haicode::get_context_window(provider_id, model_id,
+                                               config_.model_contexts);
 }
 
 void TuiApp::load_history(const std::string& session_id) {
@@ -513,6 +570,47 @@ void TuiApp::handle_key(int key) {
         return;
     }
 
+    // ---------- Plan-review overlay ----------
+    if (plan_visible_) {
+        int visible_rows = std::max(5, rows_ - 10);
+        switch (key) {
+        case 'a':
+        case 'A':
+        case '\n':
+        case KEY_ENTER:
+            if (!plan_session_id_.empty()) {
+                engine_.set_mode(plan_session_id_, SessionMode::Build);
+            }
+            plan_visible_ = false;
+            break;
+        case 'd':
+        case 'D':
+        case 27:
+        case 'q':
+        case 'Q':
+            plan_visible_ = false;
+            break;
+        case KEY_UP:
+        case 'k':
+            ++plan_scroll_;
+            break;
+        case KEY_DOWN:
+        case 'j':
+            plan_scroll_ = std::max(0, plan_scroll_ - 1);
+            break;
+        case KEY_PPAGE:
+            plan_scroll_ += visible_rows;
+            break;
+        case KEY_NPAGE:
+            plan_scroll_ = std::max(0, plan_scroll_ - visible_rows);
+            break;
+        default:
+            break;
+        }
+        render_all();
+        return;
+    }
+
     // ---------- Global bindings ----------
     switch (key) {
     case 3:  // Ctrl+C
@@ -524,6 +622,11 @@ void TuiApp::handle_key(int key) {
 
     case 14: // Ctrl+N
         new_session();
+        render_all();
+        return;
+
+    case 16: // Ctrl+P — toggle Build/Plan mode
+        toggle_mode();
         render_all();
         return;
 
@@ -607,6 +710,9 @@ void TuiApp::handle_key(int key) {
         append_line({ LineType::Separator, "" });
         chat_scroll_ = 0; // pin to bottom
         engine_running_ = true;
+        thinking_ = true;
+        last_prompt_input_ = 0;
+        last_prompt_output_ = 0;
         render_all();
 
         engine_.submit_prompt(active_session_id_, text);
@@ -680,6 +786,7 @@ void TuiApp::render_all() {
     render_input();
     render_statusbar();
 
+    if (plan_visible_)  render_plan_overlay();
     if (perm_visible_) render_permission_overlay();
 
     // Position cursor in input window unless perm overlay is up
@@ -846,7 +953,10 @@ void TuiApp::render_input() {
 
     // Running indicator on the right of the input line
     if (engine_running_) {
-        std::string indicator = "[running]";
+        std::string indicator;
+        if (thinking_)        indicator = "[* thinking]";
+        else if (streaming_)  indicator = "[~ streaming]";
+        else                  indicator = "[* running]";
         mvwaddstr(win_input_, 1, w - (int)indicator.size() - 1, indicator.c_str());
     }
 
@@ -861,12 +971,42 @@ void TuiApp::render_statusbar() {
 
     ::wattron(win_status_, COLOR_PAIR(CP_STATUS) | A_REVERSE);
 
+    // Mode badge
+    std::string badge = "[BUILD]";
+    if (!active_session_id_.empty()
+        && engine_.get_mode(active_session_id_) == SessionMode::Plan)
+        badge = "[PLAN]";
+
     std::string model  = config_.model.empty() ? "?" : config_.model;
     std::string agent  = config_.agent.empty() ? "default" : config_.agent;
-    char buf[256];
+
+    // Format context as N.Nk / max
+    auto fmt = [](int n) {
+        char b[16];
+        if (n >= 10000) std::snprintf(b, sizeof(b), "%.1fk", n / 1000.0);
+        else            std::snprintf(b, sizeof(b), "%d", n);
+        return std::string(b);
+    };
+
+    std::string ctx_str;
+    if (current_context_tokens_ > 0) {
+        ctx_str = " ctx: " + fmt(current_context_tokens_);
+        if (max_context_ > 0) {
+            int pct = std::min(100, current_context_tokens_ * 100 / max_context_);
+            char pb[8];
+            std::snprintf(pb, sizeof(pb), "%d%%", pct);
+            ctx_str += "/" + fmt(max_context_) + " (" + pb + ")";
+        }
+    }
+
+    char buf[384];
     std::snprintf(buf, sizeof(buf),
-                  " model: %-20s agent: %-12s tokens: %d",
-                  model.c_str(), agent.c_str(), total_tokens_);
+                  " %s model: %-20s%s last: %d/%d  total: %d",
+                  badge.c_str(),
+                  model.c_str(),
+                  ctx_str.c_str(),
+                  last_prompt_input_, last_prompt_output_,
+                  total_tokens_);
     std::string status(buf);
     // Pad to full width
     if ((int)status.size() < w) status.resize(w, ' ');
@@ -922,6 +1062,66 @@ void TuiApp::render_permission_overlay() {
         if (sel) ::wattroff(win, COLOR_PAIR(CP_PERM_SEL) | A_REVERSE | A_BOLD);
         col += (int)strlen(labels[i]) + 2;
     }
+
+    ::wnoutrefresh(win);
+    ::delwin(win);
+}
+
+// ---------------------------------------------------------------------------
+// Mode toggle + Plan overlay
+// ---------------------------------------------------------------------------
+
+void TuiApp::toggle_mode() {
+    if (active_session_id_.empty()) return;
+    auto cur = engine_.get_mode(active_session_id_);
+    engine_.set_mode(active_session_id_,
+        cur == SessionMode::Plan ? SessionMode::Build : SessionMode::Plan);
+}
+
+void TuiApp::refresh_mode() {
+    // Nothing to do for the TUI — render_statusbar reads mode live each frame.
+}
+
+void TuiApp::render_plan_overlay() {
+    int box_w = std::min(cols_ - 4, std::max(60, cols_ - 8));
+    int box_h = std::min(rows_ - 4, std::max(15, rows_ - 4));
+    int box_y = (rows_ - box_h) / 2;
+    int box_x = (cols_ - box_w) / 2;
+
+    WINDOW* win = ::newwin(box_h, box_w, box_y, box_x);
+    ::box(win, 0, 0);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, 0, 2, " Proposed Plan ");
+    ::wattroff(win, A_BOLD);
+
+    if (!plan_path_.empty()) {
+        std::string p = "saved: " + plan_path_;
+        mvwprintw(win, 0, 18, "%s", truncate(p, box_w - 19).c_str());
+    }
+
+    int inner_w = box_w - 4;
+    int inner_h = box_h - 4;
+
+    // Word-wrap the plan into display rows
+    auto lines = wrap(plan_path_.empty() ? plan_text_ : plan_text_, inner_w);
+
+    int total = (int)lines.size();
+    plan_scroll_ = std::min(plan_scroll_, std::max(0, total - inner_h));
+    int start = std::max(0, total - inner_h - plan_scroll_);
+    int end   = std::min(total, start + inner_h);
+
+    for (int i = start; i < end; ++i) {
+        int row = (i - start) + 1;
+        if (row >= inner_h + 1) break;
+        mvwprintw(win, row, 2, "%s", truncate(lines[i], inner_w).c_str());
+    }
+
+    // Footer / hint
+    ::wmove(win, box_h - 2, 1);
+    ::whline(win, ACS_HLINE, box_w - 2);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, box_h - 1, 2, " [a] approve   [d] discard   ↑/↓ scroll ");
+    ::wattroff(win, A_BOLD);
 
     ::wnoutrefresh(win);
     ::delwin(win);

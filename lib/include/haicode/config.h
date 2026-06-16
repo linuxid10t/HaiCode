@@ -46,6 +46,13 @@ struct AppConfig {
     // Contents of <project_dir>/agents.md (or claude.md fallback), read verbatim
     // by ConfigLoader::load(). Project-specific only; never merged from global config.
     std::string agents_md;
+    // Per-model context-window overrides (keyed by exact model_id). Empty by default;
+    // populated from the top-level "models" object in config.json. Used by
+    // get_context_window() as a hard override on top of the hardcoded prefix table.
+    std::map<std::string, int> model_contexts;
+    // web_search tool config. engine = "ddg_lite" (default) or "ddg_html".
+    std::string web_search_engine = "ddg_lite";
+    int         web_search_max_results = 5;
 };
 
 class ConfigLoader {

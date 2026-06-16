@@ -1,5 +1,6 @@
 #include <haicode/db.h>
 #include <haicode/util.h>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <sstream>
 
@@ -249,6 +250,43 @@ void SessionStore::delete_session(const std::string& session_id) {
     sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+}
+
+void SessionStore::update_mode(const std::string& session_id, const std::string& mode_str) {
+    // Read current model_json, patch the "mode" field, write it back.
+    sqlite3_stmt* sel = nullptr;
+    sqlite3_prepare_v2(db_.handle(),
+        "SELECT model_json FROM session WHERE id=?", -1, &sel, nullptr);
+    sqlite3_bind_text(sel, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::string model_json;
+    bool found = false;
+    if (sqlite3_step(sel) == SQLITE_ROW) {
+        const unsigned char* txt = sqlite3_column_text(sel, 0);
+        if (txt) model_json = reinterpret_cast<const char*>(txt);
+        found = true;
+    }
+    sqlite3_finalize(sel);
+    if (!found) return;
+
+    try {
+        auto j = nlohmann::json::parse(model_json, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) j = nlohmann::json::object();
+        j["mode"] = mode_str;
+        model_json = j.dump();
+    } catch (...) {
+        // Corrupt JSON — leave the row alone rather than wiping other fields.
+        return;
+    }
+
+    sqlite3_stmt* upd = nullptr;
+    sqlite3_prepare_v2(db_.handle(),
+        "UPDATE session SET model_json=?, time_updated=? WHERE id=?", -1, &upd, nullptr);
+    sqlite3_bind_text(upd, 1, model_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upd, 2, util::now_ms());
+    sqlite3_bind_text(upd, 3, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(upd);
+    sqlite3_finalize(upd);
 }
 
 int SessionStore::next_seq(const std::string& session_id) {

@@ -129,7 +129,8 @@ void HttpClient::post_sse(const std::string& url,
 }
 
 std::string HttpClient::get(const std::string& url,
-                             const std::map<std::string, std::string>& headers) {
+                             const std::map<std::string, std::string>& headers,
+                             long timeout_seconds) {
     CURL* curl = state_->curl;
     state_->cancelled = false;
     std::string result;
@@ -145,6 +146,7 @@ std::string HttpClient::get(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_fn);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
 
     struct curl_slist* hlist = nullptr;
     for (auto& [k, v] : headers)

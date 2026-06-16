@@ -2,6 +2,7 @@
 #include "Messages.h"
 #include "ChatView.h"
 #include "PermissionWindow.h"
+#include "PlanReviewWindow.h"
 
 #include <Application.h>
 #include <Window.h>
@@ -30,6 +31,7 @@
 
 #include <haicode/engine.h>
 #include <haicode/db.h>
+#include <haicode/model_info.h>
 
 #include <nlohmann/json.hpp>
 
@@ -40,6 +42,8 @@
 #include <ctime>
 #include <cstdint>
 #include <climits>
+#include <cstdio>
+#include <algorithm>
 
 using json = nlohmann::json;
 
@@ -162,7 +166,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // Model list — starts empty; populated after MSG_MODELS_LOADED
     model_menu_ = new BPopUpMenu("(loading…)");
     model_menu_->AddItem(new BMenuItem("(loading\xe2\x80\xa6)", nullptr));
+    model_menu_->SetLabelFromMarked(true);
     model_field_ = new BMenuField("model_field", "Model:", model_menu_);
+
+    // Mode toggle — switches between Build (default) and Plan
+    mode_btn_ = new BButton("mode", "Mode: Build", new BMessage(MSG_TOGGLE_MODE));
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -182,6 +190,13 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     send_btn_ = new BButton("send", "Send \xe2\x96\xb6", new BMessage(MSG_SUBMIT_PROMPT));
     send_btn_->MakeDefault(false);
 
+    // ---- Status strip (engine state, token counts, context size) ----
+    status_strip_ = new BStringView("status_strip", "[BUILD] \xe2\x9c\x93 idle");
+    status_strip_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    BFont status_font(*be_plain_font);
+    status_font.SetSize(11.0f);
+    status_strip_->SetFont(&status_font);
+
     // ---- Layout ----
     // Toolbar group
     BGroupView* toolbar_group = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
@@ -190,6 +205,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(dir_btn_)
         .Add(provider_field_)
         .Add(model_field_)
+        .Add(mode_btn_)
         .AddGlue()
         .Add(interrupt_btn_)
     .End();
@@ -222,6 +238,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                 .Add(sessions_group, 0.25f)
                 .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.75f)
                     .Add(toolbar_group)
+                    .Add(status_strip_)
                     .Add(transcript_label)
                     .Add(chat_view_->ScrollContainer())
                     .Add(prompt_label)
@@ -349,6 +366,9 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_TOOL_RESULT:
             _HandleToolResult(msg);
             break;
+        case MSG_STEP_STARTED:
+            _HandleStepStarted();
+            break;
         case MSG_STEP_ENDED:
             _HandleStepEnded(msg);
             break;
@@ -357,6 +377,15 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_PERMISSION_REQ:
             _HandlePermissionReq(msg);
+            break;
+        case MSG_PLAN_PROPOSED:
+            _HandlePlanProposed(msg);
+            break;
+        case MSG_PLAN_DECISION:
+            _HandlePlanDecision(msg);
+            break;
+        case MSG_TOGGLE_MODE:
+            _ToggleMode();
             break;
         case MSG_SHOW_SETTINGS:
             be_app->PostMessage(msg);
@@ -389,6 +418,7 @@ MainWindow::MessageReceived(BMessage* msg)
             // Update default_model_ to the first available model
             BMenuItem* sel = model_menu_->FindMarked();
             if (sel) default_model_ = sel->Label();
+            _UpdateMaxContext();
             break;
         }
         case MSG_PERMISSION_REP: {
@@ -500,6 +530,17 @@ MainWindow::_NewSession()
     chat_view_->Clear();
     chat_view_->AppendSystem("New session started.");
     interrupt_btn_->SetEnabled(false);
+    last_prompt_input_ = 0;
+    last_prompt_output_ = 0;
+    session_input_total_ = 0;
+    session_output_total_ = 0;
+    current_context_tokens_ = 0;
+    engine_running_ = false;
+    streaming_state_ = "idle";
+    current_tool_name_.clear();
+    _UpdateMaxContext();
+    _RefreshModeButton();
+    _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 }
 
@@ -550,6 +591,17 @@ MainWindow::_SelectSession(int idx)
     chat_view_->Clear();
     _LoadHistory(active_session_id_);
     interrupt_btn_->SetEnabled(false);
+    last_prompt_input_ = 0;
+    last_prompt_output_ = 0;
+    session_input_total_ = 0;
+    session_output_total_ = 0;
+    current_context_tokens_ = 0;
+    engine_running_ = false;
+    streaming_state_ = "idle";
+    current_tool_name_.clear();
+    _UpdateMaxContext();
+    _RefreshModeButton();
+    _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 }
 
@@ -579,6 +631,15 @@ MainWindow::_SubmitPrompt()
 
     chat_view_->AppendUserText(text);
     interrupt_btn_->SetEnabled(true);
+
+    // Reset per-prompt token counters; engine_running_ flips true on first
+    // MSG_STEP_STARTED, streaming_state_ goes to "thinking" then.
+    last_prompt_input_ = 0;
+    last_prompt_output_ = 0;
+    engine_running_ = true;
+    streaming_state_ = "thinking";
+    current_tool_name_.clear();
+    _UpdateStatusStrip();
 
     // Submit to engine (runs on engine thread)
     engine_->submit_prompt(active_session_id_, text);
@@ -634,6 +695,10 @@ MainWindow::_HandleTextDelta(BMessage* msg)
     const char* delta = nullptr;
     if (msg->FindString("delta", &delta) == B_OK && delta) {
         chat_view_->AppendTextDelta(delta);
+        if (streaming_state_ != "streaming") {
+            streaming_state_ = "streaming";
+            _UpdateStatusStrip();
+        }
     }
 }
 
@@ -646,6 +711,9 @@ MainWindow::_HandleToolCalled(BMessage* msg)
     msg->FindString("input_json", &input_json);
     chat_view_->AppendToolCalled(tool_name  ? tool_name  : "",
                                   input_json ? input_json : "");
+    current_tool_name_ = tool_name ? tool_name : "";
+    streaming_state_ = "tool";
+    _UpdateStatusStrip();
 }
 
 void
@@ -656,18 +724,55 @@ MainWindow::_HandleToolResult(BMessage* msg)
     msg->FindString("output",  &output);
     msg->FindBool("success",   &success);
     chat_view_->AppendToolResult(output ? output : "", success);
+    // After a tool finishes, the engine may keep going (another tool or more
+    // text). If it does, MSG_STEP_STARTED will reset state to "thinking".
+    current_tool_name_.clear();
+    if (engine_running_ && streaming_state_ == "tool") {
+        streaming_state_ = "thinking";
+        _UpdateStatusStrip();
+    }
+}
+
+void
+MainWindow::_HandleStepStarted()
+{
+    engine_running_ = true;
+    streaming_state_ = "thinking";
+    current_tool_name_.clear();
+    _UpdateStatusStrip();
 }
 
 void
 MainWindow::_HandleStepEnded(BMessage* msg)
 {
     chat_view_->EndStreaming();
-    interrupt_btn_->SetEnabled(false);
+
+    int32 in_tok = 0, out_tok = 0;
+    msg->FindInt32("usage_input",  &in_tok);
+    msg->FindInt32("usage_output", &out_tok);
+    last_prompt_input_   += in_tok;
+    last_prompt_output_  += out_tok;
+    session_input_total_ += in_tok;
+    session_output_total_+= out_tok;
+    // The input side reflects the full conversation size as the provider saw
+    // it on this step — that's our best estimate of current context usage.
+    if (in_tok > 0) current_context_tokens_ = in_tok;
 
     const char* finish_reason = nullptr;
     msg->FindString("finish_reason", &finish_reason);
-    if (finish_reason && std::string(finish_reason) == "tool_use")
-        interrupt_btn_->SetEnabled(true);
+    bool more = (finish_reason && std::string(finish_reason) == "tool_use");
+    interrupt_btn_->SetEnabled(more);
+
+    if (more) {
+        // Another step will follow — keep "thinking" state.
+        engine_running_ = true;
+        streaming_state_ = "thinking";
+    } else {
+        engine_running_ = false;
+        streaming_state_ = "idle";
+        current_tool_name_.clear();
+    }
+    _UpdateStatusStrip();
 }
 
 void
@@ -675,11 +780,15 @@ MainWindow::_HandleStepFailed(BMessage* msg)
 {
     chat_view_->EndStreaming();
     interrupt_btn_->SetEnabled(false);
+    engine_running_ = false;
+    streaming_state_ = "idle";
+    current_tool_name_.clear();
 
     const char* error = nullptr;
     msg->FindString("error", &error);
     std::string err_text = error ? error : "Unknown error";
     chat_view_->AppendSystem("Error: " + err_text);
+    _UpdateStatusStrip();
 }
 
 void
@@ -717,4 +826,136 @@ MainWindow::PostPermissionRequest(const std::string& action,
     msg.AddString("detail",   detail.c_str());
     msg.AddPointer("promise_ptr", promise_ptr);
     PostMessage(&msg);
+}
+
+void
+MainWindow::_HandlePlanProposed(BMessage* msg)
+{
+    const char* plan = nullptr;
+    const char* path = nullptr;
+    msg->FindString("plan", &plan);
+    msg->FindString("path", &path);
+
+    PlanReviewWindow* w = new PlanReviewWindow(
+        plan ? plan : "",
+        path ? path : "",
+        active_session_id_,
+        BMessenger(this)
+    );
+    w->Show();
+}
+
+void
+MainWindow::_HandlePlanDecision(BMessage* msg)
+{
+    bool approved = false;
+    msg->FindBool("approved", &approved);
+    const char* sid_c = nullptr;
+    msg->FindString("session_id", &sid_c);
+    std::string sid = sid_c ? sid_c : active_session_id_;
+
+    if (approved && !sid.empty() && engine_) {
+        engine_->set_mode(sid, haicode::SessionMode::Build);
+        if (sid == active_session_id_) _RefreshModeButton();
+    }
+}
+
+void
+MainWindow::_ToggleMode()
+{
+    if (active_session_id_.empty() || !engine_) return;
+    auto current = engine_->get_mode(active_session_id_);
+    auto next = (current == haicode::SessionMode::Plan)
+                ? haicode::SessionMode::Build
+                : haicode::SessionMode::Plan;
+    engine_->set_mode(active_session_id_, next);
+    _RefreshModeButton();
+    _UpdateStatusStrip();
+}
+
+void
+MainWindow::_RefreshModeButton()
+{
+    if (!mode_btn_ || active_session_id_.empty() || !engine_) return;
+    auto m = engine_->get_mode(active_session_id_);
+    mode_btn_->SetLabel(m == haicode::SessionMode::Plan ? "Mode: Plan" : "Mode: Build");
+}
+
+static std::string format_tokens(int n)
+{
+    char buf[32];
+    if (n >= 10000) snprintf(buf, sizeof(buf), "%.1fk", n / 1000.0);
+    else            snprintf(buf, sizeof(buf), "%d", n);
+    return buf;
+}
+
+void
+MainWindow::_UpdateStatusStrip()
+{
+    if (!status_strip_) return;
+
+    // Mode badge
+    std::string badge = "[BUILD]";
+    if (engine_ && !active_session_id_.empty()
+        && engine_->get_mode(active_session_id_) == haicode::SessionMode::Plan)
+        badge = "[PLAN]";
+
+    // State glyph + label
+    std::string glyph, label;
+    if (!engine_running_) {
+        glyph = "\xe2\x9c\x93";  // CHECK MARK
+        label = "idle";
+    } else if (streaming_state_ == "streaming") {
+        glyph = "\xf0\x9f\x92\xac";  // 💬
+        label = "streaming\xe2\x80\xa6";
+    } else if (streaming_state_ == "tool") {
+        glyph = "\xf0\x9f\x94\xa7";  // 🔧
+        label = "running tool";
+        if (!current_tool_name_.empty()) label += ": " + current_tool_name_;
+    } else {
+        // thinking / before first token
+        glyph = "\xf0\x9f\x92\xa1";  // 💡
+        label = "thinking\xe2\x80\xa6";
+    }
+
+    std::string s = badge + " " + glyph + " " + label;
+
+    // Token + context strip (only if we have data)
+    if (last_prompt_input_ > 0 || last_prompt_output_ > 0 || session_input_total_ > 0) {
+        s += "   last turn: \xe2\x86\x91" + format_tokens(last_prompt_input_)
+           + " \xe2\x86\x93" + format_tokens(last_prompt_output_)
+           + "   session: \xe2\x86\x91" + format_tokens(session_input_total_)
+           + " \xe2\x86\x93" + format_tokens(session_output_total_);
+    }
+    if (current_context_tokens_ > 0) {
+        s += "   context: " + format_tokens(current_context_tokens_);
+        if (max_context_ > 0) {
+            int pct = (max_context_ > 0)
+                      ? std::min(100, (int)(current_context_tokens_ * 100LL / max_context_))
+                      : 0;
+            char pctbuf[8];
+            snprintf(pctbuf, sizeof(pctbuf), "%d%%", pct);
+            s += " / " + format_tokens(max_context_) + " (" + pctbuf + ")";
+        }
+    }
+
+    status_strip_->SetText(s.c_str());
+}
+
+void
+MainWindow::_UpdateMaxContext()
+{
+    if (!engine_) { max_context_ = 0; return; }
+    std::string model_id = default_model_;
+    BMenuItem* marked = model_menu_ ? model_menu_->FindMarked() : nullptr;
+    if (marked) model_id = marked->Label();
+
+    std::string provider_id = "anthropic";
+    BMenuItem* pm = provider_menu_ ? provider_menu_->FindMarked() : nullptr;
+    if (pm && std::string(pm->Label()) == "OpenAI / compatible")
+        provider_id = "openai";
+
+    max_context_ = haicode::get_context_window(provider_id, model_id,
+                                               engine_->config().model_contexts);
+    _UpdateStatusStrip();
 }

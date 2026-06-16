@@ -1,6 +1,7 @@
 #pragma once
 #include "types.h"
 #include "provider.h"
+#include "config.h"
 #include <string>
 #include <functional>
 #include <map>
@@ -16,6 +17,10 @@ struct ToolContext {
     std::string assistant_message_id;
     std::string call_id;
     std::string working_dir;
+    // Read-only view of the merged AppConfig. Set by SessionEngine before tool
+    // execution; tools that need configurable behaviour (e.g. web_search)
+    // read from this pointer. May be null in tests.
+    const AppConfig* config = nullptr;
 };
 
 struct ToolResult {

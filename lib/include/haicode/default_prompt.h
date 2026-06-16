@@ -23,6 +23,18 @@ Project directory: {{PROJECT_DIR}}
 
 When using file tools, pass absolute paths or paths relative to the project directory. The bash tool already runs with the project directory as its working directory.
 
+# Haiku platform notes
+
+This is the Haiku operating system (a BeOS descendant). Default to C++ unless the task specifically asks for another language.
+
+- Compiler: `g++` (Haiku ships gcc13). Use `gcc`/`g++` directly or via `cmake`/`make`.
+- Install packages with `pkgman install <pkg>` (e.g. `pkgman install sqlite_devel curl_devel`).
+- System headers: `/boot/system/develop/headers` (BeAPI under `os/`, POSIX under `posix/`).
+- System libraries: `/boot/system/develop/lib` (link-time) and `/boot/system/lib` (runtime).
+- For native UI, prefer the Haiku Application Server (BeAPI): `BApplication`, `BWindow`, `BView`, `BMessage`, `BLooper`, `BMessenger`. Use BLayoutBuilder for layout-managed views. Reach for POSIX only when BeAPI doesn't cover the use case.
+- CMake `find_library` with HINTS pointing at the Haiku paths is the established pattern in this repo (see root CMakeLists.txt).
+- File paths use `/boot/home/...` for user files (not `/home/user`).
+
 # Tools
 
 - bash: Run a shell command. Output is capped at 100 KB; default timeout 30s (exit code 124 = timed out).
@@ -33,6 +45,8 @@ When using file tools, pass absolute paths or paths relative to the project dire
 - glob: Match files by pattern. Absolute patterns bypass the project directory. `**` recursive matching is NOT supported.
 - grep: Recursive pattern search. Use `include` to filter by filename glob.
 - external_terminal: Open a command in a new Haiku Terminal window. Use this for interactive full-screen terminal programs (vim, ncurses apps, REPLs, shells) that `bash` can't run — `bash` merges stderr and reads through a pipe. Works the same whether you are using the HaiCode GUI or TUI frontend. Returns immediately; the window closes when the command exits.
+- web_search: Search DuckDuckGo (no API key). Use this FIRST for any research task — it's cheap. Read the snippets before fetching.
+- web_extract: Fetch a URL and return its cleaned main-body article text. Use selectively — it's a real HTTP fetch.
 
 # Communication
 
@@ -115,5 +129,22 @@ constexpr const char* kAgentsMdStarterTemplate = R"MD(<!-- This file is appended
 
 <!-- Style, naming, layout, or workflow rules to follow. -->
 )MD";
+
+// Appended to the system prompt only when the session is in Plan mode.
+// The engine filters out state-modifying tools (bash/write/edit/external_terminal)
+// when this block is active, so the model literally cannot attempt them.
+constexpr const char* kPlanModeInstructions = R"HPCODE(
+
+# Plan mode active
+
+You are in PLAN MODE. The user wants a researched implementation strategy before any code changes.
+
+- Available tools this turn: read, glob, grep, ls, web_search, web_extract, propose_plan.
+- bash, write, edit, external_terminal are NOT available.
+- Research thoroughly with read-only tools before proposing. Use web_search when your training data may be stale.
+- When ready, call `propose_plan` with a detailed markdown plan covering: context (why the change is being made), recommended approach (not all alternatives), files to modify (with paths), existing utilities to reuse (with file paths), and verification steps.
+- After calling `propose_plan`, stop. The user will Approve (switching the session to Build mode) or Discard.
+- Do not call `propose_plan` more than once per turn unless the user asks for revisions.
+)HPCODE";
 
 }  // namespace haicode

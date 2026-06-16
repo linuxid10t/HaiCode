@@ -5,6 +5,7 @@
 #include <chrono>
 #include <sys/utsname.h>
 #include <cstdio>
+#include <algorithm>
 
 namespace haicode {
 
@@ -201,6 +202,21 @@ void SessionEngine::interrupt(const std::string& session_id) {
     bus_.publish(events::EventType::InterruptRequested, ev);
 }
 
+void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        session_modes_[session_id] = mode;
+    }
+    store_.update_mode(session_id, mode == SessionMode::Plan ? "plan" : "build");
+}
+
+SessionMode SessionEngine::get_mode(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = session_modes_.find(session_id);
+    if (it != session_modes_.end()) return it->second;
+    return SessionMode::Build;
+}
+
 void SessionEngine::agentic_loop(const std::string& session_id) {
     auto session_opt = store_.get(session_id);
     if (!session_opt) return;
@@ -209,6 +225,22 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     auto model_json = nlohmann::json::parse(session.model_json, nullptr, false);
     std::string model_id = model_json.value("id", config_.model);
     std::string provider_id = model_json.value("provider_id", "anthropic");
+
+    // Resolve session mode. The in-memory cache (set_mode) wins; otherwise we
+    // fall back to the value persisted in model_json (covers a fresh process
+    // start with no toggling yet this run).
+    SessionMode mode;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = session_modes_.find(session_id);
+        if (it != session_modes_.end()) {
+            mode = it->second;
+        } else {
+            std::string mode_str = model_json.value("mode", "build");
+            mode = (mode_str == "plan") ? SessionMode::Plan : SessionMode::Build;
+            session_modes_[session_id] = mode;
+        }
+    }
 
     auto provider = providers_.get(provider_id);
     if (!provider) {
@@ -259,12 +291,23 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                         + config_.agents_md;
     }
 
+    // Plan-mode block: appended only when the session is in Plan mode. Tells
+    // the model it must research and propose_plan rather than modify files.
+    // The engine separately filters out state-modifying tools when this block
+    // is active, so the model literally cannot call them.
+    std::string plan_mode_block;
+    if (mode == SessionMode::Plan) {
+        plan_mode_block = kPlanModeInstructions;
+    }
+
     std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
                        + agents_md_block
-                       + instructions_block;
+                       + instructions_block
+                       + plan_mode_block;
 
-    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
+    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
+            mode == SessionMode::Plan ? "plan" : "build",
             max_steps, config_.instructions.size(), system.c_str());
     fflush(stderr);
 
@@ -275,12 +318,26 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         // Re-render the system prompt each step so {{STEPS_LEFT}} stays current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
-                               max_steps - step) + agents_md_block + instructions_block;
+                               max_steps - step) + agents_md_block + instructions_block
+                              + plan_mode_block;
 
         auto messages = store_.load_messages(session_id);
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
+        // Filter tools by mode. In Plan mode the model gets only read-only
+        // research tools plus propose_plan. In Build mode propose_plan is
+        // hidden (it's only meaningful when planning).
+        if (mode == SessionMode::Plan) {
+            std::erase_if(tool_defs, [](const ToolDefinition& td) {
+                return td.name == "bash" || td.name == "write"
+                    || td.name == "edit" || td.name == "external_terminal";
+            });
+        } else {
+            std::erase_if(tool_defs, [](const ToolDefinition& td) {
+                return td.name == "propose_plan";
+            });
+        }
         auto req = builder.build(messages, system, tool_defs, model_id, provider_id);
 
         std::string assistant_msg_id = haicode::util::make_id("amsg");
@@ -385,6 +442,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ev["session_id"] = session_id;
             ev["assistant_message_id"] = assistant_msg_id;
             ev["finish_reason"] = (finish_reason == FinishReason::ToolUse) ? "tool_use" : "end_turn";
+            ev["usage"] = {
+                {"input",       usage.input},
+                {"output",      usage.output},
+                {"reasoning",   usage.reasoning},
+                {"cache_read",  usage.cache_read},
+                {"cache_write", usage.cache_write}
+            };
             bus_.publish(events::EventType::StepEnded, ev);
         }
 
@@ -397,6 +461,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         // Execute tool calls
         bool any_denied = false;
+        bool any_proposed = false;
         for (auto& call : tool_calls) {
             {
                 nlohmann::json ev;
@@ -411,6 +476,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ctx.session_id = session_id;
             ctx.call_id = call.id;
             ctx.working_dir = session.directory;
+            ctx.config = &config_;
 
             auto result = tools_.execute(call.name, call.input, ctx, permissions_);
 
@@ -431,9 +497,32 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                             : events::EventType::ToolFailed, ev);
             }
 
+            // Plan mode sentinel: a successful propose_plan ends the turn.
+            // Publish PlanProposed so the UI can show its review window,
+            // then break out of both the tool-call loop and (via the outer
+            // `if (any_proposed)` check) the step loop.
+            if (call.name == "propose_plan" && result.success) {
+                std::string plan_path;
+                try {
+                    auto out_j = nlohmann::json::parse(result.output, nullptr, false);
+                    if (out_j.is_object())
+                        plan_path = out_j.value("path", "");
+                } catch (...) {}
+
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["path"]       = plan_path;
+                ev["plan"]       = call.input.value("plan", "");
+                bus_.publish(events::EventType::PlanProposed, ev);
+                any_proposed = true;
+                break;
+            }
+
             if (result.denied) { any_denied = true; break; }
             if (interrupt_flag && interrupt_flag->load()) break;
         }
+
+        if (any_proposed) break;
 
         if (any_denied) {
             nlohmann::json ev;

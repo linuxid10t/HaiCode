@@ -8,6 +8,7 @@
 #include <MenuField.h>
 #include <PopUpMenu.h>
 #include <TextView.h>
+#include <StringView.h>
 #include <Messenger.h>
 #include <FilePanel.h>
 
@@ -15,6 +16,7 @@
 
 #include <haicode/engine.h>
 #include <haicode/db.h>
+#include <haicode/types.h>
 
 #include <string>
 #include <vector>
@@ -64,9 +66,17 @@ private:
     void _HandleTextDelta(BMessage* msg);
     void _HandleToolCalled(BMessage* msg);
     void _HandleToolResult(BMessage* msg);
+    void _HandleStepStarted();
     void _HandleStepEnded(BMessage* msg);
     void _HandleStepFailed(BMessage* msg);
     void _HandlePermissionReq(BMessage* msg);
+    void _HandlePlanProposed(BMessage* msg);
+    void _HandlePlanDecision(BMessage* msg);
+
+    void _ToggleMode();
+    void _UpdateStatusStrip();
+    void _UpdateMaxContext();
+    void _RefreshModeButton();
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change
@@ -88,10 +98,25 @@ private:
     BButton*       interrupt_btn_   = nullptr;
     BButton*       new_session_btn_ = nullptr;
     BButton*       dir_btn_         = nullptr;
+    BButton*       mode_btn_        = nullptr;
     BFilePanel*    dir_panel_       = nullptr;
     BMenuField*    model_field_     = nullptr;
     BPopUpMenu*    model_menu_      = nullptr;
     BMenuField*    provider_field_  = nullptr;
     BPopUpMenu*    provider_menu_   = nullptr;
     BMenuBar*      menu_bar_        = nullptr;
+    BStringView*   status_strip_    = nullptr;
+
+    // Engine state mirror for UI
+    bool           engine_running_        = false;
+    std::string    streaming_state_ = "idle";  // idle|thinking|streaming|tool
+    std::string    current_tool_name_;
+
+    // Per-prompt / per-session token accounting
+    int            last_prompt_input_     = 0;
+    int            last_prompt_output_    = 0;
+    int            session_input_total_   = 0;
+    int            session_output_total_  = 0;
+    int            current_context_tokens_ = 0;
+    int            max_context_           = 0;
 };
