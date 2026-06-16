@@ -58,7 +58,7 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 
 **Config** (`lib/src/config/config.cpp`): Global config at `B_USER_SETTINGS_DIRECTORY/haicode/config.json`; project config at `<project_dir>/.haicode/config.json`. Project values overlay globals. The global config also stores `last_directory` (the most recently used project directory).
 
-**Tools** (`lib/src/tool/tools.cpp`): Five built-in tools — see Tool Details below.
+**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Eleven built-in tools — see Tool Details below.
 
 ### `tui/` — ncurses frontend
 
@@ -87,9 +87,9 @@ Pure POSIX + Haiku kernel (no `BApplication`). `TuiApp::run()` multiplexes `STDI
 - Tool output is truncated to 100 KB (`MAX_OUTPUT` in `tools.cpp`).
 - Session IDs are descending-timestamp sortable (newest first in `store_.list()`). Display human-readable dates by parsing `INT64_MAX - desc_hex` from the ID.
 
-## Tool Details (`lib/src/tool/tools.cpp`)
+## Tool Details (`lib/src/tool/tools.cpp`, `lib/src/tool/web_tools.cpp`)
 
-All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-quoted shell arguments.
+All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-quoted shell arguments. Web tools (`web_search`, `web_extract`) live in `web_tools.cpp` and are pulled into `register_builtin_tools()` via `register_web_tools()`.
 
 ### BashTool (`bash`)
 - Wraps user command in `timeout N sh -c 'cd <working_dir> && { command; }'  2>&1`
@@ -126,3 +126,45 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Exit codes: 0 = matches found, 1 = no matches (success), 2 = grep error (returns failure)
 - Output capped at 100 KB in-process (no `head` pipe)
 - Schema key is `"line_numbers"` (boolean, default true), not `"-n"`
+
+### EditTool (`edit`)
+- Reads the whole file into memory, refuses binary files (null byte scan)
+- Counts `old_string` occurrences; requires `replace_all=true` if it appears more than once
+- Empty `old_string` is rejected with a hint to use both fields for deletion
+- Replacement is in-memory (single-pass for `replace_all`, single `find` otherwise)
+- Writes via shared `atomic_write()` helper (`.tmp_write` → `rename`) — same as WriteTool
+- Required permission: `write`
+
+### LsTool (`ls`)
+- Resolves relative `path` against `ctx.working_dir`; defaults to the project dir if omitted
+- Uses `opendir()`/`readdir()`; skips `.` and `..`
+- Adds suffixes via `stat()`: `/` for directories, `@` for symlinks
+- Output sorted with `std::sort` and capped at 100 KB
+- Required permission: `read`
+
+### ExternalTerminalTool (`external_terminal`)
+- Double-forks: first child calls `setsid()` and detaches stdio, grandchild `execl`s `/boot/system/apps/Terminal`
+- Invokes Terminal as `Terminal -w <working_dir> /bin/sh -c '<command>'` — the window closes when the command exits
+- Returns immediately; output is **not** captured (designed for interactive TUIs like vim, REPLs)
+- Distinct permission action (`external_terminal`) so prompts make clear which tool is asking
+- Required permission: `external_terminal`
+
+### ProposePlanTool (`propose_plan`)
+- Only available in Plan mode — engine filters it out of `tool_defs` in Build mode
+- Writes the plan markdown to `<project_dir>/.haicode/plans/plan_YYYYMMDD_HHMMSS_<4-hex-rand>.md`
+- Parent directory created with `mkdir()` walking (same pattern as WriteTool)
+- Returns the on-disk path so the engine can surface it via `PlanProposed` and end the turn
+- Required permission: `propose_plan`
+
+### WebSearchTool (`web_search`) — `web_tools.cpp`
+- Backends: `mojeek` (default, no API key), `ddg_lite`, `ddg_html`. Configurable via `AppConfig::web_search_engine`
+- Returns ranked results: title, URL, snippet — read snippets before calling `web_extract`
+- `max_results` defaults to 5, capped at 10
+- HTML parsing is in-process (no external deps); DDG may surface CAPTCHA errors
+- Required permission: `web_search`
+
+### WebExtractTool (`web_extract`) — `web_tools.cpp`
+- Fetches one URL via `HttpClient` (libcurl) with a browser User-Agent
+- Returns cleaned main-body text — nav, ads, scripts stripped (HTML stripper is ~400 lines, untested)
+- `max_chars` defaults to 8000; rejects non-http(s) URLs
+- Required permission: `web_extract`
