@@ -10,8 +10,12 @@ namespace haicode {
 //   {{PROJECT_DIR}} - absolute path of the active project directory
 //   {{STEPS_LEFT}}  - remaining steps in the 20-step budget (re-rendered each step)
 //
-// Per-agent overrides (config.agents.<id>.system_prompt) use the same
-// placeholders; unmatched placeholders are left as-is.
+// SPLIT: kDefaultSystemPrompt is byte-stable across turns so Anthropic's
+// prefix cache can hit on it. The {{STEPS_LEFT}} sentence lives in
+// kDynamicSystemPrompt below and is emitted as a separate text block
+// after the stable body. Per-agent overrides (config.agents.<id>.
+// system_prompt) use the same placeholders; unmatched placeholders are
+// left as-is.
 
 constexpr const char* kDefaultSystemPrompt = R"HPCODE(
 You are HaiCode, an agentic AI assistant running natively on the Haiku operating system. You are powered by the model {{MODEL}}. You pair with a single user on their project. You are primarily a coding assistant, but you will help with any task the user brings you — research, writing, analysis, system administration, or anything else.
@@ -85,8 +89,6 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 4. Verify: build, run tests, or run the feature in a browser/UI as appropriate.
 5. If verification fails, debug the root cause rather than the symptom.
 
-You have a per-session step budget (default 50, configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each tool call counts as one step; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration.
-
 If a command fails repeatedly, stop, diagnose the root cause, and reconsider the approach. Do not retry in a loop.
 
 # Risky actions
@@ -105,6 +107,14 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 - Never hardcode API keys or credentials. Read them from environment variables or config files.
 - Prefer existing dependencies when possible.
 - Do not echo secrets in logs or error messages.
+)HPCODE";
+
+// Re-rendered every step ({{STEPS_LEFT}} changes) and emitted as a
+// separate system text block AFTER the stable body. Kept short so the
+// per-step byte delta is minimal. Splitting this out is what lets the
+// stable body hit Anthropic's prefix cache.
+constexpr const char* kDynamicSystemPrompt = R"HPCODE(
+You have a per-session step budget (default 50, configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each tool call counts as one step; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration.
 )HPCODE";
 
 // Lowercase filenames auto-discovered at the project root.

@@ -17,6 +17,7 @@ class ContextBuilder {
 public:
     LLMRequest build(const std::vector<SessionMessage>& messages,
                      const std::string& system_prompt,
+                     const std::string& system_dynamic,
                      const std::vector<ToolDefinition>& tools,
                      const std::string& model_id,
                      const std::string& provider_id);

@@ -28,12 +28,20 @@ namespace haicode {
 
 static std::vector<nlohmann::json>
 translate_messages(const std::string& system,
+                   const std::string& system_dynamic,
                    const std::vector<nlohmann::json>& src)
 {
     std::vector<nlohmann::json> out;
 
-    if (!system.empty())
-        out.push_back({ {"role", "system"}, {"content", system} });
+    // Concatenate stable + dynamic system content. OpenAI caches
+    // automatically; no cache_control markers needed.
+    std::string joined = system;
+    if (!system_dynamic.empty()) {
+        if (!joined.empty()) joined += "\n\n";
+        joined += system_dynamic;
+    }
+    if (!joined.empty())
+        out.push_back({ {"role", "system"}, {"content", joined} });
 
     for (auto& m : src) {
         std::string role = m.value("role", "");
@@ -178,7 +186,8 @@ public:
         body["stream_options"] = { {"include_usage", true} };
 
         // Translate messages (system is prepended inside)
-        body["messages"] = translate_messages(request.system, request.messages);
+        body["messages"] = translate_messages(request.system, request.system_dynamic,
+                                                request.messages);
 
         // Tools — wrap each as {"type":"function","function":{...}}
         if (!request.tools.empty()) {

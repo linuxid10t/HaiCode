@@ -22,17 +22,29 @@ public:
         body["max_tokens"] = request.max_tokens;
         body["stream"] = true;
 
-        // System
+        // System — split into a stable cached block + an uncached dynamic
+        // tail ({{STEPS_LEFT}}). The stable block carries cache_control so
+        // Anthropic can prefix-cache it across turns.
         if (!request.system.empty()) {
-            body["system"] = nlohmann::json::array({
-                {{"type", "text"}, {"text", request.system}}
-            });
+            nlohmann::json arr = nlohmann::json::array();
+            nlohmann::json stable_block;
+            stable_block["type"] = "text";
+            stable_block["text"] = request.system;
+            stable_block["cache_control"] = {{"type", "ephemeral"}};
+            arr.push_back(stable_block);
+            if (!request.system_dynamic.empty()) {
+                arr.push_back({{"type", "text"}, {"text", request.system_dynamic}});
+            }
+            body["system"] = arr;
         }
 
-        // Messages
+        // Messages — verbatim from the engine. cache_control on the last
+        // block of the second-to-last message is added in a post-pass
+        // below, so the conversation prefix (everything except the most
+        // recent turn) hits the cache.
         body["messages"] = request.messages;
 
-        // Tools
+        // Tools — cache_control on the last entry. Stable across turns.
         if (!request.tools.empty()) {
             nlohmann::json tools_arr = nlohmann::json::array();
             for (auto& t : request.tools) {
@@ -42,7 +54,30 @@ public:
                 tool["input_schema"] = t.input_schema;
                 tools_arr.push_back(tool);
             }
+            tools_arr.back()["cache_control"] = {{"type", "ephemeral"}};
             body["tools"] = tools_arr;
+        }
+
+        // Conversation-prefix cache breakpoint. Mark the last block of the
+        // second-to-last message so everything older than the current turn
+        // is cached. Requires the message to expose a content array; if the
+        // message's content is a plain string, promote it to a one-element
+        // text-block array. Skip on messages that can't be normalized.
+        auto& msgs = body["messages"];
+        if (msgs.is_array() && msgs.size() >= 2) {
+            auto& target = msgs[msgs.size() - 2];
+            if (target.is_object() && target.contains("content")) {
+                auto& content = target["content"];
+                if (content.is_string()) {
+                    std::string s = content.get<std::string>();
+                    content = nlohmann::json::array({
+                        {{"type", "text"}, {"text", s}}
+                    });
+                }
+                if (content.is_array() && !content.empty()) {
+                    content.back()["cache_control"] = {{"type", "ephemeral"}};
+                }
+            }
         }
 
         std::map<std::string, std::string> headers = {

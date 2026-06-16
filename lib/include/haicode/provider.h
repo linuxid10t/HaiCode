@@ -19,7 +19,8 @@ enum class FinishReason { EndTurn, ToolUse, MaxTokens, Error, Stopped };
 
 struct LLMRequest {
     std::string model_id;
-    std::string system;
+    std::string system;          // byte-stable across turns (cacheable prefix)
+    std::string system_dynamic;  // per-step content that varies (e.g. {{STEPS_LEFT}})
     std::vector<nlohmann::json> messages;
     std::vector<ToolDefinition> tools;
     int max_tokens = 8192;

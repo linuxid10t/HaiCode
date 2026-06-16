@@ -35,6 +35,7 @@ static std::string render_prompt(const std::string& tmpl,
 LLMRequest ContextBuilder::build(
     const std::vector<SessionMessage>& messages,
     const std::string& system_prompt,
+    const std::string& system_dynamic,
     const std::vector<ToolDefinition>& tools,
     const std::string& model_id,
     const std::string& /*provider_id*/)
@@ -42,6 +43,7 @@ LLMRequest ContextBuilder::build(
     LLMRequest req;
     req.model_id = model_id;
     req.system = system_prompt;
+    req.system_dynamic = system_dynamic;
     req.tools = tools;
     req.messages = assemble_messages(messages);
     return req;
@@ -316,6 +318,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                        + instructions_block
                        + plan_mode_block;
 
+    // Dynamic per-step content ({{STEPS_LEFT}}). Emitted as a separate
+    // system text block by the Anthropic provider so the stable body
+    // above stays byte-identical across turns and hits the prefix cache.
+    std::string system_dynamic = render_prompt(kDynamicSystemPrompt, model_id,
+                                                os_info, session.directory,
+                                                max_steps);
+
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
             mode == SessionMode::Plan ? "plan" : "build",
@@ -344,6 +353,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
                                max_steps - step) + agents_md_block + instructions_block
                               + plan_mode_block;
+        // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
+        system_dynamic = render_prompt(kDynamicSystemPrompt, model_id, os_info,
+                                        session.directory, max_steps - step);
 
         auto messages = store_.load_messages(session_id);
 
@@ -362,7 +374,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 return td.name == "propose_plan";
             });
         }
-        auto req = builder.build(messages, system, tool_defs, model_id, provider_id);
+        auto req = builder.build(messages, system, system_dynamic, tool_defs,
+                                  model_id, provider_id);
 
         std::string assistant_msg_id = haicode::util::make_id("amsg");
 
