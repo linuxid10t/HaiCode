@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+
+# Claude Code per-user local state
+.claude/settings.local.json
+
+# Editor / OS cruft
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled objects / archives (defensive — normally under build/)
+*.o
+*.a

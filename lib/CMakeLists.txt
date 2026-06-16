@@ -1,0 +1,29 @@
+cmake_minimum_required(VERSION 3.20)
+
+# Collect all core sources
+file(GLOB_RECURSE HAICODE_SOURCES
+    "src/config/*.cpp"
+    "src/db/*.cpp"
+    "src/session/*.cpp"
+    "src/engine/*.cpp"
+    "src/provider/*.cpp"
+    "src/tool/*.cpp"
+    "src/permission/*.cpp"
+    "src/util/*.cpp"
+)
+
+add_library(haicode STATIC ${HAICODE_SOURCES})
+
+target_include_directories(haicode PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(haicode PUBLIC
+    ${SQLITE3_LIB}
+    ${CURL_LIB}
+    ${ROOT_LIB}
+)
+
+# Test executable for Phase 1 verification
+add_executable(test_db tests/test_db.cpp)
+target_link_libraries(test_db haicode)

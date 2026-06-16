@@ -1,0 +1,36 @@
+#pragma once
+#include <SupportDefs.h>
+
+// Engine → UI
+static const uint32 MSG_TEXT_DELTA     = 'TXdl';
+static const uint32 MSG_TOOL_CALLED    = 'TLcl';
+static const uint32 MSG_TOOL_RESULT    = 'TLrs';
+static const uint32 MSG_STEP_ENDED     = 'STen';
+static const uint32 MSG_STEP_FAILED    = 'STfl';
+static const uint32 MSG_PERMISSION_REQ = 'PRrq';
+
+// UI → Engine / UI internal
+static const uint32 MSG_SUBMIT_PROMPT  = 'PMpt';
+static const uint32 MSG_INTERRUPT      = 'INTr';
+static const uint32 MSG_NEW_SESSION    = 'NSes';
+static const uint32 MSG_SELECT_SESSION = 'SLss';
+static const uint32 MSG_PERMISSION_REP = 'PRrp';  // reply from PermissionWindow
+
+// Settings
+static const uint32 MSG_SHOW_SETTINGS   = 'SHst';
+static const uint32 MSG_SETTINGS_SAVED  = 'SVst';
+
+// Model list
+static const uint32 MSG_FETCH_MODELS    = 'FTmd';  // MainWindow → be_app; "provider_id" string
+static const uint32 MSG_MODELS_LOADED   = 'MLld';  // be_app → MainWindow; repeated "model" strings
+
+// Working directory
+static const uint32 MSG_CHOOSE_DIR      = 'CHdr';  // dir button pressed → open BFilePanel
+static const uint32 MSG_DIR_CHANGED     = 'DChr';  // MainWindow → be_app; "path" string
+
+// Permission management
+static const uint32 MSG_ADD_PERMISSION  = 'ADpm';  // MainWindow → be_app; "action"+"resource" strings
+
+// Session tracking
+static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string
+static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32

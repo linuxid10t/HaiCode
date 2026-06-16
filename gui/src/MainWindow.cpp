@@ -1,0 +1,720 @@
+#include "MainWindow.h"
+#include "Messages.h"
+#include "ChatView.h"
+#include "PermissionWindow.h"
+
+#include <Application.h>
+#include <Window.h>
+#include <View.h>
+#include <TextView.h>
+#include <ScrollView.h>
+#include <Button.h>
+#include <MenuBar.h>
+#include <MenuField.h>
+#include <MenuItem.h>
+#include <PopUpMenu.h>
+#include <ListView.h>
+#include <StringItem.h>
+#include <GroupView.h>
+#include <LayoutBuilder.h>
+#include <SplitView.h>
+#include <Message.h>
+#include <Messenger.h>
+#include <String.h>
+#include <SupportDefs.h>
+#include <GraphicsDefs.h>
+#include <FilePanel.h>
+#include <Entry.h>
+#include <Path.h>
+#include <StringView.h>
+
+#include <haicode/engine.h>
+#include <haicode/db.h>
+
+#include <nlohmann/json.hpp>
+
+#include <string>
+#include <vector>
+#include <future>
+#include <memory>
+#include <ctime>
+#include <cstdint>
+#include <climits>
+
+using json = nlohmann::json;
+
+// ---------------------------------------------------------------------------
+// SessionListView — BListView with right-click context menu
+// ---------------------------------------------------------------------------
+
+class SessionListView : public BListView {
+public:
+    SessionListView()
+        : BListView("session_list", B_SINGLE_SELECTION_LIST)
+    {
+        SetSelectionMessage(new BMessage(MSG_SELECT_SESSION));
+    }
+
+    void MouseDown(BPoint where) override
+    {
+        int32 buttons = 0;
+        if (Window()->CurrentMessage()->FindInt32("buttons", &buttons) == B_OK
+            && (buttons & B_SECONDARY_MOUSE_BUTTON))
+        {
+            // Right-click: select the item under the cursor first
+            int32 idx = IndexOf(where);
+            if (idx >= 0) Select(idx);
+
+            BPopUpMenu* menu = new BPopUpMenu("session_ctx", false, false);
+            BMessage* del_msg = new BMessage(MSG_DELETE_SESSION);
+            del_msg->AddInt32("index", idx >= 0 ? idx : CurrentSelection());
+            menu->AddItem(new BMenuItem("Delete Session", del_msg));
+
+            ConvertToScreen(&where);
+            menu->Go(where, true, true, true);
+            delete menu;
+        } else {
+            BListView::MouseDown(where);
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// InputTextView — BTextView subclass that sends MSG_SUBMIT_PROMPT on Enter
+// ---------------------------------------------------------------------------
+
+class InputTextView : public BTextView {
+public:
+    InputTextView(const char* name)
+        : BTextView(name, B_WILL_DRAW | B_PULSE_NEEDED | B_FRAME_EVENTS
+                        | B_NAVIGABLE | B_SUPPORTS_LAYOUT)
+    {
+        SetWordWrap(true);
+        SetExplicitMinSize(BSize(B_SIZE_UNSET, 60));
+    }
+
+    void AttachedToWindow() override
+    {
+        BTextView::AttachedToWindow();
+        SetViewColor(255, 255, 255);
+        SetLowColor(255, 255, 255);
+        MakeFocus(true);
+    }
+
+    void KeyDown(const char* bytes, int32 numBytes) override
+    {
+        if (numBytes == 1 && bytes[0] == B_ENTER && !(modifiers() & B_SHIFT_KEY)) {
+            Window()->PostMessage(MSG_SUBMIT_PROMPT);
+        } else {
+            BTextView::KeyDown(bytes, numBytes);
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// MainWindow
+// ---------------------------------------------------------------------------
+
+static std::string dir_basename(const std::string& path) {
+    if (path.empty()) return "/";
+    std::string p = path;
+    if (p.back() == '/' && p.size() > 1) p.pop_back();
+    auto pos = p.rfind('/');
+    return (pos == std::string::npos) ? p : p.substr(pos + 1);
+}
+
+MainWindow::MainWindow(haicode::SessionEngine& engine,
+                       haicode::SessionStore& store,
+                       const std::string& project_dir,
+                       const std::string& default_model)
+    : BWindow(BRect(100, 100, 1100, 750),
+              "HaiCode",
+              B_TITLED_WINDOW,
+              B_QUIT_ON_WINDOW_CLOSE | B_AUTO_UPDATE_SIZE_LIMITS)
+    , engine_(&engine)
+    , store_(store)
+    , project_dir_(project_dir)
+    , default_model_(default_model)
+{
+    // ---- Menu bar ----
+    menu_bar_ = new BMenuBar("menu_bar");
+    BMenu* settings_menu = new BMenu("Settings");
+    settings_menu->AddItem(new BMenuItem("Preferences" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_SHOW_SETTINGS), ','));
+    menu_bar_->AddItem(settings_menu);
+
+    // ---- Toolbar: New Session, Dir picker, Model selector, Interrupt ----
+    new_session_btn_ = new BButton("new_session", "New Session", new BMessage(MSG_NEW_SESSION));
+    interrupt_btn_   = new BButton("interrupt",   "Interrupt",   new BMessage(MSG_INTERRUPT));
+    interrupt_btn_->SetEnabled(false);
+
+    std::string dir_label = dir_basename(project_dir_);
+    dir_btn_ = new BButton("dir_btn", dir_label.c_str(), new BMessage(MSG_CHOOSE_DIR));
+
+    // Provider selector — user picks endpoint type; model list is fetched dynamically
+    provider_menu_ = new BPopUpMenu("Anthropic");
+    auto* ap_item = new BMenuItem("Anthropic", new BMessage(MSG_FETCH_MODELS));
+    ap_item->SetMarked(true);
+    provider_menu_->AddItem(ap_item);
+    provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS)));
+    provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
+
+    // Model list — starts empty; populated after MSG_MODELS_LOADED
+    model_menu_ = new BPopUpMenu("(loading…)");
+    model_menu_->AddItem(new BMenuItem("(loading\xe2\x80\xa6)", nullptr));
+    model_field_ = new BMenuField("model_field", "Model:", model_menu_);
+
+    // ---- Session list (left sidebar) ----
+    session_list_ = new SessionListView();
+    session_scroll_ = new BScrollView("session_scroll", session_list_,
+                                      0, false, true, B_FANCY_BORDER);
+
+    // ---- ChatView ----
+    chat_view_ = new ChatView("chat_view");
+
+    // ---- Input area ----
+    input_view_ = new InputTextView("input_view");
+    BScrollView* input_scroll = new BScrollView("input_scroll", input_view_,
+                                                0, false, true, B_FANCY_BORDER);
+    input_scroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 70));
+    input_scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
+
+    send_btn_ = new BButton("send", "Send \xe2\x96\xb6", new BMessage(MSG_SUBMIT_PROMPT));
+    send_btn_->MakeDefault(false);
+
+    // ---- Layout ----
+    // Toolbar group
+    BGroupView* toolbar_group = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(toolbar_group)
+        .Add(new_session_btn_)
+        .Add(dir_btn_)
+        .Add(provider_field_)
+        .Add(model_field_)
+        .AddGlue()
+        .Add(interrupt_btn_)
+    .End();
+
+    // Input group (label + text + send button)
+    BGroupView* input_group = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(input_group)
+        .Add(input_scroll)
+        .Add(send_btn_)
+    .End();
+
+    auto* sessions_label   = new BStringView("sessions_label",   "Sessions");
+    auto* transcript_label = new BStringView("transcript_label", "Conversation");
+    auto* prompt_label     = new BStringView("prompt_label",     "Prompt");
+
+    // Sessions pane — built separately so we can enforce a minimum width.
+    auto* sessions_group = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(sessions_group)
+        .Add(sessions_label)
+        .Add(session_scroll_)
+    .End();
+    sessions_group->SetExplicitMinSize(BSize(200, B_SIZE_UNSET));
+
+    // Menu bar sits at the top; content area below with window insets.
+    BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+        .Add(menu_bar_)
+        .AddGroup(B_HORIZONTAL, 0)
+            .SetInsets(B_USE_WINDOW_INSETS)
+            .AddSplit(B_HORIZONTAL, B_USE_HALF_ITEM_SPACING)
+                .Add(sessions_group, 0.25f)
+                .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.75f)
+                    .Add(toolbar_group)
+                    .Add(transcript_label)
+                    .Add(chat_view_->ScrollContainer())
+                    .Add(prompt_label)
+                    .Add(input_group)
+                .End()
+                .SetCollapsible(0, true)
+            .End()
+        .End()
+    .End();
+
+    // Populate session list and open/create initial session
+    _RefreshSessionList();
+    if (!session_ids_.empty()) {
+        _SwitchToSession(0);
+    } else {
+        _NewSession();
+    }
+
+}
+
+bool
+MainWindow::QuitRequested()
+{
+    delete dir_panel_;
+    dir_panel_ = nullptr;
+    delete chat_view_;
+    chat_view_ = nullptr;
+    be_app->PostMessage(B_QUIT_REQUESTED);
+    return true;
+}
+
+void
+MainWindow::SelectProvider(const std::string& provider_id)
+{
+    bool want_openai = (provider_id == "openai");
+    for (int32 i = 0; i < provider_menu_->CountItems(); i++) {
+        BMenuItem* item = provider_menu_->ItemAt(i);
+        bool is_openai = std::string(item->Label()) == "OpenAI / compatible";
+        item->SetMarked(want_openai ? is_openai : !is_openai);
+    }
+}
+
+void
+MainWindow::MessageReceived(BMessage* msg)
+{
+    switch (msg->what) {
+        case MSG_SUBMIT_PROMPT:
+            _SubmitPrompt();
+            break;
+        case MSG_INTERRUPT:
+            if (!active_session_id_.empty())
+                engine_->interrupt(active_session_id_);
+            interrupt_btn_->SetEnabled(false);
+            break;
+        case MSG_NEW_SESSION:
+            _NewSession();
+            break;
+        case MSG_CHOOSE_DIR: {
+            if (!dir_panel_) {
+                dir_panel_ = new BFilePanel(B_OPEN_PANEL, new BMessenger(this),
+                                            nullptr, B_DIRECTORY_NODE, false);
+                dir_panel_->SetButtonLabel(B_DEFAULT_BUTTON, "Select");
+                dir_panel_->Window()->SetTitle("Select Working Directory");
+            }
+            BEntry entry(project_dir_.c_str());
+            entry_ref ref;
+            if (entry.GetRef(&ref) == B_OK)
+                dir_panel_->SetPanelDirectory(&ref);
+            dir_panel_->Show();
+            break;
+        }
+        case B_REFS_RECEIVED: {
+            entry_ref ref;
+            if (msg->FindRef("refs", &ref) == B_OK) {
+                BEntry entry(&ref, true);
+                BPath path;
+                if (entry.GetPath(&path) == B_OK && entry.IsDirectory()) {
+                    project_dir_ = path.Path();
+                    dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
+                    if (!active_session_id_.empty())
+                        store_.update_directory(active_session_id_, project_dir_);
+                    BMessage notify(MSG_DIR_CHANGED);
+                    notify.AddString("path", project_dir_.c_str());
+                    be_app->PostMessage(&notify);
+                }
+            }
+            break;
+        }
+        case MSG_SELECT_SESSION: {
+            if (suppress_next_select_) {
+                suppress_next_select_ = false;
+                break;
+            }
+            int32 idx = -1;
+            if (msg->FindInt32("index", &idx) != B_OK)
+                idx = session_list_->CurrentSelection();
+            if (idx >= 0)
+                _SelectSession(static_cast<int>(idx));
+            break;
+        }
+        case MSG_DELETE_SESSION: {
+            int32 idx = -1;
+            msg->FindInt32("index", &idx);
+            if (idx >= 0 && idx < (int32)session_ids_.size()) {
+                std::string sid = session_ids_[idx];
+                store_.delete_session(sid);
+                if (active_session_id_ == sid)
+                    active_session_id_.clear();
+                _RefreshSessionList();
+                if (!session_ids_.empty()) {
+                    int32 next = std::min(idx, (int32)session_ids_.size() - 1);
+                    _SwitchToSession(next);
+                } else {
+                    _NewSession();
+                }
+            }
+            break;
+        }
+        case MSG_TEXT_DELTA:
+            _HandleTextDelta(msg);
+            break;
+        case MSG_TOOL_CALLED:
+            _HandleToolCalled(msg);
+            break;
+        case MSG_TOOL_RESULT:
+            _HandleToolResult(msg);
+            break;
+        case MSG_STEP_ENDED:
+            _HandleStepEnded(msg);
+            break;
+        case MSG_STEP_FAILED:
+            _HandleStepFailed(msg);
+            break;
+        case MSG_PERMISSION_REQ:
+            _HandlePermissionReq(msg);
+            break;
+        case MSG_SHOW_SETTINGS:
+            be_app->PostMessage(msg);
+            break;
+        case MSG_FETCH_MODELS: {
+            // User changed provider dropdown — forward to app with selected provider id
+            BMenuItem* marked = provider_menu_->FindMarked();
+            std::string pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
+                              ? "openai" : "anthropic";
+            BMessage fwd(MSG_FETCH_MODELS);
+            fwd.AddString("provider_id", pid.c_str());
+            be_app->PostMessage(&fwd);
+            break;
+        }
+        case MSG_MODELS_LOADED: {
+            // Repopulate model dropdown with server-provided list
+            while (model_menu_->CountItems() > 0)
+                delete model_menu_->RemoveItem((int32)0);
+
+            const char* m = nullptr;
+            bool first = true;
+            for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i) {
+                auto* item = new BMenuItem(m, nullptr);
+                if (first) { item->SetMarked(true); first = false; }
+                model_menu_->AddItem(item);
+            }
+            if (first) {
+                model_menu_->AddItem(new BMenuItem("(none available)", nullptr));
+            }
+            // Update default_model_ to the first available model
+            BMenuItem* sel = model_menu_->FindMarked();
+            if (sel) default_model_ = sel->Label();
+            break;
+        }
+        case MSG_PERMISSION_REP: {
+            void* promise_raw = nullptr;
+            int32 effect_int  = 2; // default Deny
+            msg->FindPointer("promise_ptr", &promise_raw);
+            msg->FindInt32("effect", &effect_int);
+
+            if (effect_int == 1) {
+                // "Allow Always" — persist the rule in the PermissionGate via be_app
+                const char* action   = nullptr;
+                const char* resource = nullptr;
+                msg->FindString("action",   &action);
+                msg->FindString("resource", &resource);
+                if (action && resource) {
+                    BMessage perm(MSG_ADD_PERMISSION);
+                    perm.AddString("action",   action);
+                    perm.AddString("resource", resource);
+                    be_app->PostMessage(&perm);
+                }
+            }
+
+            if (promise_raw) {
+                auto* promise = static_cast<std::promise<haicode::PermissionEffect>*>(promise_raw);
+                haicode::PermissionEffect effect = (effect_int <= 1)
+                    ? haicode::PermissionEffect::Allow
+                    : haicode::PermissionEffect::Deny;
+                promise->set_value(effect);
+                delete promise;
+            }
+            break;
+        }
+        default:
+            BWindow::MessageReceived(msg);
+            break;
+    }
+}
+
+void
+MainWindow::_RefreshSessionList()
+{
+    // Remove old items
+    session_list_->MakeEmpty();
+    session_ids_.clear();
+
+    auto sessions = store_.list(50);
+    for (auto& si : sessions) {
+        std::string title;
+        if (!si.title.empty()) {
+            title = si.title;
+        } else if (si.id.size() >= 20) {
+            // ID format: prefix_XXXXXXXXXXXXXXXX (16 hex descending timestamp) + 8 hex random
+            // Recover creation time: creation_ms = INT64_MAX - desc
+            try {
+                uint64_t desc = std::stoull(si.id.substr(4, 16), nullptr, 16);
+                int64_t  ms   = (int64_t)(INT64_MAX - (int64_t)desc);
+                time_t   sec  = (time_t)(ms / 1000);
+                struct tm t;
+                localtime_r(&sec, &t);
+                char buf[32];
+                strftime(buf, sizeof(buf), "%m/%d %H:%M", &t);
+                title = buf;
+            } catch (...) {
+                title = si.id.substr(si.id.size() - 8);
+            }
+        } else {
+            title = si.id;
+        }
+        session_list_->AddItem(new BStringItem(title.c_str()));
+        session_ids_.push_back(si.id);
+    }
+}
+
+static std::string selected_provider_id(BPopUpMenu* menu)
+{
+    BMenuItem* marked = menu->FindMarked();
+    if (marked && std::string(marked->Label()) == "OpenAI / compatible")
+        return "openai";
+    return "anthropic";
+}
+
+void
+MainWindow::_NewSession()
+{
+    // Determine model and provider from menus
+    std::string model = default_model_;
+    BMenuItem* marked = model_menu_->FindMarked();
+    if (marked) model = marked->Label();
+
+    std::string provider = selected_provider_id(provider_menu_);
+    std::string sid = engine_->create_session(project_dir_, "", model, provider);
+    active_session_id_ = sid;
+
+    // Notify relay of new active session
+    BMessage notify(MSG_ACTIVE_SESSION);
+    notify.AddString("session_id", sid.c_str());
+    be_app->PostMessage(&notify);
+
+    // Refresh list and select new item
+    _RefreshSessionList();
+    for (int i = 0; i < (int)session_ids_.size(); ++i) {
+        if (session_ids_[i] == sid) {
+            suppress_next_select_ = true;
+            session_list_->Select(i);
+            break;
+        }
+    }
+
+    chat_view_->Clear();
+    chat_view_->AppendSystem("New session started.");
+    interrupt_btn_->SetEnabled(false);
+    if (input_view_->Window()) input_view_->MakeFocus(true);
+}
+
+void
+MainWindow::_SelectSession(int idx)
+{
+    if (idx < 0 || idx >= (int)session_ids_.size()) return;
+
+    active_session_id_ = session_ids_[idx];
+
+    // Notify relay of newly active session
+    BMessage notify(MSG_ACTIVE_SESSION);
+    notify.AddString("session_id", active_session_id_.c_str());
+    be_app->PostMessage(&notify);
+
+    // Sync toolbar to session's stored provider/model/directory
+    auto si = store_.get(active_session_id_);
+    if (si) {
+        // Restore working directory
+        if (!si->directory.empty()) {
+            project_dir_ = si->directory;
+            dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
+        }
+
+        // Restore provider + model dropdowns
+        std::string provider_id, model_id;
+        try {
+            auto mj = nlohmann::json::parse(si->model_json);
+            provider_id = mj.value("provider_id", "");
+            model_id    = mj.value("id", "");
+        } catch (...) {}
+
+        if (!provider_id.empty())
+            SelectProvider(provider_id);
+
+        if (!model_id.empty()) {
+            for (int32 i = 0; i < model_menu_->CountItems(); i++) {
+                BMenuItem* item = model_menu_->ItemAt(i);
+                if (item && model_id == item->Label()) {
+                    item->SetMarked(true);
+                    break;
+                }
+            }
+            default_model_ = model_id;
+        }
+    }
+
+    chat_view_->Clear();
+    _LoadHistory(active_session_id_);
+    interrupt_btn_->SetEnabled(false);
+    if (input_view_->Window()) input_view_->MakeFocus(true);
+}
+
+void
+MainWindow::_SwitchToSession(int idx)
+{
+    _SelectSession(idx);
+    suppress_next_select_ = true;
+    session_list_->Select(idx);
+}
+
+void
+MainWindow::_SubmitPrompt()
+{
+    if (active_session_id_.empty()) {
+        _NewSession();
+    }
+
+    // Get text from input
+    BString input_text = input_view_->Text();
+    input_text.Trim();
+    if (input_text.Length() == 0) return;
+
+    std::string text(input_text.String());
+    input_view_->SetText("");
+    input_view_->MakeFocus(true);
+
+    chat_view_->AppendUserText(text);
+    interrupt_btn_->SetEnabled(true);
+
+    // Submit to engine (runs on engine thread)
+    engine_->submit_prompt(active_session_id_, text);
+}
+
+void
+MainWindow::_LoadHistory(const std::string& session_id)
+{
+    auto messages = store_.load_messages(session_id);
+    for (auto& sm : messages) {
+        try {
+            json data = json::parse(sm.data_json);
+            if (sm.type == "user_prompted") {
+                std::string text = data.value("text", "");
+                if (!text.empty()) chat_view_->AppendUserText(text);
+            } else if (sm.type == "assistant_text") {
+                std::string text = data.value("text", "");
+                if (!text.empty()) {
+                    chat_view_->AppendTextDelta(text);
+                    chat_view_->EndStreaming();
+                }
+                if (data.contains("tool_calls") && data["tool_calls"].is_array()) {
+                    for (auto& tc : data["tool_calls"]) {
+                        std::string name = tc.value("name", "");
+                        std::string input_json;
+                        if (tc.contains("input")) {
+                            try { input_json = tc["input"].dump(2); } catch (...) {}
+                        }
+                        chat_view_->AppendToolCalled(name, input_json);
+                    }
+                }
+            } else if (sm.type == "tool_called") {
+                std::string tool_name  = data.value("tool_name", "");
+                std::string input_json;
+                if (data.contains("input")) {
+                    try { input_json = data["input"].dump(2); } catch (...) {}
+                }
+                chat_view_->AppendToolCalled(tool_name, input_json);
+            } else if (sm.type == "tool_result") {
+                std::string output  = data.value("output", "");
+                bool success = data.value("success", true);
+                chat_view_->AppendToolResult(output, success);
+            }
+        } catch (const std::exception&) {
+            // Skip malformed messages
+        }
+    }
+}
+
+void
+MainWindow::_HandleTextDelta(BMessage* msg)
+{
+    const char* delta = nullptr;
+    if (msg->FindString("delta", &delta) == B_OK && delta) {
+        chat_view_->AppendTextDelta(delta);
+    }
+}
+
+void
+MainWindow::_HandleToolCalled(BMessage* msg)
+{
+    const char* tool_name  = nullptr;
+    const char* input_json = nullptr;
+    msg->FindString("tool_name",  &tool_name);
+    msg->FindString("input_json", &input_json);
+    chat_view_->AppendToolCalled(tool_name  ? tool_name  : "",
+                                  input_json ? input_json : "");
+}
+
+void
+MainWindow::_HandleToolResult(BMessage* msg)
+{
+    const char* output = nullptr;
+    bool success = true;
+    msg->FindString("output",  &output);
+    msg->FindBool("success",   &success);
+    chat_view_->AppendToolResult(output ? output : "", success);
+}
+
+void
+MainWindow::_HandleStepEnded(BMessage* msg)
+{
+    chat_view_->EndStreaming();
+    interrupt_btn_->SetEnabled(false);
+
+    const char* finish_reason = nullptr;
+    msg->FindString("finish_reason", &finish_reason);
+    if (finish_reason && std::string(finish_reason) == "tool_use")
+        interrupt_btn_->SetEnabled(true);
+}
+
+void
+MainWindow::_HandleStepFailed(BMessage* msg)
+{
+    chat_view_->EndStreaming();
+    interrupt_btn_->SetEnabled(false);
+
+    const char* error = nullptr;
+    msg->FindString("error", &error);
+    std::string err_text = error ? error : "Unknown error";
+    chat_view_->AppendSystem("Error: " + err_text);
+}
+
+void
+MainWindow::_HandlePermissionReq(BMessage* msg)
+{
+    const char* action   = nullptr;
+    const char* resource = nullptr;
+    const char* detail   = nullptr;
+    void* promise_raw    = nullptr;
+
+    msg->FindString("action",   &action);
+    msg->FindString("resource", &resource);
+    msg->FindString("detail",   &detail);
+    msg->FindPointer("promise_ptr", &promise_raw);
+
+    PermissionWindow* perm_win = new PermissionWindow(
+        action   ? action   : "",
+        resource ? resource : "",
+        detail   ? detail   : "",
+        BMessenger(this),
+        promise_raw
+    );
+    perm_win->Show();
+}
+
+void
+MainWindow::PostPermissionRequest(const std::string& action,
+                                  const std::string& resource,
+                                  const std::string& detail,
+                                  void* promise_ptr)
+{
+    BMessage msg(MSG_PERMISSION_REQ);
+    msg.AddString("action",   action.c_str());
+    msg.AddString("resource", resource.c_str());
+    msg.AddString("detail",   detail.c_str());
+    msg.AddPointer("promise_ptr", promise_ptr);
+    PostMessage(&msg);
+}
