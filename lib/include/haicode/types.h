@@ -16,6 +16,15 @@ struct TokenUsage {
     int cache_write = 0;
 };
 
+// One entry in a session's todo list. `status` is one of "pending",
+// "in_progress", or "completed" — the model uses todo_write to replace
+// the whole list atomically each turn.
+struct Todo {
+    std::string content;
+    std::string active_form;
+    std::string status = "pending";
+};
+
 struct ModelRef {
     std::string id;          // e.g. "claude-opus-4-5"
     std::string provider_id; // e.g. "anthropic"

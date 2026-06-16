@@ -73,6 +73,8 @@ private:
     void _HandlePermissionReq(BMessage* msg);
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);
+    void _HandleTodosUpdated(BMessage* msg);
+    void _RefreshTodosFromEngine();
 
     void _ToggleMode();
     void _UpdateStatusStrip();
@@ -110,6 +112,11 @@ private:
     BPopUpMenu*    provider_menu_   = nullptr;
     BMenuBar*      menu_bar_        = nullptr;
     BStringView*   status_strip_    = nullptr;
+
+    // Todos side panel
+    BStringView*   todos_header_    = nullptr;
+    BListView*     todos_list_      = nullptr;
+    BScrollView*   todos_scroll_    = nullptr;
 
     // Engine state mirror for UI
     bool           engine_running_        = false;

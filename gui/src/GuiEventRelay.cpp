@@ -151,6 +151,23 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    // TodoUpdated → MSG_TODOS_UPDATED
+    // Pack the list as parallel repeated-string fields; MainWindow rebuilds.
+    bus_.subscribe(EventType::TodoUpdated, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_TODOS_UPDATED);
+        if (data.contains("todos") && data["todos"].is_array()) {
+            for (auto& t : data["todos"]) {
+                msg.AddString("todo_content", t.value("content",    "").c_str());
+                msg.AddString("todo_active", t.value("activeForm", "").c_str());
+                msg.AddString("todo_status", t.value("status",     "pending").c_str());
+            }
+        }
+        main_window_.SendMessage(&msg);
+    });
+
     // PermissionRequested → MSG_PERMISSION_REQ
     // Note: The promise_ptr is passed directly (engine thread blocks on future.get())
     // The promise is created in HaiCodeApp's permission callback and packed into the message

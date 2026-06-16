@@ -34,6 +34,7 @@ enum class EventType {
     PermissionRequested,
     PermissionGranted,
     PlanProposed,
+    TodoUpdated,
 };
 
 struct BaseEvent {

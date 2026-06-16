@@ -81,6 +81,13 @@ public:
                         const std::string& data_json);
     std::vector<SessionMessage> load_messages(const std::string& session_id);
 
+    // Atomic whole-list replace for the todo_write tool. Deletes every
+    // existing row for the session and inserts the new list in one
+    // transaction.
+    void replace_todos(const std::string& session_id,
+                       const std::vector<Todo>& todos);
+    std::vector<Todo> load_todos(const std::string& session_id);
+
 private:
     Database& db_;
     int next_seq(const std::string& session_id);

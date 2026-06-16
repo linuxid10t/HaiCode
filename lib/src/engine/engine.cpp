@@ -217,6 +217,10 @@ void SessionEngine::update_provider_model(const std::string& session_id,
     store_.update_provider_model(session_id, provider_id, model_id);
 }
 
+std::vector<Todo> SessionEngine::get_todos(const std::string& session_id) {
+    return store_.load_todos(session_id);
+}
+
 SessionMode SessionEngine::get_mode(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = session_modes_.find(session_id);
@@ -543,6 +547,43 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 bus_.publish(events::EventType::PlanProposed, ev);
                 any_proposed = true;
                 break;
+            }
+
+            // todo_write: persist the parsed list to the session_todo
+            // table and publish a TodoUpdated event so the UI can refresh.
+            // Unlike propose_plan, this does NOT end the turn — the model
+            // typically calls todo_write then continues with the first
+            // in_progress item.
+            if (call.name == "todo_write" && result.success) {
+                std::vector<Todo> todos;
+                try {
+                    auto out_j = nlohmann::json::parse(result.output, nullptr, false);
+                    if (out_j.is_object() && out_j.contains("todos")
+                        && out_j["todos"].is_array()) {
+                        for (auto& t : out_j["todos"]) {
+                            Todo td;
+                            td.content     = t.value("content", "");
+                            td.active_form = t.value("activeForm", "");
+                            td.status      = t.value("status", "pending");
+                            todos.push_back(std::move(td));
+                        }
+                    }
+                } catch (...) {}
+
+                store_.replace_todos(session_id, todos);
+
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                nlohmann::json arr = nlohmann::json::array();
+                for (auto& t : todos) {
+                    arr.push_back({
+                        {"content",    t.content},
+                        {"activeForm", t.active_form},
+                        {"status",     t.status}
+                    });
+                }
+                ev["todos"] = arr;
+                bus_.publish(events::EventType::TodoUpdated, ev);
             }
 
             if (result.denied) { any_denied = true; break; }

@@ -44,8 +44,20 @@ CREATE TABLE IF NOT EXISTS permission (
     UNIQUE(project_id, action, resource)
 );
 
+CREATE TABLE IF NOT EXISTS session_todo (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+    position     INTEGER NOT NULL,
+    content      TEXT NOT NULL,
+    active_form  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL DEFAULT 'pending',
+    time_created INTEGER NOT NULL,
+    time_updated INTEGER NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_session_updated ON session(time_updated DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_session_seq ON session_message(session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_todo_session_pos ON session_todo(session_id, position);
 )SQL";
 
 Database::Database(const std::string& path) {
@@ -395,6 +407,72 @@ std::vector<SessionMessage> SessionStore::load_messages(const std::string& sessi
     }
     sqlite3_finalize(stmt);
     return results;
+}
+
+void SessionStore::replace_todos(const std::string& session_id,
+                                 const std::vector<Todo>& todos) {
+    // Atomic whole-list replace: DELETE then INSERT each row inside one
+    // transaction. Matches the todo_write tool's whole-list semantics.
+    sqlite3_exec(db_.handle(), "BEGIN;", nullptr, nullptr, nullptr);
+
+    {
+        const char* del = "DELETE FROM session_todo WHERE session_id=?";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_.handle(), del, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    if (!todos.empty()) {
+        const char* ins =
+            "INSERT INTO session_todo"
+            " (session_id, position, content, active_form, status, time_created, time_updated)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_.handle(), ins, -1, &stmt, nullptr);
+        int64_t now = util::now_ms();
+        for (size_t i = 0; i < todos.size(); ++i) {
+            const auto& t = todos[i];
+            sqlite3_bind_text(stmt, 1, session_id.c_str(),   -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int (stmt, 2, static_cast<int>(i));
+            sqlite3_bind_text(stmt, 3, t.content.c_str(),    -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 4, t.active_form.c_str(),-1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(stmt, 5, t.status.c_str(),     -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(stmt, 6, now);
+            sqlite3_bind_int64(stmt, 7, now);
+            sqlite3_step(stmt);
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_exec(db_.handle(), "COMMIT;", nullptr, nullptr, nullptr);
+}
+
+std::vector<Todo> SessionStore::load_todos(const std::string& session_id) {
+    const char* sql =
+        "SELECT content, active_form, status"
+        " FROM session_todo WHERE session_id=? ORDER BY position ASC";
+
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), sql, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::vector<Todo> out;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        Todo t;
+        const char* c = (const char*)sqlite3_column_text(stmt, 0);
+        const char* a = (const char*)sqlite3_column_text(stmt, 1);
+        const char* s = (const char*)sqlite3_column_text(stmt, 2);
+        t.content    = c ? c : "";
+        t.active_form= a ? a : "";
+        t.status     = s ? s : "pending";
+        out.push_back(std::move(t));
+    }
+    sqlite3_finalize(stmt);
+    return out;
 }
 
 } // namespace haicode

@@ -787,6 +787,95 @@ public:
     }
 };
 
+// ---- TodoWriteTool ----
+//
+// Whole-list replace. The engine detects this tool by name and writes
+// the parsed todos to the session_todo table + publishes a TodoUpdated
+// event. The tool itself only validates and echoes the input so the
+// engine has a structured result to consume.
+
+class TodoWriteTool : public Tool {
+public:
+    std::string name() const override { return "todo_write"; }
+    std::string description() const override {
+        return "Replace the task list atomically. Use for multi-step work: "
+               "decompose the task, mark exactly one item in_progress at a "
+               "time, flip items to completed as you finish them. Send the "
+               "FULL list every call — not a delta. An empty list clears "
+               "everything.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"todos", {
+                    {"type", "array"},
+                    {"description", "Full todo list. Order is preserved as displayed."},
+                    {"items", {
+                        {"type", "object"},
+                        {"properties", {
+                            {"content",    {{"type", "string"},  {"description", "Imperative form of the task, e.g. 'Add foo.cpp'."}}},
+                            {"activeForm", {{"type", "string"},  {"description", "Present-continuous form for the spinner, e.g. 'Adding foo.cpp'."}}},
+                            {"status",     {{"type", "string"},  {"enum", {"pending", "in_progress", "completed"}}}}
+                        }},
+                        {"required", nlohmann::json::array({"content", "activeForm", "status"})}
+                    }}
+                }}
+            }},
+            {"required", nlohmann::json::array({"todos"})}
+        };
+    }
+    std::string required_permission() const override { return "todo_write"; }
+    std::string resource(const nlohmann::json& /*input*/, const ToolContext& ctx) const override {
+        return ctx.working_dir.empty() ? "." : ctx.working_dir;
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& /*ctx*/) override {
+        if (!input.contains("todos") || !input["todos"].is_array())
+            return {false, "", "todo_write: 'todos' must be an array."};
+
+        nlohmann::json echoed = nlohmann::json::array();
+        int completed = 0;
+        int in_progress = 0;
+        int idx = 0;
+        for (auto& t : input["todos"]) {
+            if (!t.is_object())
+                return {false, "", "todo_write: todos[" + std::to_string(idx)
+                                  + "] must be an object."};
+            std::string status = t.value("status", "");
+            if (status != "pending" && status != "in_progress" && status != "completed")
+                return {false, "", "todo_write: todos[" + std::to_string(idx)
+                                  + "].status must be 'pending', 'in_progress', "
+                                  "or 'completed' (got '" + status + "')."};
+            std::string content = t.value("content", "");
+            if (content.empty())
+                return {false, "", "todo_write: todos[" + std::to_string(idx)
+                                  + "].content must be non-empty."};
+
+            echoed.push_back({
+                {"content",    content},
+                {"activeForm", t.value("activeForm", "")},
+                {"status",     status}
+            });
+            if (status == "completed")   ++completed;
+            else if (status == "in_progress") ++in_progress;
+            ++idx;
+        }
+
+        nlohmann::json out = {
+            {"todos",     echoed},
+            {"count",     echoed.size()},
+            {"completed", completed}
+        };
+        // Surface a single warning line if more than one item is in_progress —
+        // the schema allows it but the spec calls for exactly one.
+        if (in_progress > 1)
+            out["warning"] = "Multiple in_progress items; the spec calls for one at a time.";
+
+        return {true, out.dump(2), ""};
+    }
+};
+
 // Registration function
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
@@ -798,6 +887,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<LsTool>());
     registry.register_tool(std::make_shared<ExternalTerminalTool>());
     registry.register_tool(std::make_shared<ProposePlanTool>());
+    registry.register_tool(std::make_shared<TodoWriteTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know
     // about HttpClient.

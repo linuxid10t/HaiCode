@@ -169,6 +169,22 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::TodoUpdated, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::TodoUpdated;
+        ev.session_id = j.value("session_id", "");
+        if (j.contains("todos") && j["todos"].is_array()) {
+            for (auto& t : j["todos"]) {
+                haicode::Todo td;
+                td.content     = t.value("content", "");
+                td.active_form = t.value("activeForm", "");
+                td.status      = t.value("status", "pending");
+                ev.todos.push_back(std::move(td));
+            }
+        }
+        push_engine_event(std::move(ev));
+    });
+
     bus_.subscribe(events::EventType::StepFailed, [this](const json& j) {
         EngineEvent ev;
         ev.kind       = EngineEventKind::StepFailed;
@@ -314,6 +330,11 @@ void TuiApp::process_engine_events() {
             plan_scroll_    = 0;
             plan_visible_   = true;
             break;
+
+        case EngineEventKind::TodoUpdated:
+            current_todos_  = ev.todos;
+            todos_scroll_   = 0;
+            break;
         }
     }
 
@@ -353,6 +374,8 @@ void TuiApp::select_session(int idx) {
     session_output_total_  = sessions_[idx].tokens.output;
     session_cost_          = sessions_[idx].cost;
     current_context_tokens_ = 0;
+    current_todos_  = engine_.get_todos(active_session_id_);
+    todos_scroll_   = 0;
 
     load_history(active_session_id_);
 
@@ -614,6 +637,38 @@ void TuiApp::handle_key(int key) {
         return;
     }
 
+    // ---------- Todos overlay ----------
+    if (todos_visible_) {
+        int visible_rows = std::max(5, rows_ - 10);
+        switch (key) {
+        case 't':
+        case 'T':
+        case 27:   // Esc
+        case 'q':
+        case 'Q':
+            todos_visible_ = false;
+            break;
+        case KEY_UP:
+        case 'k':
+            ++todos_scroll_;
+            break;
+        case KEY_DOWN:
+        case 'j':
+            todos_scroll_ = std::max(0, todos_scroll_ - 1);
+            break;
+        case KEY_PPAGE:
+            todos_scroll_ += visible_rows;
+            break;
+        case KEY_NPAGE:
+            todos_scroll_ = std::max(0, todos_scroll_ - visible_rows);
+            break;
+        default:
+            break;
+        }
+        render_all();
+        return;
+    }
+
     // ---------- Global bindings ----------
     switch (key) {
     case 3:  // Ctrl+C
@@ -630,6 +685,13 @@ void TuiApp::handle_key(int key) {
 
     case 16: // Ctrl+P — toggle Build/Plan mode
         toggle_mode();
+        render_all();
+        return;
+
+    case 't': // Toggle todos overlay
+    case 'T':
+        todos_visible_ = !todos_visible_;
+        todos_scroll_  = 0;
         render_all();
         return;
 
@@ -790,6 +852,7 @@ void TuiApp::render_all() {
     render_statusbar();
 
     if (plan_visible_)  render_plan_overlay();
+    if (todos_visible_) render_todos_overlay();
     if (perm_visible_) render_permission_overlay();
 
     // Position cursor in input window unless perm overlay is up
@@ -1006,15 +1069,33 @@ void TuiApp::render_statusbar() {
     if (session_cost_ > 0.0)
         std::snprintf(cost_buf, sizeof(cost_buf), "  $%.4f", session_cost_);
 
-    char buf[384];
+    // Todo summary: "TODO M/N: <activeForm>" when there's at least one item.
+    // Finds the (first) in_progress item to show what the model is doing now.
+    std::string todo_str;
+    if (!current_todos_.empty()) {
+        int done = 0;
+        const haicode::Todo* active = nullptr;
+        for (auto& t : current_todos_) {
+            if (t.status == "completed") ++done;
+            else if (!active && t.status == "in_progress") active = &t;
+        }
+        char tb[64];
+        std::snprintf(tb, sizeof(tb), "  TODO %d/%zu", done, current_todos_.size());
+        todo_str = tb;
+        if (active && !active->active_form.empty())
+            todo_str += ": " + active->active_form;
+    }
+
+    char buf[512];
     std::snprintf(buf, sizeof(buf),
-                  " %s model: %-20s%s last: %d/%d  total: %d%s",
+                  " %s model: %-20s%s last: %d/%d  total: %d%s%s",
                   badge.c_str(),
                   model.c_str(),
                   ctx_str.c_str(),
                   last_prompt_input_, last_prompt_output_,
                   total_tokens_,
-                  cost_buf);
+                  cost_buf,
+                  todo_str.c_str());
     std::string status(buf);
     // Pad to full width
     if ((int)status.size() < w) status.resize(w, ' ');
@@ -1129,6 +1210,63 @@ void TuiApp::render_plan_overlay() {
     ::whline(win, ACS_HLINE, box_w - 2);
     ::wattron(win, A_BOLD);
     mvwprintw(win, box_h - 1, 2, " [a] approve   [d] discard   ↑/↓ scroll ");
+    ::wattroff(win, A_BOLD);
+
+    ::wnoutrefresh(win);
+    ::delwin(win);
+}
+
+// ---------------------------------------------------------------------------
+// Todos overlay
+// ---------------------------------------------------------------------------
+
+void TuiApp::render_todos_overlay() {
+    int box_w = std::min(cols_ - 4, std::max(50, cols_ - 8));
+    int box_h = std::min(rows_ - 4, std::max(10, rows_ - 4));
+    int box_y = (rows_ - box_h) / 2;
+    int box_x = (cols_ - box_w) / 2;
+
+    WINDOW* win = ::newwin(box_h, box_w, box_y, box_x);
+    ::box(win, 0, 0);
+
+    int done = 0;
+    for (auto& t : current_todos_) if (t.status == "completed") ++done;
+
+    ::wattron(win, A_BOLD);
+    char hdr[64];
+    std::snprintf(hdr, sizeof(hdr), " Todos (%d/%zu done) ", done, current_todos_.size());
+    mvwprintw(win, 0, 2, "%s", hdr);
+    ::wattroff(win, A_BOLD);
+
+    int inner_w = box_w - 4;
+    int inner_h = box_h - 4;
+    int total = (int)current_todos_.size();
+    todos_scroll_ = std::min(todos_scroll_, std::max(0, total - inner_h));
+    int start = std::max(0, total - inner_h - todos_scroll_);
+    int end   = std::min(total, start + inner_h);
+
+    for (int i = start; i < end; ++i) {
+        int row = (i - start) + 1;
+        if (row >= inner_h + 1) break;
+        const auto& t = current_todos_[i];
+        const char* mark = "[ ]";
+        if (t.status == "completed")        mark = "[x]";
+        else if (t.status == "in_progress") mark = "[>]";
+
+        std::string line = std::string(mark) + " " + t.content;
+        if (t.status == "in_progress" && !t.active_form.empty())
+            line += "  — " + t.active_form;
+        mvwprintw(win, row, 2, "%s", truncate(line, inner_w).c_str());
+    }
+
+    if (current_todos_.empty()) {
+        mvwprintw(win, 1, 2, "(no todos)");
+    }
+
+    ::wmove(win, box_h - 2, 1);
+    ::whline(win, ACS_HLINE, box_w - 2);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, box_h - 1, 2, " [t] close   ↑/↓ scroll ");
     ::wattroff(win, A_BOLD);
 
     ::wnoutrefresh(win);

@@ -53,6 +53,10 @@ public:
                                const std::string& provider_id,
                                const std::string& model_id);
 
+    // Read the current persisted todo list for a session (used by UIs on
+    // session switch). Delegates to SessionStore::load_todos.
+    std::vector<Todo> get_todos(const std::string& session_id);
+
     const AppConfig& config() const { return config_; }
 
 private:

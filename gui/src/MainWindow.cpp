@@ -241,14 +241,27 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     .End();
     sessions_group->SetExplicitMinSize(BSize(200, B_SIZE_UNSET));
 
+    // Todos pane — third split child, mirrors the sessions pane pattern.
+    // Filled lazily from MSG_TODOS_UPDATED; header shows done/total count.
+    todos_header_ = new BStringView("todos_header", "Todos");
+    todos_list_   = new BListView("todos_list", B_SINGLE_SELECTION_LIST);
+    todos_scroll_ = new BScrollView("todos_scroll", todos_list_,
+                                    B_FOLLOW_ALL_SIDES, false, true, false);
+    auto* todos_group = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(todos_group)
+        .Add(todos_header_)
+        .Add(todos_scroll_)
+    .End();
+    todos_group->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
+
     // Menu bar sits at the top; content area below with window insets.
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
         .Add(menu_bar_)
         .AddGroup(B_HORIZONTAL, 0)
             .SetInsets(B_USE_WINDOW_INSETS)
             .AddSplit(B_HORIZONTAL, B_USE_HALF_ITEM_SPACING)
-                .Add(sessions_group, 0.25f)
-                .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.75f)
+                .Add(sessions_group, 0.20f)
+                .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.60f)
                     .Add(toolbar_group)
                     .Add(status_strip_)
                     .Add(transcript_label)
@@ -256,7 +269,9 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                     .Add(prompt_label)
                     .Add(input_group)
                 .End()
+                .Add(todos_group, 0.20f)
                 .SetCollapsible(0, true)
+                .SetCollapsible(2, true)
             .End()
         .End()
     .End();
@@ -393,6 +408,9 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_PLAN_PROPOSED:
             _HandlePlanProposed(msg);
+            break;
+        case MSG_TODOS_UPDATED:
+            _HandleTodosUpdated(msg);
             break;
         case MSG_PLAN_DECISION:
             _HandlePlanDecision(msg);
@@ -605,6 +623,7 @@ MainWindow::_NewSession()
     current_tool_name_.clear();
     _UpdateMaxContext();
     _RefreshModeButton();
+    _RefreshTodosFromEngine();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 }
@@ -680,6 +699,7 @@ MainWindow::_SelectSession(int idx)
     current_tool_name_.clear();
     _UpdateMaxContext();
     _RefreshModeButton();
+    _RefreshTodosFromEngine();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 }
@@ -941,6 +961,70 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
         engine_->set_mode(sid, haicode::SessionMode::Build);
         if (sid == active_session_id_) _RefreshModeButton();
     }
+}
+
+void
+MainWindow::_HandleTodosUpdated(BMessage* msg)
+{
+    if (!todos_list_) return;
+
+    // Empty the list. BListView owns its items, so DeleteAll frees them.
+    while (todos_list_->CountItems() > 0)
+        delete todos_list_->RemoveItem((int32)0);
+
+    int done = 0, total = 0;
+    const char* content = nullptr;
+    const char* active  = nullptr;
+    const char* status  = nullptr;
+    int32 idx = 0;
+    while (true) {
+        if (msg->FindString("todo_content", idx, &content) != B_OK) break;
+        msg->FindString("todo_active", idx, &active);
+        msg->FindString("todo_status", idx, &status);
+        std::string st = status ? status : "pending";
+        const char* mark = "[ ]";
+        if (st == "completed")             mark = "[x]";
+        else if (st == "in_progress")      mark = "[>]";
+
+        std::string label = std::string(mark) + " " + (content ? content : "");
+        if (st == "in_progress" && active && *active)
+            label += std::string("  — ") + active;
+        todos_list_->AddItem(new BStringItem(label.c_str()));
+        if (st == "completed") ++done;
+        ++total;
+        ++idx;
+    }
+
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "Todos (%d/%d done)", done, total);
+    if (todos_header_) todos_header_->SetText(hdr);
+}
+
+void
+MainWindow::_RefreshTodosFromEngine()
+{
+    if (!engine_ || active_session_id_.empty() || !todos_list_) return;
+    auto todos = engine_->get_todos(active_session_id_);
+
+    while (todos_list_->CountItems() > 0)
+        delete todos_list_->RemoveItem((int32)0);
+
+    int done = 0;
+    for (auto& t : todos) {
+        const char* mark = "[ ]";
+        if (t.status == "completed")        mark = "[x]";
+        else if (t.status == "in_progress") mark = "[>]";
+
+        std::string label = std::string(mark) + " " + t.content;
+        if (t.status == "in_progress" && !t.active_form.empty())
+            label += "  — " + t.active_form;
+        todos_list_->AddItem(new BStringItem(label.c_str()));
+        if (t.status == "completed") ++done;
+    }
+
+    char hdr[64];
+    snprintf(hdr, sizeof(hdr), "Todos (%d/%zu done)", done, todos.size());
+    if (todos_header_) todos_header_->SetText(hdr);
 }
 
 void

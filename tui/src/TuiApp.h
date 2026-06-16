@@ -50,7 +50,8 @@ enum class EngineEventKind {
     ToolResult,
     SessionsChanged,
     PermissionReq,
-    PlanProposed
+    PlanProposed,
+    TodoUpdated
 };
 
 struct EngineEvent {
@@ -63,6 +64,7 @@ struct EngineEvent {
     int int1   = 0;     // input tokens for StepEnded
     int int2   = 0;     // output tokens for StepEnded
     double dbl1 = 0.0;  // step cost (USD) for StepEnded
+    std::vector<haicode::Todo> todos;  // for TodoUpdated
     PendingPermission* perm = nullptr;
 };
 
@@ -120,6 +122,7 @@ private:
     void render_statusbar();
     void render_permission_overlay();
     void render_plan_overlay();
+    void render_todos_overlay();
     void render_thinking_indicator();
 
     // Mode toggle
@@ -187,6 +190,11 @@ private:
     int  current_context_tokens_ = 0;
     int  max_context_            = 0;
     double session_cost_         = 0.0;
+
+    // --- TodoWrite state ---
+    std::vector<haicode::Todo> current_todos_;
+    bool   todos_visible_ = false;
+    int    todos_scroll_  = 0;
 
     // --- Permission overlay ---
     bool              perm_visible_ = false;
