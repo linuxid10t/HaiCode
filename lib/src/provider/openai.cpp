@@ -189,13 +189,15 @@ public:
                         return false;
                     }
 
-                    // Usage chunk (stream_options — comes after [DONE] on some endpoints,
-                    // or as the last non-DONE chunk)
-                    if (d.contains("usage") && !d.contains("choices")) {
+                    // Usage chunk (stream_options.include_usage). Per OpenAI spec
+                    // this arrives as the final chunk with an empty choices array
+                    // ({"choices":[],"usage":{...}}); some compat endpoints also
+                    // attach usage to the last content chunk. Read it whenever present
+                    // regardless of choices, then continue normal processing below.
+                    if (d.contains("usage") && d["usage"].is_object()) {
                         auto& u = d["usage"];
                         usage.input  = u.value("prompt_tokens",     0);
-                        usage.output = u.value("completion_tokens",  0);
-                        return true;
+                        usage.output = u.value("completion_tokens", 0);
                     }
 
                     if (!d.contains("choices") || !d["choices"].is_array()
