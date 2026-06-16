@@ -15,6 +15,7 @@
 #include <haicode/haicode.h>
 #include <haicode/db.h>
 #include <haicode/config.h>
+#include <haicode/default_prompt.h>
 #include <haicode/events.h>
 #include <haicode/tool.h>
 #include <haicode/provider.h>
@@ -29,7 +30,9 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -106,6 +109,31 @@ int main(int argc, char* argv[]) {
     // ------------------------------------------------------------------
     ConfigLoader config_loader;
     AppConfig config = config_loader.load(project_dir);
+
+    // Offer to create agents.md if neither agents.md nor claude.md is present.
+    {
+        fs::path agents_md = fs::path(project_dir) / kAgentsMdFilename;
+        fs::path claude_md = fs::path(project_dir) / kClaudeMdFilename;
+        std::error_code ec;
+        if (!fs::exists(agents_md, ec) && !fs::exists(claude_md, ec)) {
+            std::cout << "No agents.md or claude.md found in " << project_dir
+                      << ". Create agents.md with a starter template? [y/N] ";
+            std::cout.flush();
+            std::string line;
+            if (!std::getline(std::cin, line)) line.clear();
+            char c = line.empty() ? 'n' : static_cast<char>(std::tolower(line[0]));
+            if (c == 'y') {
+                std::ofstream out(agents_md.string());
+                if (out.is_open()) {
+                    out << kAgentsMdStarterTemplate;
+                    out.close();
+                    config.agents_md = kAgentsMdStarterTemplate;
+                } else {
+                    std::cerr << "haicode: could not write " << agents_md.string() << "\n";
+                }
+            }
+        }
+    }
 
     // Apply sane defaults
     if (config.model.empty()) config.model = "claude-opus-4-5";

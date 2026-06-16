@@ -250,7 +250,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         }
     }
 
+    // Build the agents.md block once. Project-only; read by ConfigLoader.
+    // Placed before instructions_block so per-config instructions can add to
+    // or override what the project file says.
+    std::string agents_md_block;
+    if (!config_.agents_md.empty()) {
+        agents_md_block = "\n\n# Project instructions (agents.md)\n\n"
+                        + config_.agents_md;
+    }
+
     std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
+                       + agents_md_block
                        + instructions_block;
 
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
@@ -265,7 +275,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         // Re-render the system prompt each step so {{STEPS_LEFT}} stays current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
-                               max_steps - step) + instructions_block;
+                               max_steps - step) + agents_md_block + instructions_block;
 
         auto messages = store_.load_messages(session_id);
 

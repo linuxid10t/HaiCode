@@ -93,4 +93,27 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 - Do not echo secrets in logs or error messages.
 )HPCODE";
 
+// Lowercase filenames auto-discovered at the project root.
+// agents.md is preferred; claude.md is read as a fallback for compatibility.
+constexpr const char* kAgentsMdFilename  = "agents.md";
+constexpr const char* kClaudeMdFilename  = "claude.md";
+
+// Starter template written when the user opts in to creating agents.md.
+constexpr const char* kAgentsMdStarterTemplate = R"MD(<!-- This file is appended to HaiCode's system prompt for every session
+     in this project. Edit or delete these comments; the file is read
+     verbatim. -->
+
+# Project
+
+<!-- One-paragraph description of what this project is. -->
+
+# Build & run
+
+<!-- Commands to build, test, and run the project. -->
+
+# Conventions
+
+<!-- Style, naming, layout, or workflow rules to follow. -->
+)MD";
+
 }  // namespace haicode

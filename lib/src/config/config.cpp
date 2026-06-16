@@ -1,7 +1,10 @@
 #include <haicode/config.h>
+#include <haicode/default_prompt.h>
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <sstream>
+#include <cstdio>
+#include <sys/stat.h>
 #include <FindDirectory.h>
 #include <Path.h>
 
@@ -44,7 +47,36 @@ AppConfig ConfigLoader::load(const std::string& project_dir) {
     // Project config
     AppConfig project_cfg = load_file(project_dir + "/.haicode/config.json");
 
-    return merge(global_cfg, project_cfg);
+    AppConfig result = merge(global_cfg, project_cfg);
+
+    // Project-only: read agents.md, falling back to claude.md. If both exist,
+    // agents.md wins. Empty content is treated as absent (no block emitted by
+    // the engine). Unreadable-but-exists logs a warning.
+    std::string agents_path = project_dir + "/" + kAgentsMdFilename;
+    std::string claude_path = project_dir + "/" + kClaudeMdFilename;
+    std::string content = read_file(agents_path);
+    std::string source  = kAgentsMdFilename;
+    if (content.empty()) {
+        struct stat st;
+        if (::stat(agents_path.c_str(), &st) == 0) {
+            fprintf(stderr, "[config] warning: %s exists but could not be read\n",
+                    agents_path.c_str());
+        }
+        content = read_file(claude_path);
+        source  = kClaudeMdFilename;
+        if (content.empty()) {
+            struct stat cst;
+            if (::stat(claude_path.c_str(), &cst) == 0) {
+                fprintf(stderr, "[config] warning: %s exists but could not be read\n",
+                        claude_path.c_str());
+            }
+        }
+    }
+    if (!content.empty()) {
+        result.agents_md = content;
+        fprintf(stderr, "[config] loaded project instructions from %s\n", source.c_str());
+    }
+    return result;
 }
 
 AppConfig ConfigLoader::load_file(const std::string& path) {

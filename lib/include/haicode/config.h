@@ -43,6 +43,9 @@ struct AppConfig {
     std::map<std::string, AgentConfig> agents;
     std::vector<PermissionRule> permissions;
     std::vector<std::string> instructions;
+    // Contents of <project_dir>/agents.md (or claude.md fallback), read verbatim
+    // by ConfigLoader::load(). Project-specific only; never merged from global config.
+    std::string agents_md;
 };
 
 class ConfigLoader {
