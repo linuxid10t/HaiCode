@@ -31,8 +31,7 @@ ChatView::ChatView(const char* /*name*/)
     text_view_->SetLowColor(255, 255, 255);
 
     scroll_ = new BScrollView("chat_scroll", text_view_,
-                              B_FOLLOW_ALL, 0,
-                              false, true, B_FANCY_BORDER);
+                              0, false, true, B_FANCY_BORDER);
 }
 
 void
