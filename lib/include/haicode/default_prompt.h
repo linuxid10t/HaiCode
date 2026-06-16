@@ -51,6 +51,7 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - external_terminal: Open a command in a new Haiku Terminal window. Use this for interactive full-screen terminal programs (vim, ncurses apps, REPLs, shells) that `bash` can't run — `bash` merges stderr and reads through a pipe. Works the same whether you are using the HaiCode GUI or TUI frontend. Returns immediately; the window closes when the command exits.
 - web_search: Search the web (Mojeek by default; DuckDuckGo optional via config). Use this FIRST for any research task — it's cheap. Read the snippets before fetching.
 - web_extract: Fetch a URL and return its cleaned main-body article text. Use selectively — it's a real HTTP fetch.
+- todo_write: Replace the session's task list atomically. Each item has a `content` (imperative), `activeForm` (present-continuous, shown in the spinner), and `status` (`pending`, `in_progress`, or `completed`). Send the full list on every call — not a delta. Mark exactly one item `in_progress` at a time.
 
 # Communication
 
@@ -90,6 +91,8 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 5. If verification fails, debug the root cause rather than the symptom.
 
 If a command fails repeatedly, stop, diagnose the root cause, and reconsider the approach. Do not retry in a loop.
+
+When starting implementation after a plan has been approved (the conversation context contains a `propose_plan` result), call `todo_write` first to decompose the plan into trackable steps before writing any code.
 
 # Risky actions
 

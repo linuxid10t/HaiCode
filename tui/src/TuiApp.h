@@ -122,6 +122,7 @@ private:
     void render_statusbar();
     void render_permission_overlay();
     void render_plan_overlay();
+    void render_confirm_build_overlay();
     void render_todos_overlay();
     void render_thinking_indicator();
 
@@ -207,6 +208,7 @@ private:
     std::string  plan_path_;
     std::string  plan_session_id_;
     int          plan_scroll_ = 0;
+    bool         confirm_build_visible_ = false;
 
     // Focus: 0=sessions pane, 1=chat+input pane
     int focus_ = 1;

@@ -28,6 +28,7 @@
 #include <Entry.h>
 #include <Path.h>
 #include <StringView.h>
+#include <Alert.h>
 
 #include <haicode/engine.h>
 #include <haicode/db.h>
@@ -1069,6 +1070,18 @@ MainWindow::_ToggleMode()
 {
     if (active_session_id_.empty() || !engine_) return;
     auto current = engine_->get_mode(active_session_id_);
+
+    if (current == haicode::SessionMode::Plan) {
+        BAlert* alert = new BAlert("Switch to Build Mode",
+            "Switch from Plan mode to Build mode?\n\n"
+            "Build mode allows file edits and shell commands.",
+            "Cancel", "Switch to Build", nullptr,
+            B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+        alert->SetShortcut(0, B_ESCAPE);
+        int32 choice = alert->Go();
+        if (choice != 1) return;
+    }
+
     auto next = (current == haicode::SessionMode::Plan)
                 ? haicode::SessionMode::Build
                 : haicode::SessionMode::Plan;

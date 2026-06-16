@@ -596,6 +596,31 @@ void TuiApp::handle_key(int key) {
         return;
     }
 
+    // ---------- Confirm Plan→Build overlay ----------
+    if (confirm_build_visible_) {
+        switch (key) {
+        case 'y':
+        case 'Y':
+        case '\n':
+        case KEY_ENTER:
+            if (!active_session_id_.empty())
+                engine_.set_mode(active_session_id_, SessionMode::Build);
+            confirm_build_visible_ = false;
+            break;
+        case 'n':
+        case 'N':
+        case 27:  // Esc
+        case 'q':
+        case 'Q':
+            confirm_build_visible_ = false;
+            break;
+        default:
+            break;
+        }
+        render_all();
+        return;
+    }
+
     // ---------- Plan-review overlay ----------
     if (plan_visible_) {
         int visible_rows = std::max(5, rows_ - 10);
@@ -851,9 +876,10 @@ void TuiApp::render_all() {
     render_input();
     render_statusbar();
 
-    if (plan_visible_)  render_plan_overlay();
-    if (todos_visible_) render_todos_overlay();
-    if (perm_visible_) render_permission_overlay();
+    if (plan_visible_)           render_plan_overlay();
+    if (confirm_build_visible_)  render_confirm_build_overlay();
+    if (todos_visible_)          render_todos_overlay();
+    if (perm_visible_)           render_permission_overlay();
 
     // Position cursor in input window unless perm overlay is up
     if (!perm_visible_) {
@@ -1163,8 +1189,11 @@ void TuiApp::render_permission_overlay() {
 void TuiApp::toggle_mode() {
     if (active_session_id_.empty()) return;
     auto cur = engine_.get_mode(active_session_id_);
-    engine_.set_mode(active_session_id_,
-        cur == SessionMode::Plan ? SessionMode::Build : SessionMode::Plan);
+    if (cur == SessionMode::Plan) {
+        confirm_build_visible_ = true;
+    } else {
+        engine_.set_mode(active_session_id_, SessionMode::Plan);
+    }
 }
 
 void TuiApp::refresh_mode() {
@@ -1210,6 +1239,36 @@ void TuiApp::render_plan_overlay() {
     ::whline(win, ACS_HLINE, box_w - 2);
     ::wattron(win, A_BOLD);
     mvwprintw(win, box_h - 1, 2, " [a] approve   [d] discard   ↑/↓ scroll ");
+    ::wattroff(win, A_BOLD);
+
+    ::wnoutrefresh(win);
+    ::delwin(win);
+}
+
+void TuiApp::render_confirm_build_overlay() {
+    const char* lines[] = {
+        "Switch from Plan mode to Build mode?",
+        "",
+        "Build mode allows file edits and shell commands.",
+    };
+    constexpr int box_w = 52;
+    constexpr int box_h = 8;
+    int box_y = (rows_ - box_h) / 2;
+    int box_x = (cols_ - box_w) / 2;
+
+    WINDOW* win = ::newwin(box_h, box_w, box_y, box_x);
+    ::box(win, 0, 0);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, 0, 2, " Switch to Build Mode ");
+    ::wattroff(win, A_BOLD);
+
+    for (int i = 0; i < 3; ++i)
+        mvwprintw(win, 2 + i, 2, "%s", lines[i]);
+
+    ::wmove(win, box_h - 2, 1);
+    ::whline(win, ACS_HLINE, box_w - 2);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, box_h - 1, 2, " [y] switch   [n/Esc] cancel ");
     ::wattroff(win, A_BOLD);
 
     ::wnoutrefresh(win);
