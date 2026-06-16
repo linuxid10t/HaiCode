@@ -152,6 +152,22 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             }
         }
 
+        // Per-model token-price overrides:
+        // {"pricing": {"anthropic:claude-sonnet-4": {"input": 3.0, "output": 15.0,
+        //   "cache_read": 0.30, "cache_write": 3.75}}}
+        // All values USD per 1M tokens. Unspecified fields default to 0.
+        if (j.contains("pricing") && j["pricing"].is_object()) {
+            for (auto& [k, v] : j["pricing"].items()) {
+                if (!v.is_object()) continue;
+                ModelPricing p;
+                p.input       = v.value("input",       0.0);
+                p.output      = v.value("output",      0.0);
+                p.cache_read  = v.value("cache_read",  0.0);
+                p.cache_write = v.value("cache_write", 0.0);
+                cfg.pricing[k] = p;
+            }
+        }
+
         // web_search tool config: {"web_search": {"engine": "mojeek", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
@@ -190,6 +206,8 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.instructions.push_back(s);
     for (auto& [k, v] : overlay.model_contexts)
         result.model_contexts[k] = v;
+    for (auto& [k, v] : overlay.pricing)
+        result.pricing[k] = v;
     if (!overlay.web_search_engine.empty())
         result.web_search_engine = overlay.web_search_engine;
     if (overlay.web_search_max_results > 0)

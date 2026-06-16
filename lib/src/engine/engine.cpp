@@ -1,6 +1,7 @@
 #include <haicode/engine.h>
 #include <haicode/util.h>
 #include <haicode/default_prompt.h>
+#include <haicode/pricing.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <sys/utsname.h>
@@ -452,8 +453,14 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             store_.append_message(session_id, "assistant_text", data.dump());
         }
 
+        // Compute per-turn cost from token usage and resolved pricing.
+        // Unknown models fall back to 0.0 — silent, no warning.
+        const ModelPricing* price = lookup_pricing(provider_id, model_id,
+                                                    config_.pricing);
+        double step_cost = price ? compute_cost(usage, *price) : 0.0;
+
         // Update cost
-        store_.update_cost(session_id, 0.0, usage);
+        store_.update_cost(session_id, step_cost, usage);
 
         // Publish step ended
         {
@@ -466,7 +473,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 {"output",      usage.output},
                 {"reasoning",   usage.reasoning},
                 {"cache_read",  usage.cache_read},
-                {"cache_write", usage.cache_write}
+                {"cache_write", usage.cache_write},
+                {"cost_usd",    step_cost}
             };
             bus_.publish(events::EventType::StepEnded, ev);
         }

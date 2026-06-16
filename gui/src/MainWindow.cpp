@@ -599,6 +599,7 @@ MainWindow::_NewSession()
     session_input_total_ = 0;
     session_output_total_ = 0;
     current_context_tokens_ = 0;
+    session_cost_ = 0.0;
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
@@ -673,6 +674,7 @@ MainWindow::_SelectSession(int idx)
     session_input_total_ = 0;
     session_output_total_ = 0;
     current_context_tokens_ = 0;
+    session_cost_ = 0.0;
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
@@ -828,10 +830,13 @@ MainWindow::_HandleStepEnded(BMessage* msg)
     int32 in_tok = 0, out_tok = 0;
     msg->FindInt32("usage_input",  &in_tok);
     msg->FindInt32("usage_output", &out_tok);
+    double step_cost = 0.0;
+    msg->FindDouble("cost_usd", &step_cost);
     last_prompt_input_   += in_tok;
     last_prompt_output_  += out_tok;
     session_input_total_ += in_tok;
     session_output_total_+= out_tok;
+    session_cost_        += step_cost;
     // The input side reflects the full conversation size as the provider saw
     // it on this step — that's our best estimate of current context usage.
     if (in_tok > 0) current_context_tokens_ = in_tok;
@@ -967,6 +972,13 @@ static std::string format_tokens(int n)
     return buf;
 }
 
+static std::string format_cost(double usd)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "$%.4f", usd);
+    return buf;
+}
+
 void
 MainWindow::_UpdateStatusStrip()
 {
@@ -1004,6 +1016,8 @@ MainWindow::_UpdateStatusStrip()
            + " \xe2\x86\x93" + format_tokens(last_prompt_output_)
            + "   session: \xe2\x86\x91" + format_tokens(session_input_total_)
            + " \xe2\x86\x93" + format_tokens(session_output_total_);
+        if (session_cost_ > 0.0)
+            s += "  " + format_cost(session_cost_);
     }
     if (current_context_tokens_ > 0) {
         s += "   context: " + format_tokens(current_context_tokens_);

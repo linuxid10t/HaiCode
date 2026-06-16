@@ -155,6 +155,7 @@ void TuiApp::subscribe_events() {
         if (j.contains("usage") && j["usage"].is_object()) {
             ev.int1 = j["usage"].value("input", 0);
             ev.int2 = j["usage"].value("output", 0);
+            ev.dbl1 = j["usage"].value("cost_usd", 0.0);
         }
         push_engine_event(std::move(ev));
     });
@@ -269,6 +270,7 @@ void TuiApp::process_engine_events() {
             last_prompt_output_  += ev.int2;
             session_input_total_ += ev.int1;
             session_output_total_+= ev.int2;
+            session_cost_        += ev.dbl1;
             total_tokens_        += ev.int1 + ev.int2;
             if (ev.int1 > 0) current_context_tokens_ = ev.int1;
             end_streaming();
@@ -349,6 +351,7 @@ void TuiApp::select_session(int idx) {
     last_prompt_output_ = 0;
     session_input_total_   = sessions_[idx].tokens.input;
     session_output_total_  = sessions_[idx].tokens.output;
+    session_cost_          = sessions_[idx].cost;
     current_context_tokens_ = 0;
 
     load_history(active_session_id_);
@@ -999,14 +1002,19 @@ void TuiApp::render_statusbar() {
         }
     }
 
+    char cost_buf[24] = "";
+    if (session_cost_ > 0.0)
+        std::snprintf(cost_buf, sizeof(cost_buf), "  $%.4f", session_cost_);
+
     char buf[384];
     std::snprintf(buf, sizeof(buf),
-                  " %s model: %-20s%s last: %d/%d  total: %d",
+                  " %s model: %-20s%s last: %d/%d  total: %d%s",
                   badge.c_str(),
                   model.c_str(),
                   ctx_str.c_str(),
                   last_prompt_input_, last_prompt_output_,
-                  total_tokens_);
+                  total_tokens_,
+                  cost_buf);
     std::string status(buf);
     // Pad to full width
     if ((int)status.size() < w) status.resize(w, ' ');

@@ -123,4 +123,5 @@ private:
     int            session_output_total_  = 0;
     int            current_context_tokens_ = 0;
     int            max_context_           = 0;
+    double         session_cost_          = 0.0;
 };

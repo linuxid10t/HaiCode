@@ -9,6 +9,7 @@ file(GLOB_RECURSE HAICODE_SOURCES
     "src/provider/*.cpp"
     "src/tool/*.cpp"
     "src/permission/*.cpp"
+    "src/pricing/*.cpp"
     "src/util/*.cpp"
 )
 

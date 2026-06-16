@@ -1,5 +1,6 @@
 #pragma once
 #include "types.h"
+#include "pricing.h"
 #include <string>
 #include <map>
 #include <vector>
@@ -51,6 +52,11 @@ struct AppConfig {
     // populated from the top-level "models" object in config.json. Used by
     // get_context_window() as a hard override on top of the hardcoded prefix table.
     std::map<std::string, int> model_contexts;
+    // Per-model token-price overrides (USD per 1M tokens), keyed
+    // "provider_id:model_id" or "provider_id:model-prefix". Overlays the
+    // built-in defaults in lib/src/pricing/pricing.cpp. Populated from the
+    // top-level "pricing" object in config.json.
+    std::map<std::string, ModelPricing> pricing;
     // web_search tool config. engine = "mojeek" (default), "ddg_lite", or "ddg_html".
     // Mojeek is the default because DuckDuckGo's lite/html endpoints now serve a
     // CAPTCHA "anomaly" page to most non-browser clients.

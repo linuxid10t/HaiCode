@@ -103,14 +103,17 @@ GuiEventRelay::attach()
         std::string finish_reason = data.value("finish_reason", "");
         int32 input_tokens  = 0;
         int32 output_tokens = 0;
+        double cost_usd = 0.0;
         if (data.contains("usage") && data["usage"].is_object()) {
             input_tokens  = data["usage"].value("input",  0);
             output_tokens = data["usage"].value("output", 0);
+            cost_usd      = data["usage"].value("cost_usd", 0.0);
         }
         BMessage msg(MSG_STEP_ENDED);
         msg.AddString("finish_reason", finish_reason.c_str());
         msg.AddInt32("usage_input",  input_tokens);
         msg.AddInt32("usage_output", output_tokens);
+        msg.AddDouble("cost_usd",    cost_usd);
         main_window_.SendMessage(&msg);
     });
 

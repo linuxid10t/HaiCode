@@ -62,6 +62,7 @@ struct EngineEvent {
     bool bool1 = false; // success flag for tool results
     int int1   = 0;     // input tokens for StepEnded
     int int2   = 0;     // output tokens for StepEnded
+    double dbl1 = 0.0;  // step cost (USD) for StepEnded
     PendingPermission* perm = nullptr;
 };
 
@@ -185,6 +186,7 @@ private:
     int  session_output_total_  = 0;
     int  current_context_tokens_ = 0;
     int  max_context_            = 0;
+    double session_cost_         = 0.0;
 
     // --- Permission overlay ---
     bool              perm_visible_ = false;
