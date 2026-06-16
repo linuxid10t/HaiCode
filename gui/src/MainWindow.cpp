@@ -407,7 +407,10 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_FETCH_MODELS: {
             // Provider changed (or initial fetch). The menu item carries its
             // own provider_id in the message — read it directly so we don't
-            // race with menu-mark timing.
+            // race with menu-mark timing. Don't touch the provider menu's mark
+            // state here: when the user clicked an item, radio mode already
+            // moved the mark, and re-marking from outside the invocation
+            // confuses the BMenuField display.
             const char* pid_str = nullptr;
             std::string pid;
             if (msg->FindString("provider_id", &pid_str) == B_OK && pid_str) {
@@ -418,10 +421,6 @@ MainWindow::MessageReceived(BMessage* msg)
                       ? "openai" : "anthropic";
             }
             default_provider_ = (pid == "openai") ? "openai" : "anthropic";
-            // Keep the menu's marked item in sync with default_provider_ in
-            // case the message originated from outside the menu (e.g. the
-            // startup fetch posted by HaiCodeApp).
-            SelectProvider(default_provider_);
 
             // Immediately reset the model dropdown so the user isn't shown the
             // previous provider's models with a stale mark while the fetch is
