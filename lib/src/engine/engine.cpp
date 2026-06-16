@@ -194,6 +194,25 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     }
 }
 
+void SessionEngine::continue_session(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    bool running = session_running_.count(session_id) && session_running_[session_id];
+    if (!running) {
+        auto th_it = runner_threads_.find(session_id);
+        if (th_it != runner_threads_.end() && th_it->second.joinable())
+            th_it->second.join();
+        if (interrupt_flags_.count(session_id))
+            delete interrupt_flags_[session_id];
+        interrupt_flags_[session_id] = new std::atomic<bool>(false);
+        session_running_[session_id] = true;
+        runner_threads_[session_id] = std::thread([this, session_id]() {
+            agentic_loop(session_id);
+            std::lock_guard<std::mutex> g(mu_);
+            session_running_[session_id] = false;
+        });
+    }
+}
+
 void SessionEngine::interrupt(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = interrupt_flags_.find(session_id);
@@ -224,9 +243,19 @@ std::vector<Todo> SessionEngine::get_todos(const std::string& session_id) {
 }
 
 SessionMode SessionEngine::get_mode(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = session_modes_.find(session_id);
-    if (it != session_modes_.end()) return it->second;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = session_modes_.find(session_id);
+        if (it != session_modes_.end()) return it->second;
+    }
+    // Not in memory (no prompt submitted yet this run): read from DB.
+    if (auto si = store_.get(session_id)) {
+        try {
+            auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
+            return mj.value("mode", "build") == "plan"
+                ? SessionMode::Plan : SessionMode::Build;
+        } catch (...) {}
+    }
     return SessionMode::Build;
 }
 

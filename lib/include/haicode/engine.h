@@ -41,6 +41,8 @@ public:
                                 const std::string& provider_id = "");
 
     void submit_prompt(const std::string& session_id, const std::string& text);
+    // Resume the agentic loop without adding a new user message (used after plan approval).
+    void continue_session(const std::string& session_id);
     void interrupt(const std::string& session_id);
 
     // Per-session Plan/Build mode. Persisted into model_json so it survives

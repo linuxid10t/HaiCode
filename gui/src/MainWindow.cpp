@@ -243,16 +243,17 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // Todos pane — third split child, mirrors the sessions pane pattern.
     // Filled lazily from MSG_TODOS_UPDATED; header shows done/total count.
+    // Hidden initially; shown when the first todo is added.
     todos_header_ = new BStringView("todos_header", "Todos");
     todos_list_   = new BListView("todos_list", B_SINGLE_SELECTION_LIST);
     todos_scroll_ = new BScrollView("todos_scroll", todos_list_,
-                                    B_FOLLOW_ALL_SIDES, false, true, false);
-    auto* todos_group = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
-    BLayoutBuilder::Group<>(todos_group)
+                                    0, false, true, B_FANCY_BORDER);
+    todos_group_ = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(todos_group_)
         .Add(todos_header_)
         .Add(todos_scroll_)
     .End();
-    todos_group->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
+    todos_group_->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
 
     // Menu bar sits at the top; content area below with window insets.
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -269,12 +270,15 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                     .Add(prompt_label)
                     .Add(input_group)
                 .End()
-                .Add(todos_group, 0.20f)
+                .Add(todos_group_, 0.20f)
                 .SetCollapsible(0, true)
                 .SetCollapsible(2, true)
             .End()
         .End()
     .End();
+
+    // Todos pane starts hidden — shown only when todos exist.
+    todos_group_->Hide();
 
     // Populate session list and open/create initial session
     _RefreshSessionList();
@@ -959,16 +963,28 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
 
     if (approved && !sid.empty() && engine_) {
         engine_->set_mode(sid, haicode::SessionMode::Build);
-        if (sid == active_session_id_) _RefreshModeButton();
+        if (sid == active_session_id_) {
+            _RefreshModeButton();
+            _UpdateStatusStrip();
+            chat_view_->AppendSystem("Plan approved \xe2\x80\x94 switching to Build mode.");
+            interrupt_btn_->SetEnabled(true);
+            engine_running_ = true;
+            streaming_state_ = "thinking";
+            current_tool_name_.clear();
+            _UpdateStatusStrip();
+            engine_->continue_session(sid);
+        }
     }
 }
 
 void
 MainWindow::_HandleTodosUpdated(BMessage* msg)
 {
-    if (!todos_list_) return;
+    if (!todos_list_) {
+        fprintf(stderr, "[todos] _HandleTodosUpdated: no todos_list_\n");
+        return;
+    }
 
-    // Empty the list. BListView owns its items, so DeleteAll frees them.
     while (todos_list_->CountItems() > 0)
         delete todos_list_->RemoveItem((int32)0);
 
@@ -990,14 +1006,22 @@ MainWindow::_HandleTodosUpdated(BMessage* msg)
         if (st == "in_progress" && active && *active)
             label += std::string("  — ") + active;
         todos_list_->AddItem(new BStringItem(label.c_str()));
+        fprintf(stderr, "[todos] added item %d: '%s'\n", (int)idx, label.c_str());
         if (st == "completed") ++done;
         ++total;
         ++idx;
     }
+    fprintf(stderr, "[todos] _HandleTodosUpdated total=%zu items, list now has %zu items\n",
+            (size_t)total, (size_t)todos_list_->CountItems());
 
     char hdr[64];
     snprintf(hdr, sizeof(hdr), "Todos (%d/%d done)", done, total);
     if (todos_header_) todos_header_->SetText(hdr);
+
+    if (todos_group_) {
+        if (total == 0 && !todos_group_->IsHidden()) todos_group_->Hide();
+        else if (total > 0 && todos_group_->IsHidden())  todos_group_->Show();
+    }
 }
 
 void
@@ -1025,6 +1049,11 @@ MainWindow::_RefreshTodosFromEngine()
     char hdr[64];
     snprintf(hdr, sizeof(hdr), "Todos (%d/%zu done)", done, todos.size());
     if (todos_header_) todos_header_->SetText(hdr);
+
+    if (todos_group_) {
+        if (todos.empty() && !todos_group_->IsHidden()) todos_group_->Hide();
+        else if (!todos.empty() && todos_group_->IsHidden()) todos_group_->Show();
+    }
 }
 
 void

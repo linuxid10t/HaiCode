@@ -9,6 +9,7 @@
 #include <PopUpMenu.h>
 #include <TextView.h>
 #include <StringView.h>
+#include <GroupView.h>
 #include <Messenger.h>
 #include <FilePanel.h>
 
@@ -114,6 +115,7 @@ private:
     BStringView*   status_strip_    = nullptr;
 
     // Todos side panel
+    BGroupView*    todos_group_     = nullptr;
     BStringView*   todos_header_    = nullptr;
     BListView*     todos_list_      = nullptr;
     BScrollView*   todos_scroll_    = nullptr;
