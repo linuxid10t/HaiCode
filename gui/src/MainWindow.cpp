@@ -155,12 +155,18 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     std::string dir_label = dir_basename(project_dir_);
     dir_btn_ = new BButton("dir_btn", dir_label.c_str(), new BMessage(MSG_CHOOSE_DIR));
 
-    // Provider selector — user picks endpoint type; model list is fetched dynamically
+    // Provider selector — user picks endpoint type; model list is fetched dynamically.
+    // Each item carries its own provider_id in the message so the handler doesn't
+    // have to infer it from menu state (which can lag behind message dispatch).
     provider_menu_ = new BPopUpMenu("Anthropic");
-    auto* ap_item = new BMenuItem("Anthropic", new BMessage(MSG_FETCH_MODELS));
+    BMessage* anthropic_msg = new BMessage(MSG_FETCH_MODELS);
+    anthropic_msg->AddString("provider_id", "anthropic");
+    auto* ap_item = new BMenuItem("Anthropic", anthropic_msg);
     ap_item->SetMarked(true);
     provider_menu_->AddItem(ap_item);
-    provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS)));
+    BMessage* openai_msg = new BMessage(MSG_FETCH_MODELS);
+    openai_msg->AddString("provider_id", "openai");
+    provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", openai_msg));
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
 
     // Model list — starts empty; populated after MSG_MODELS_LOADED.
@@ -280,7 +286,8 @@ MainWindow::QuitRequested()
 void
 MainWindow::SelectProvider(const std::string& provider_id)
 {
-    bool want_openai = (provider_id == "openai");
+    default_provider_ = (provider_id == "openai") ? "openai" : "anthropic";
+    bool want_openai = (default_provider_ == "openai");
     for (int32 i = 0; i < provider_menu_->CountItems(); i++) {
         BMenuItem* item = provider_menu_->ItemAt(i);
         bool is_openai = std::string(item->Label()) == "OpenAI / compatible";
@@ -335,8 +342,8 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_SELECT_SESSION: {
-            if (suppress_next_select_) {
-                suppress_next_select_ = false;
+            if (suppress_next_select_ > 0) {
+                --suppress_next_select_;
                 break;
             }
             int32 idx = -1;
@@ -398,10 +405,23 @@ MainWindow::MessageReceived(BMessage* msg)
             be_app->PostMessage(msg);
             break;
         case MSG_FETCH_MODELS: {
-            // User changed provider dropdown — forward to app with selected provider id
-            BMenuItem* marked = provider_menu_->FindMarked();
-            std::string pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
-                              ? "openai" : "anthropic";
+            // Provider changed (or initial fetch). The menu item carries its
+            // own provider_id in the message — read it directly so we don't
+            // race with menu-mark timing.
+            const char* pid_str = nullptr;
+            std::string pid;
+            if (msg->FindString("provider_id", &pid_str) == B_OK && pid_str) {
+                pid = pid_str;
+            } else {
+                BMenuItem* marked = provider_menu_->FindMarked();
+                pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
+                      ? "openai" : "anthropic";
+            }
+            default_provider_ = (pid == "openai") ? "openai" : "anthropic";
+            // Keep the menu's marked item in sync with default_provider_ in
+            // case the message originated from outside the menu (e.g. the
+            // startup fetch posted by HaiCodeApp).
+            SelectProvider(default_provider_);
 
             // Immediately reset the model dropdown so the user isn't shown the
             // previous provider's models with a stale mark while the fetch is
@@ -416,7 +436,7 @@ MainWindow::MessageReceived(BMessage* msg)
             model_menu_->AddItem(loading_item);
 
             BMessage fwd(MSG_FETCH_MODELS);
-            fwd.AddString("provider_id", pid.c_str());
+            fwd.AddString("provider_id", default_provider_.c_str());
             be_app->PostMessage(&fwd);
             break;
         }
@@ -536,22 +556,15 @@ MainWindow::_RefreshSessionList()
     }
 }
 
-static std::string selected_provider_id(BPopUpMenu* menu)
-{
-    BMenuItem* marked = menu->FindMarked();
-    if (marked && std::string(marked->Label()) == "OpenAI / compatible")
-        return "openai";
-    return "anthropic";
-}
-
 void
 MainWindow::_NewSession()
 {
-    // default_model_ is the single source of truth — kept in sync with the
-    // dropdown's marked item via MSG_MODEL_SELECTED / MSG_MODELS_LOADED /
-    // _SelectSession. Reading FindMarked() here would race with repopulation.
+    // default_model_ / default_provider_ are the single sources of truth — kept
+    // in sync with the dropdowns via MSG_MODEL_SELECTED / MSG_FETCH_MODELS /
+    // MSG_MODELS_LOADED / _SelectSession. Reading FindMarked() here would race
+    // with repopulation and menu-mark timing.
     std::string model = default_model_;
-    std::string provider = selected_provider_id(provider_menu_);
+    std::string provider = default_provider_;
     std::string sid = engine_->create_session(project_dir_, "", model, provider);
     active_session_id_ = sid;
 
@@ -560,11 +573,14 @@ MainWindow::_NewSession()
     notify.AddString("session_id", sid.c_str());
     be_app->PostMessage(&notify);
 
-    // Refresh list and select new item
+    // Refresh list and select new item. BListView may emit 1 or 2 selection
+    // notifications on Select() (deselect previous + select new) — bump the
+    // suppress counter high enough to swallow all of them so a stray
+    // MSG_SELECT_SESSION doesn't run _SelectSession on the wrong session.
     _RefreshSessionList();
     for (int i = 0; i < (int)session_ids_.size(); ++i) {
         if (session_ids_[i] == sid) {
-            suppress_next_select_ = true;
+            suppress_next_select_ = 2;
             session_list_->Select(i);
             break;
         }
@@ -665,7 +681,8 @@ void
 MainWindow::_SwitchToSession(int idx)
 {
     _SelectSession(idx);
-    suppress_next_select_ = true;
+    // See _NewSession: Select() may emit multiple notifications.
+    suppress_next_select_ = 2;
     session_list_->Select(idx);
 }
 
@@ -1002,15 +1019,8 @@ void
 MainWindow::_UpdateMaxContext()
 {
     if (!engine_) { max_context_ = 0; return; }
-    // default_model_ is the source of truth — see _NewSession.
-    const std::string& model_id = default_model_;
-
-    std::string provider_id = "anthropic";
-    BMenuItem* pm = provider_menu_ ? provider_menu_->FindMarked() : nullptr;
-    if (pm && std::string(pm->Label()) == "OpenAI / compatible")
-        provider_id = "openai";
-
-    max_context_ = haicode::get_context_window(provider_id, model_id,
+    // default_model_ / default_provider_ are the sources of truth — see _NewSession.
+    max_context_ = haicode::get_context_window(default_provider_, default_model_,
                                                engine_->config().model_contexts);
     _UpdateStatusStrip();
 }

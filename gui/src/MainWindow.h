@@ -83,11 +83,12 @@ private:
     haicode::SessionStore&  store_;
     std::string             project_dir_;
     std::string             default_model_;
+    std::string             default_provider_ = "anthropic";
     std::string             active_session_id_;
 
     // Session list (parallel to UI list)
     std::vector<std::string> session_ids_;  // indexed to match BListView
-    bool suppress_next_select_ = false;     // suppress MSG_SELECT_SESSION from programmatic Select()
+    int suppress_next_select_ = 0;     // suppress MSG_SELECT_SESSION from programmatic Select() — counter because Select() may fire multiple notifications
 
     // UI widgets (owned by BLooper)
     BListView*     session_list_    = nullptr;
