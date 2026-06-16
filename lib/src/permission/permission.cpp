@@ -149,15 +149,35 @@ ToolResult ToolRegistry::execute(const std::string& name,
         return r;
     }
 
-    // Reads inside the working directory are always allowed — no prompt, no
-    // rule lookup. The user has implicitly trusted the project tree by
-    // opening it. Reads outside the working dir still go through the gate.
-    if (name == "read" && !ctx.working_dir.empty()) {
-        std::string resource = tool->resource(input, ctx);
-        if (is_path_within(resource, ctx.working_dir)) {
-            return tool->execute(input, ctx);
+    // Read-only tools inside the working directory are always allowed — no
+    // prompt, no rule lookup. The user has implicitly trusted the project
+    // tree by opening it. Operations outside the working dir still go
+    // through the gate.
+    if (!ctx.working_dir.empty()) {
+        // read, ls, grep: resource() returns a resolved absolute path.
+        if (name == "read" || name == "ls" || name == "grep") {
+            if (is_path_within(tool->resource(input, ctx), ctx.working_dir))
+                return tool->execute(input, ctx);
+        }
+        // glob: resource() returns the raw pattern. Relative patterns always
+        // expand under working_dir. For absolute patterns, extract the
+        // literal prefix before any wildcard and verify it's inside the tree.
+        if (name == "glob") {
+            std::string pattern = input.value("pattern", "");
+            if (pattern.empty() || pattern[0] != '/') {
+                return tool->execute(input, ctx);
+            }
+            size_t wild = pattern.find_first_of("*?[");
+            std::string prefix = (wild == std::string::npos)
+                                    ? pattern
+                                    : pattern.substr(0, wild);
+            if (is_path_within(normalize_path(prefix), ctx.working_dir))
+                return tool->execute(input, ctx);
         }
     }
+    // Web tools have no filesystem side effects — always allow.
+    if (name == "web_search" || name == "web_extract")
+        return tool->execute(input, ctx);
 
     auto perm = gate.check(tool->required_permission(),
                            tool->resource(input, ctx),
