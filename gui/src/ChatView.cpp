@@ -29,9 +29,12 @@ ChatView::ChatView(const char* /*name*/)
     text_view_->SetStylable(true);
     text_view_->SetViewColor(255, 255, 255);
     text_view_->SetLowColor(255, 255, 255);
+    text_view_->SetExplicitMinSize(BSize(B_SIZE_UNSET, B_SIZE_UNSET));
+    text_view_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
     scroll_ = new BScrollView("chat_scroll", text_view_,
                               0, false, true, B_FANCY_BORDER);
+    scroll_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 }
 
 void

@@ -188,6 +188,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     session_list_ = new SessionListView();
     session_scroll_ = new BScrollView("session_scroll", session_list_,
                                       0, false, true, B_FANCY_BORDER);
+    session_scroll_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
     // ---- ChatView ----
     chat_view_ = new ChatView("chat_view");
@@ -218,8 +219,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(provider_field_)
         .Add(model_field_)
         .Add(mode_btn_)
-        .AddGlue()
         .Add(interrupt_btn_)
+        .AddGlue()
     .End();
 
     // Input group (label + text + send button)
@@ -232,6 +233,9 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     auto* sessions_label   = new BStringView("sessions_label",   "Sessions");
     auto* transcript_label = new BStringView("transcript_label", "Conversation");
     auto* prompt_label     = new BStringView("prompt_label",     "Prompt");
+    sessions_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    transcript_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    prompt_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 
     // Sessions pane — built separately so we can enforce a minimum width.
     auto* sessions_group = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
@@ -240,11 +244,13 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(session_scroll_)
     .End();
     sessions_group->SetExplicitMinSize(BSize(200, B_SIZE_UNSET));
+    sessions_group->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
     // Todos pane — third split child, mirrors the sessions pane pattern.
     // Filled lazily from MSG_TODOS_UPDATED; header shows done/total count.
     // Hidden initially; shown when the first todo is added.
     todos_header_ = new BStringView("todos_header", "Todos");
+    todos_header_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     todos_list_   = new BListView("todos_list", B_SINGLE_SELECTION_LIST);
     todos_scroll_ = new BScrollView("todos_scroll", todos_list_,
                                     0, false, true, B_FANCY_BORDER);
@@ -254,6 +260,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(todos_scroll_)
     .End();
     todos_group_->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
+    todos_group_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
     // Menu bar sits at the top; content area below with window insets.
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -279,6 +286,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // Todos pane starts hidden — shown only when todos exist.
     todos_group_->Hide();
+
 
     // Populate session list and open/create initial session
     _RefreshSessionList();
