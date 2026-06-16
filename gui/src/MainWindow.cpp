@@ -155,20 +155,12 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     std::string dir_label = dir_basename(project_dir_);
     dir_btn_ = new BButton("dir_btn", dir_label.c_str(), new BMessage(MSG_CHOOSE_DIR));
 
-    // Provider selector — user picks endpoint type; model list is fetched dynamically.
-    // Each item carries its own provider_id in the message so the handler doesn't
-    // have to infer it from menu state (which can lag behind message dispatch).
+    // Provider selector — user picks endpoint type; model list is fetched dynamically
     provider_menu_ = new BPopUpMenu("Anthropic");
-    provider_menu_->SetRadioMode(true);
-    provider_menu_->SetLabelFromMarked(true);
-    BMessage* anthropic_msg = new BMessage(MSG_FETCH_MODELS);
-    anthropic_msg->AddString("provider_id", "anthropic");
-    auto* ap_item = new BMenuItem("Anthropic", anthropic_msg);
+    auto* ap_item = new BMenuItem("Anthropic", new BMessage(MSG_FETCH_MODELS));
     ap_item->SetMarked(true);
     provider_menu_->AddItem(ap_item);
-    BMessage* openai_msg = new BMessage(MSG_FETCH_MODELS);
-    openai_msg->AddString("provider_id", "openai");
-    provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", openai_msg));
+    provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS)));
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
 
     // Model list — starts empty; populated after MSG_MODELS_LOADED.
@@ -407,20 +399,17 @@ MainWindow::MessageReceived(BMessage* msg)
             be_app->PostMessage(msg);
             break;
         case MSG_FETCH_MODELS: {
-            // Provider changed (or initial fetch). The menu item carries its
-            // own provider_id in the message — read it directly so we don't
-            // race with menu-mark timing. Don't touch the provider menu's mark
-            // state here: when the user clicked an item, radio mode already
-            // moved the mark, and re-marking from outside the invocation
-            // confuses the BMenuField display.
+            // Provider changed (or initial fetch from be_app/HaiCodeApp).
+            // Read the marked item from the menu — radio mode moves the mark
+            // on click before this handler runs.
+            BMenuItem* marked = provider_menu_->FindMarked();
+            std::string pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
+                              ? "openai" : "anthropic";
+            // If the message came from outside the menu (e.g. settings save or
+            // startup), it carries provider_id explicitly — prefer that.
             const char* pid_str = nullptr;
-            std::string pid;
             if (msg->FindString("provider_id", &pid_str) == B_OK && pid_str) {
                 pid = pid_str;
-            } else {
-                BMenuItem* marked = provider_menu_->FindMarked();
-                pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
-                      ? "openai" : "anthropic";
             }
             default_provider_ = (pid == "openai") ? "openai" : "anthropic";
 
