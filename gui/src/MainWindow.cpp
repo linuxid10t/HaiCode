@@ -159,6 +159,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // Each item carries its own provider_id in the message so the handler doesn't
     // have to infer it from menu state (which can lag behind message dispatch).
     provider_menu_ = new BPopUpMenu("Anthropic");
+    provider_menu_->SetRadioMode(true);
+    provider_menu_->SetLabelFromMarked(true);
     BMessage* anthropic_msg = new BMessage(MSG_FETCH_MODELS);
     anthropic_msg->AddString("provider_id", "anthropic");
     auto* ap_item = new BMenuItem("Anthropic", anthropic_msg);
