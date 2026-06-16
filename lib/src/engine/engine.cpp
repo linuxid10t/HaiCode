@@ -331,6 +331,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     if (!config_.agents_md.empty()) {
         agents_md_block = "\n\n# Project instructions (agents.md)\n\n"
                         + config_.agents_md;
+    } else {
+        agents_md_block = "\n\n# Project instructions\n\n"
+            "No agents.md found for this project. If the user asks you to set "
+            "up project instructions, or if you think a persistent record of "
+            "build commands and conventions would help, use the "
+            "`write_agents_md` tool to create one. It will be appended to "
+            "your system prompt for every future session in this project.";
     }
 
     // Plan-mode block: appended only when the session is in Plan mode. Tells

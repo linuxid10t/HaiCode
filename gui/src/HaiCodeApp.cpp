@@ -34,30 +34,7 @@
 
 #include <unistd.h>
 
-namespace {
 
-bool project_instructions_exist(const std::string& dir) {
-    struct stat st;
-    if (::stat((dir + "/" + haicode::kAgentsMdFilename).c_str(), &st) == 0) return true;
-    if (::stat((dir + "/" + haicode::kClaudeMdFilename).c_str(), &st) == 0) return true;
-    return false;
-}
-
-bool write_agents_md_template(const std::string& dir) {
-    std::ofstream f(dir + "/" + haicode::kAgentsMdFilename);
-    if (!f.is_open()) return false;
-    f << haicode::kAgentsMdStarterTemplate;
-    return f.good();
-}
-
-bool project_has_sessions(haicode::SessionStore& store, const std::string& dir) {
-    for (auto& s : store.list()) {
-        if (s.directory == dir) return true;
-    }
-    return false;
-}
-
-}  // namespace
 
 HaiCodeApp::HaiCodeApp(int argc, char* argv[])
     : BApplication("application/x-vnd.haicode")
@@ -134,24 +111,6 @@ HaiCodeApp::ReadyToRun()
     tools_     = std::make_unique<haicode::ToolRegistry>();
     perm_gate_ = std::make_unique<haicode::PermissionGate>();
     bus_       = std::make_unique<haicode::SessionEventBus>();
-
-    // --- 4b. Offer to create agents.md, but only if this project has no
-    // existing sessions — returning users already know the project and
-    // shouldn't be bugged on every launch.
-    if (!project_instructions_exist(project_dir_) &&
-        !project_has_sessions(*store_, project_dir_)) {
-        BAlert* ask = new BAlert("Create agents.md",
-            "No agents.md or claude.md found in this project. "
-            "Create agents.md with a starter template? Its contents will be "
-            "appended to the system prompt for every session.",
-            "No", "Yes");
-        if (ask->Go() == 1) {
-            if (write_agents_md_template(project_dir_))
-                config_.agents_md = haicode::kAgentsMdStarterTemplate;
-            else
-                fprintf(stderr, "[gui] failed to write agents.md\n");
-        }
-    }
 
     // --- 5. Register providers ---
     bool any_provider = false;
@@ -349,17 +308,6 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             project_dir_ = path;
             haicode::ConfigLoader loader2;
             config_ = loader2.load(project_dir_);
-            // Re-prompt to create agents.md if the new project has neither file
-            // AND no existing sessions — returning users shouldn't be bugged.
-            if (!project_instructions_exist(project_dir_) &&
-                !project_has_sessions(*store_, project_dir_)) {
-                BAlert* ask = new BAlert("Create agents.md",
-                    "No agents.md or claude.md found in this project. "
-                    "Create agents.md with a starter template?",
-                    "No", "Yes");
-                if (ask->Go() == 1 && write_agents_md_template(project_dir_))
-                    config_.agents_md = haicode::kAgentsMdStarterTemplate;
-            }
             // Recreate the engine so config_.agents_md takes effect for new sessions.
             engine_ = std::make_unique<haicode::SessionEngine>(
                 *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);

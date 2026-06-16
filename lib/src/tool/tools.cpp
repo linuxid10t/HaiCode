@@ -787,6 +787,72 @@ public:
     }
 };
 
+// ---- WriteAgentsMdTool ----
+//
+// Creates or overwrites agents.md in the project root. The file is
+// appended verbatim to HaiCode's system prompt for every session in the
+// project, so the agent can self-document the project description, build
+// commands, and conventions. Changes take effect from the next session.
+
+class WriteAgentsMdTool : public Tool {
+public:
+    std::string name() const override { return "write_agents_md"; }
+    std::string description() const override {
+        return "Create or overwrite agents.md in the project root. "
+               "agents.md is appended verbatim to HaiCode's system prompt for "
+               "every session in this project — use it to record the project "
+               "description, build/run commands, and coding conventions so "
+               "future sessions start with full context. "
+               "The file takes effect starting from the next session.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"content", {
+                    {"type", "string"},
+                    {"description",
+                     "Full markdown content for agents.md. Should include at "
+                     "minimum: a # Project section (what the project is), a "
+                     "# Build & run section (how to build, test, run), and a "
+                     "# Conventions section (style, naming, workflow rules)."}
+                }}
+            }},
+            {"required", nlohmann::json::array({"content"})}
+        };
+    }
+    std::string required_permission() const override { return "write"; }
+    std::string resource(const nlohmann::json& /*input*/,
+                         const ToolContext& ctx) const override {
+        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        return base + "/agents.md";
+    }
+
+    ToolResult execute(const nlohmann::json& input,
+                       const ToolContext& ctx) override {
+        std::string content = input.value("content", "");
+        if (content.empty())
+            return {false, "", "write_agents_md: content must not be empty."};
+
+        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        std::string path = base + "/agents.md";
+
+        std::string err = atomic_write(path, content);
+        if (!err.empty())
+            return {false, "", err};
+
+        nlohmann::json out = {
+            {"path",          path},
+            {"bytes_written", static_cast<int>(content.size())},
+            {"note", "agents.md written. It will be included in the system "
+                     "prompt starting from the next session."}
+        };
+        return {true, out.dump(2), ""};
+    }
+};
+
 // ---- TodoWriteTool ----
 //
 // Whole-list replace. The engine detects this tool by name and writes
@@ -887,6 +953,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<LsTool>());
     registry.register_tool(std::make_shared<ExternalTerminalTool>());
     registry.register_tool(std::make_shared<ProposePlanTool>());
+    registry.register_tool(std::make_shared<WriteAgentsMdTool>());
     registry.register_tool(std::make_shared<TodoWriteTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know
