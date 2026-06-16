@@ -27,6 +27,7 @@ static const uint32 MSG_SETTINGS_SAVED  = 'SVst';
 // Model list
 static const uint32 MSG_FETCH_MODELS    = 'FTmd';  // MainWindow → be_app; "provider_id" string
 static const uint32 MSG_MODELS_LOADED   = 'MLld';  // be_app → MainWindow; repeated "model" strings
+static const uint32 MSG_MODEL_SELECTED  = 'MDsl';  // model menu item → MainWindow (no args; read marked item)
 
 // Working directory
 static const uint32 MSG_CHOOSE_DIR      = 'CHdr';  // dir button pressed → open BFilePanel

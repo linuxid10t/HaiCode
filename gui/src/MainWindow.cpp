@@ -163,10 +163,17 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS)));
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
 
-    // Model list — starts empty; populated after MSG_MODELS_LOADED
+    // Model list — starts empty; populated after MSG_MODELS_LOADED.
+    // Radio mode keeps at most one item marked, so the dropdown's marked item
+    // always mirrors default_model_ (the single source of truth for the next
+    // session's model).
     model_menu_ = new BPopUpMenu("(loading…)");
-    model_menu_->AddItem(new BMenuItem("(loading\xe2\x80\xa6)", nullptr));
+    model_menu_->SetRadioMode(true);
     model_menu_->SetLabelFromMarked(true);
+    auto* loading_item = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
+    loading_item->SetEnabled(false);
+    loading_item->SetMarked(true);
+    model_menu_->AddItem(loading_item);
     model_field_ = new BMenuField("model_field", "Model:", model_menu_);
 
     // Mode toggle — switches between Build (default) and Plan
@@ -395,29 +402,66 @@ MainWindow::MessageReceived(BMessage* msg)
             BMenuItem* marked = provider_menu_->FindMarked();
             std::string pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
                               ? "openai" : "anthropic";
+
+            // Immediately reset the model dropdown so the user isn't shown the
+            // previous provider's models with a stale mark while the fetch is
+            // in flight. default_model_ is preserved so that if the fetch fails
+            // or returns no matches, the next session still uses a sensible
+            // value.
+            while (model_menu_->CountItems() > 0)
+                delete model_menu_->RemoveItem((int32)0);
+            auto* loading_item = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
+            loading_item->SetEnabled(false);
+            loading_item->SetMarked(true);
+            model_menu_->AddItem(loading_item);
+
             BMessage fwd(MSG_FETCH_MODELS);
             fwd.AddString("provider_id", pid.c_str());
             be_app->PostMessage(&fwd);
             break;
         }
+        case MSG_MODEL_SELECTED: {
+            // User clicked a model menu item. default_model_ is the single
+            // source of truth — _NewSession/_UpdateMaxContext read it instead
+            // of querying the menu, so we just sync it here.
+            BMenuItem* marked = model_menu_->FindMarked();
+            if (marked) {
+                default_model_ = marked->Label();
+                _UpdateMaxContext();
+            }
+            break;
+        }
         case MSG_MODELS_LOADED: {
-            // Repopulate model dropdown with server-provided list
+            // Repopulate model dropdown with server-provided list.
+            // default_model_ is preserved across the repopulation: if the
+            // freshly fetched list still contains it, we re-mark it; otherwise
+            // we fall back to the first available model and update
+            // default_model_ to match.
+            std::string preserved = default_model_;
+
             while (model_menu_->CountItems() > 0)
                 delete model_menu_->RemoveItem((int32)0);
 
             const char* m = nullptr;
-            bool first = true;
             for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i) {
-                auto* item = new BMenuItem(m, nullptr);
-                if (first) { item->SetMarked(true); first = false; }
-                model_menu_->AddItem(item);
+                model_menu_->AddItem(new BMenuItem(m, new BMessage(MSG_MODEL_SELECTED)));
             }
-            if (first) {
-                model_menu_->AddItem(new BMenuItem("(none available)", nullptr));
+
+            BMenuItem* to_mark = nullptr;
+            if (model_menu_->CountItems() > 0) {
+                // Prefer re-marking the previously selected model.
+                if (auto* existing = model_menu_->FindItem(preserved.c_str()))
+                    to_mark = existing;
+                else
+                    to_mark = model_menu_->ItemAt(0);
+            } else {
+                auto* none_item = new BMenuItem("(none available)", nullptr);
+                none_item->SetEnabled(false);
+                model_menu_->AddItem(none_item);
+                to_mark = none_item;
             }
-            // Update default_model_ to the first available model
-            BMenuItem* sel = model_menu_->FindMarked();
-            if (sel) default_model_ = sel->Label();
+            to_mark->SetMarked(true);
+            default_model_ = to_mark->Label();
             _UpdateMaxContext();
             break;
         }
@@ -503,11 +547,10 @@ static std::string selected_provider_id(BPopUpMenu* menu)
 void
 MainWindow::_NewSession()
 {
-    // Determine model and provider from menus
+    // default_model_ is the single source of truth — kept in sync with the
+    // dropdown's marked item via MSG_MODEL_SELECTED / MSG_MODELS_LOADED /
+    // _SelectSession. Reading FindMarked() here would race with repopulation.
     std::string model = default_model_;
-    BMenuItem* marked = model_menu_->FindMarked();
-    if (marked) model = marked->Label();
-
     std::string provider = selected_provider_id(provider_menu_);
     std::string sid = engine_->create_session(project_dir_, "", model, provider);
     active_session_id_ = sid;
@@ -577,11 +620,24 @@ MainWindow::_SelectSession(int idx)
             SelectProvider(provider_id);
 
         if (!model_id.empty()) {
+            // Try to mark the matching item. If none matches (different
+            // provider, list still loading), explicitly clear any stale mark
+            // so the dropdown doesn't show a model from a previous session.
+            // default_model_ is set unconditionally — _NewSession reads it
+            // directly, not the menu state.
+            bool found = false;
             for (int32 i = 0; i < model_menu_->CountItems(); i++) {
                 BMenuItem* item = model_menu_->ItemAt(i);
-                if (item && model_id == item->Label()) {
+                if (!item) continue;
+                if (model_id == item->Label()) {
                     item->SetMarked(true);
-                    break;
+                    found = true;
+                }
+            }
+            if (!found) {
+                for (int32 i = 0; i < model_menu_->CountItems(); i++) {
+                    if (auto* item = model_menu_->ItemAt(i))
+                        item->SetMarked(false);
                 }
             }
             default_model_ = model_id;
@@ -946,9 +1002,8 @@ void
 MainWindow::_UpdateMaxContext()
 {
     if (!engine_) { max_context_ = 0; return; }
-    std::string model_id = default_model_;
-    BMenuItem* marked = model_menu_ ? model_menu_->FindMarked() : nullptr;
-    if (marked) model_id = marked->Label();
+    // default_model_ is the source of truth — see _NewSession.
+    const std::string& model_id = default_model_;
 
     std::string provider_id = "anthropic";
     BMenuItem* pm = provider_menu_ ? provider_menu_->FindMarked() : nullptr;
