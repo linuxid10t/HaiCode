@@ -47,6 +47,12 @@ public:
     void      set_mode(const std::string& session_id, SessionMode mode);
     SessionMode get_mode(const std::string& session_id);
 
+    // Patch the active session's stored provider/model. Either string may be
+    // empty to leave that field untouched. Takes effect on the next prompt.
+    void update_provider_model(const std::string& session_id,
+                               const std::string& provider_id,
+                               const std::string& model_id);
+
     const AppConfig& config() const { return config_; }
 
 private:

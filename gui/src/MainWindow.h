@@ -77,6 +77,7 @@ private:
     void _UpdateStatusStrip();
     void _UpdateMaxContext();
     void _RefreshModeButton();
+    void _ApplyProviderModelToActiveSession();
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change

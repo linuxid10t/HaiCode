@@ -210,6 +210,12 @@ void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
     store_.update_mode(session_id, mode == SessionMode::Plan ? "plan" : "build");
 }
 
+void SessionEngine::update_provider_model(const std::string& session_id,
+                                           const std::string& provider_id,
+                                           const std::string& model_id) {
+    store_.update_provider_model(session_id, provider_id, model_id);
+}
+
 SessionMode SessionEngine::get_mode(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = session_modes_.find(session_id);

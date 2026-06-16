@@ -412,6 +412,7 @@ MainWindow::MessageReceived(BMessage* msg)
                 pid = pid_str;
             }
             default_provider_ = (pid == "openai") ? "openai" : "anthropic";
+            _ApplyProviderModelToActiveSession();
 
             // Immediately reset the model dropdown so the user isn't shown the
             // previous provider's models with a stale mark while the fetch is
@@ -437,6 +438,7 @@ MainWindow::MessageReceived(BMessage* msg)
             BMenuItem* marked = model_menu_->FindMarked();
             if (marked) {
                 default_model_ = marked->Label();
+                _ApplyProviderModelToActiveSession();
                 _UpdateMaxContext();
             }
             break;
@@ -1013,4 +1015,15 @@ MainWindow::_UpdateMaxContext()
     max_context_ = haicode::get_context_window(default_provider_, default_model_,
                                                engine_->config().model_contexts);
     _UpdateStatusStrip();
+}
+
+void
+MainWindow::_ApplyProviderModelToActiveSession()
+{
+    // Provider/model dropdowns changed — patch the active session so the next
+    // prompt uses the new values. Without this, the dropdown only affects
+    // sessions created afterwards; users expect the switch to take effect
+    // immediately on the session they're looking at.
+    if (!engine_ || active_session_id_.empty()) return;
+    engine_->update_provider_model(active_session_id_, default_provider_, default_model_);
 }
