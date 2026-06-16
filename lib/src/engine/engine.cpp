@@ -322,7 +322,20 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     for (; step < max_steps; ++step) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
-        // Re-render the system prompt each step so {{STEPS_LEFT}} stays current.
+        // Re-read model_id/provider_id from the session each step. The user
+        // can change either via the dropdown mid-loop, and the system prompt
+        // (re-rendered below) plus the outgoing request must reflect the new
+        // values on the very next step.
+        if (auto s_now = store_.get(session_id)) {
+            auto mj_now = nlohmann::json::parse(s_now->model_json, nullptr, false);
+            if (mj_now.is_object()) {
+                if (auto v = mj_now.value("id", ""); !v.empty())        model_id    = v;
+                if (auto v = mj_now.value("provider_id", ""); !v.empty()) provider_id = v;
+            }
+        }
+
+        // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
+        // stay current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
                                max_steps - step) + agents_md_block + instructions_block
                               + plan_mode_block;
