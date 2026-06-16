@@ -55,20 +55,34 @@ ChatView::AppendStyled(const std::string& text, rgb_color color, bool bold)
 void
 ChatView::ScrollToBottom()
 {
-    // Let BTextView recompute its own scroll range, then scroll there.
-    // Going through BScrollBar::SetValue(GetRange()) reads a stale max
-    // right after Insert(), so the last appended lines stay off-screen.
+    int32 len = text_view_->TextLength();
+    if (len <= 0) return;
+
+    // Tighten the text rect to fit the current content (excluding the
+    // trailing empty line the final '\n' produces). SetTextRect forces
+    // BTextView to recompute layout and refresh the scrollbar range
+    // synchronously, so the GetRange() below returns current data —
+    // not the stale max that broke scroll-to-bottom when called raw
+    // right after Insert().
     int32 lines = text_view_->CountLines();
-    int32 len   = text_view_->TextLength();
-    if (lines > 0 && len > 0 && text_view_->ByteAt(len - 1) == '\n') {
-        --lines;  // drop the trailing empty line BTextView counts
+    if (lines > 0 && text_view_->ByteAt(len - 1) == '\n') {
+        --lines;
     }
     if (lines > 0) {
         BRect tr = text_view_->TextRect();
         tr.bottom = tr.top + text_view_->TextHeight(0, lines);
         text_view_->SetTextRect(tr);
     }
-    text_view_->ScrollToOffset(text_view_->TextLength());
+
+    // With the rect tightened and the range refreshed, SetValue(max)
+    // puts the bottom of the last content line at the viewport bottom.
+    // ScrollToOffset(TextLength()) is unreliable here because that
+    // offset sits past the tightened rect (after the trailing '\n').
+    if (BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL)) {
+        float lo, hi;
+        vsb->GetRange(&lo, &hi);
+        vsb->SetValue(hi);
+    }
 }
 
 void
