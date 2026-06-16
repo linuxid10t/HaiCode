@@ -1,0 +1,17 @@
+# Auto-detect text vs binary; normalize line endings on commit, check out as-is
+* text=auto
+
+# C++ sources — explicit diff/merge handling
+*.cpp diff=cpp
+*.h   diff=cpp
+*.hpp diff=cpp
+
+# CMake
+CMakeLists.txt       text
+*.cmake              text
+
+# Documentation
+*.md  text diff=markdown
+
+# Shell scripts (none currently, but for future)
+*.sh  text eol=lf
