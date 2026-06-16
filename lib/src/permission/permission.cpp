@@ -93,7 +93,9 @@ ToolResult ToolRegistry::execute(const std::string& name,
         return r;
     }
 
-    auto perm = gate.check(tool->required_permission(), ctx.working_dir, input);
+    auto perm = gate.check(tool->required_permission(),
+                           tool->resource(input, ctx),
+                           input);
     if (perm == PermissionEffect::Deny) {
         ToolResult r;
         r.success = false;

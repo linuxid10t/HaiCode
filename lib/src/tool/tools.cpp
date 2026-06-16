@@ -2,13 +2,16 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
+#include <unistd.h>
 #include <glob.h>
 #include <fnmatch.h>
+#include <dirent.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 
@@ -43,6 +46,15 @@ static std::string read_pipe(FILE* pipe) {
     return out;
 }
 
+// Resolve `path` against `working_dir` when relative. Empty path stays empty.
+static std::string resolve_path(const std::string& path, const std::string& working_dir) {
+    if (path.empty()) return path;
+    if (path[0] == '/') return path;
+    std::string base = working_dir;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    return (base.empty() ? "." : base) + "/" + path;
+}
+
 // ---- BashTool ----
 
 class BashTool : public Tool {
@@ -56,11 +68,15 @@ public:
         return {
             {"type", "object"},
             {"properties", {
-                {"command", {{"type", "string"}, {"description", "The bash command to run"}}},
-                {"timeout", {{"type", "integer"}, {"description", "Timeout in seconds (default 30)"}}}
+                {"command", {{"type", "string"}, {"description", "The bash command to run. Runs from the project directory. stderr is merged into stdout. Output is capped at 100 KB."}}},
+                {"timeout", {{"type", "integer"}, {"description", "Timeout in seconds (default 30, max enforced by the `timeout` binary). Exit code 124 = timed out."}}}
             }},
             {"required", nlohmann::json::array({"command"})}
         };
+    }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        (void)ctx;
+        return input.value("command", "");
     }
 
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
@@ -118,14 +134,18 @@ public:
         return {
             {"type", "object"},
             {"properties", {
-                {"path",   {{"type", "string"}}},
-                {"offset", {{"type", "integer"}, {"description", "First line to read (1-based, default 1)"}}},
-                {"limit",  {{"type", "integer"}, {"description", "Max lines to read (default unlimited)"}}}
+                {"path",   {{"type", "string"}, {"description", "File path to read. Absolute, or relative to the project directory."}}},
+                {"offset", {{"type", "integer"}, {"description", "First line to read, 1-based. Default 1 (start of file). Use this to skip into a file you've already partially read."}}},
+                {"limit",  {{"type", "integer"}, {"description", "Maximum number of lines to read. Default 0 = unlimited."}}}
             }},
             {"required", nlohmann::json::array({"path"})}
         };
     }
     std::string required_permission() const override { return "read"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        std::string path = input.value("path", "");
+        return path.empty() ? ctx.working_dir : resolve_path(path, ctx.working_dir);
+    }
 
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string path = input.value("path", "");
@@ -201,13 +221,17 @@ public:
         return {
             {"type", "object"},
             {"properties", {
-                {"path",    {{"type", "string"}}},
-                {"content", {{"type", "string"}}}
+                {"path",    {{"type", "string"}, {"description", "File to write. Absolute, or relative to the project directory. Missing parent directories are created. Overwrites the existing file entirely."}}},
+                {"content", {{"type", "string"}, {"description", "Full new contents of the file. The entire file becomes this string."}}}
             }},
             {"required", nlohmann::json::array({"path", "content"})}
         };
     }
     std::string required_permission() const override { return "write"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        std::string path = input.value("path", "");
+        return path.empty() ? ctx.working_dir : resolve_path(path, ctx.working_dir);
+    }
 
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string path = input.value("path", "");
@@ -265,11 +289,15 @@ public:
         return {
             {"type", "object"},
             {"properties", {
-                {"pattern", {{"type", "string"}, {"description", "Glob pattern (no ** support)"}}},
-                {"path",    {{"type", "string"}, {"description", "Base directory (default: working dir)"}}}
+                {"pattern", {{"type", "string"}, {"description", "POSIX glob pattern (e.g. '*.cpp', 'src/*.h'). Patterns starting with '/' are treated as absolute. NOTE: '**' recursive matching is NOT supported — use grep or `bash find` for recursive searches."}}},
+                {"path",    {{"type", "string"}, {"description", "Base directory to search. Default: the project directory."}}}
             }},
             {"required", nlohmann::json::array({"pattern"})}
         };
+    }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        (void)ctx;
+        return input.value("pattern", "");
     }
 
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
@@ -326,13 +354,22 @@ public:
         return {
             {"type", "object"},
             {"properties", {
-                {"pattern",      {{"type", "string"}}},
-                {"path",         {{"type", "string"}}},
-                {"include",      {{"type", "string"}, {"description", "Filename glob filter, e.g. '*.cpp'"}}},
-                {"line_numbers", {{"type", "boolean"}, {"description", "Show line numbers (default true)"}}}
+                {"pattern",      {{"type", "string"}, {"description", "Regular expression (basic grep syntax) to search for. Passed to /bin/grep -e."}}},
+                {"path",         {{"type", "string"}, {"description", "File or directory to search. Absolute, or relative to the project directory. Default: project directory."}}},
+                {"include",      {{"type", "string"}, {"description", "Filename glob filter, e.g. '*.cpp' or '*.{h,cpp}'. Restricts which files are scanned."}}},
+                {"line_numbers", {{"type", "boolean"}, {"description", "Prefix each match with `lineno:` (default true)."}}}
             }},
             {"required", nlohmann::json::array({"pattern"})}
         };
+    }
+    // Resource is the search path (where grep scans), not the regex — that's
+    // what users typically want to scope with permission rules.
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        if (input.contains("path") && input["path"].is_string()) {
+            std::string p = input["path"].get<std::string>();
+            if (!p.empty()) return resolve_path(p, ctx.working_dir);
+        }
+        return ctx.working_dir.empty() ? "." : ctx.working_dir;
     }
 
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
@@ -380,13 +417,303 @@ public:
     }
 };
 
+// Atomic write: tmp file + rename. Creates parent dirs. Returns "" on success,
+// an error message otherwise. The tmp file is always cleaned up on failure.
+static std::string atomic_write(const std::string& path, const std::string& content) {
+    if (!make_parent_dirs(path))
+        return std::string("Cannot create parent directories for: ") + path + ": " + strerror(errno);
+
+    std::string tmp_path = path + ".tmp_write";
+    {
+        std::ofstream f(tmp_path, std::ios::out | std::ios::trunc | std::ios::binary);
+        if (!f.is_open())
+            return std::string("Cannot open temp file for write: ") + strerror(errno);
+        f.write(content.data(), static_cast<std::streamsize>(content.size()));
+        if (!f.good()) {
+            f.close();
+            std::remove(tmp_path.c_str());
+            return "Write error: " + std::string(strerror(errno));
+        }
+        f.close();
+        if (!f.good()) {
+            std::remove(tmp_path.c_str());
+            return "Flush error: " + std::string(strerror(errno));
+        }
+    }
+
+    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
+        return "Cannot rename to target: " + path + ": " + strerror(errno);
+    }
+    return "";
+}
+
+// True if the buffer looks binary (null byte in first 8 KB).
+static bool looks_binary(const std::string& s) {
+    size_t scan = std::min<size_t>(s.size(), 8192);
+    for (size_t i = 0; i < scan; i++)
+        if (s[i] == '\0') return true;
+    return false;
+}
+
+// ---- EditTool ----
+
+class EditTool : public Tool {
+public:
+    std::string name() const override { return "edit"; }
+    std::string description() const override {
+        return "Replace a unique string in a file with a new string. Use this for "
+               "surgical edits instead of rewriting the whole file with `write`. "
+               "Read the file first; never edit what you haven't read. "
+               "old_string must match exactly (including whitespace and indentation) "
+               "and must be unique unless replace_all=true.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"path",        {{"type", "string"}, {"description", "File to edit. Absolute, or relative to the project directory."}}},
+                {"old_string",  {{"type", "string"}, {"description", "Exact text to find. Copy it verbatim from the file (indentation, newlines, quotes). Include enough surrounding context to make the match unique."}}},
+                {"new_string",  {{"type", "string"}, {"description", "Replacement text. Empty string deletes old_string."}}},
+                {"replace_all", {{"type", "boolean"}, {"description", "Replace every occurrence instead of requiring a unique match. Default false."}}}
+            }},
+            {"required", nlohmann::json::array({"path", "old_string", "new_string"})}
+        };
+    }
+    std::string required_permission() const override { return "write"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        std::string path = input.value("path", "");
+        return path.empty() ? ctx.working_dir : resolve_path(path, ctx.working_dir);
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string path = input.value("path", "");
+        std::string old_string = input.value("old_string", "");
+        std::string new_string = input.value("new_string", "");
+        bool replace_all = input.value("replace_all", false);
+
+        if (path.empty())
+            return {false, "", "No path provided"};
+        if (old_string.empty())
+            return {false, "", "old_string is empty; nothing to find. "
+                               "To delete text, provide both old_string and an empty new_string."};
+
+        path = resolve_path(path, ctx.working_dir);
+
+        // Read whole file
+        std::ifstream fin(path, std::ios::binary);
+        if (!fin.is_open())
+            return {false, "", "Cannot open file: " + path + ": " + strerror(errno)};
+        std::ostringstream ss;
+        ss << fin.rdbuf();
+        std::string content = ss.str();
+        fin.close();
+
+        if (looks_binary(content))
+            return {false, "", "Binary file, cannot edit: " + path};
+
+        // Count occurrences
+        size_t count = 0;
+        for (size_t pos = 0; (pos = content.find(old_string, pos)) != std::string::npos; count++)
+            pos += old_string.size();
+
+        if (count == 0)
+            return {false, "", "old_string not found in " + path + ". "
+                               "Read the file and copy the exact text (including whitespace)."};
+        if (!replace_all && count > 1)
+            return {false, "", "old_string appears " + std::to_string(count) + " times in " + path + ". "
+                               "Include more surrounding context to make it unique, or set replace_all=true."};
+
+        // Perform replacement
+        std::string new_content;
+        if (replace_all) {
+            new_content.reserve(content.size() + new_string.size());
+            size_t last = 0, pos = 0;
+            while ((pos = content.find(old_string, last)) != std::string::npos) {
+                new_content.append(content, last, pos - last);
+                new_content.append(new_string);
+                last = pos + old_string.size();
+            }
+            new_content.append(content, last, std::string::npos);
+        } else {
+            size_t pos = content.find(old_string);
+            new_content = content.substr(0, pos) + new_string + content.substr(pos + old_string.size());
+        }
+
+        std::string err = atomic_write(path, new_content);
+        if (!err.empty())
+            return {false, "", err};
+
+        std::string summary = replace_all
+            ? "Replaced " + std::to_string(count) + " occurrences in " + path
+            : "Edited " + path;
+        return {true, summary, ""};
+    }
+};
+
+// ---- LsTool ----
+
+class LsTool : public Tool {
+public:
+    std::string name() const override { return "ls"; }
+    std::string description() const override {
+        return "List the contents of a directory. Returns one entry per line, "
+               "alphabetically sorted, with a trailing '/' on directories. "
+               "Prefer this over `bash ls` for quick codebase exploration.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"path", {{"type", "string"}, {"description", "Directory to list. Absolute, or relative to the project directory. Default: the project directory."}}}
+            }},
+            {"required", nlohmann::json::array()}
+        };
+    }
+    std::string required_permission() const override { return "read"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        if (input.contains("path") && input["path"].is_string() && !input["path"].get<std::string>().empty())
+            return resolve_path(input["path"].get<std::string>(), ctx.working_dir);
+        return ctx.working_dir.empty() ? "." : ctx.working_dir;
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string path;
+        if (input.contains("path") && input["path"].is_string() && !input["path"].get<std::string>().empty())
+            path = resolve_path(input["path"].get<std::string>(), ctx.working_dir);
+        else
+            path = ctx.working_dir.empty() ? "." : ctx.working_dir;
+
+        DIR* dir = opendir(path.c_str());
+        if (!dir)
+            return {false, "", "Cannot open directory: " + path + ": " + strerror(errno)};
+
+        std::vector<std::string> entries;
+        struct dirent* ent;
+        while ((ent = readdir(dir)) != nullptr) {
+            std::string name = ent->d_name;
+            if (name == "." || name == "..") continue;
+
+            std::string suffix;
+            struct stat st{};
+            std::string full = path + "/" + name;
+            if (stat(full.c_str(), &st) == 0) {
+                if (S_ISDIR(st.st_mode))         suffix = "/";
+                else if (S_ISLNK(st.st_mode))    suffix = "@";
+            }
+            entries.push_back(name + suffix);
+        }
+        closedir(dir);
+
+        std::sort(entries.begin(), entries.end());
+
+        std::string output;
+        for (auto& e : entries) {
+            output += e;
+            output += '\n';
+            if (output.size() >= MAX_OUTPUT) {
+                output.resize(MAX_OUTPUT);
+                output += "\n[output truncated]";
+                break;
+            }
+        }
+        return {true, output.empty() ? "(empty directory)" : output, ""};
+    }
+};
+
+// ---- ExternalTerminalTool ----
+//
+// Spawns a new Haiku Terminal window with the user's command. The bash tool
+// wraps everything in `timeout ... sh -c '...' 2>&1` and reads stdout via a
+// pipe, which makes interactive TUI/REPL programs unusable. This tool
+// double-forks so the engine doesn't hold the child or its pipes open, and
+// the window stays open after the command exits.
+
+class ExternalTerminalTool : public Tool {
+public:
+    std::string name() const override { return "external_terminal"; }
+    std::string description() const override {
+        return "Open a command in a new Haiku Terminal window. Use this for "
+               "interactive full-screen terminal programs (editors like vim, "
+               "ncurses apps, REPLs, shells) that cannot run inside the `bash` "
+               "tool because `bash` merges stderr and reads output through a "
+               "pipe. Works regardless of which HaiCode frontend (GUI or TUI) "
+               "is in use. Returns immediately; the window closes when the "
+               "command exits.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"command",     {{"type", "string"}, {"description", "Command to run in the new Terminal window. Interactive programs are fine — output is not captured."}}},
+                {"working_dir", {{"type", "string"}, {"description", "Working directory for the new window. Absolute, or relative to the project directory. Default: the project directory."}}}
+            }},
+            {"required", nlohmann::json::array({"command"})}
+        };
+    }
+    // Distinct permission action from bash so the prompt makes clear which tool
+    // is asking. Users who want a single rule covering both can use action "*".
+    std::string required_permission() const override { return "external_terminal"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        (void)ctx;
+        return input.value("command", "");
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string command = input.value("command", "");
+        if (command.empty())
+            return {false, "", "No command provided"};
+
+        std::string dir;
+        if (input.contains("working_dir") && input["working_dir"].is_string()
+                && !input["working_dir"].get<std::string>().empty())
+            dir = resolve_path(input["working_dir"].get<std::string>(), ctx.working_dir);
+        else
+            dir = ctx.working_dir.empty() ? "." : ctx.working_dir;
+
+        // Run just the command — Terminal closes the window when it exits.
+        std::string inner = command;
+
+        pid_t pid = fork();
+        if (pid < 0)
+            return {false, "", std::string("fork failed: ") + strerror(errno)};
+
+        if (pid == 0) {
+            // First child: new session, drop the engine's stdio fds.
+            setsid();
+            close(0); close(1); close(2);
+
+            // Double-fork so the engine doesn't have to reap the grandchild.
+            pid_t grand = fork();
+            if (grand < 0)  _exit(127);
+            if (grand > 0)  _exit(0);
+
+            // Grandchild: replace self with Terminal.
+            execl("/boot/system/apps/Terminal", "Terminal",
+                  "-w", dir.c_str(),
+                  "/bin/sh", "-c", inner.c_str(),
+                  (char*)nullptr);
+            _exit(127);  // only reached if execl failed
+        }
+
+        // Parent: reap the intermediate child (exits immediately after fork).
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+
+        return {true, "Opened in new Terminal window (cwd=" + dir + ")", ""};
+    }
+};
+
 // Registration function
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
     registry.register_tool(std::make_shared<ReadTool>());
     registry.register_tool(std::make_shared<WriteTool>());
+    registry.register_tool(std::make_shared<EditTool>());
     registry.register_tool(std::make_shared<GlobTool>());
     registry.register_tool(std::make_shared<GrepTool>());
+    registry.register_tool(std::make_shared<LsTool>());
+    registry.register_tool(std::make_shared<ExternalTerminalTool>());
 }
 
 } // namespace haicode

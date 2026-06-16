@@ -20,11 +20,13 @@ static void substitute_all(std::string& s, const std::string& from, const std::s
 static std::string render_prompt(const std::string& tmpl,
                                  const std::string& model,
                                  const std::string& os_info,
-                                 const std::string& project_dir) {
+                                 const std::string& project_dir,
+                                 int steps_left) {
     std::string out = tmpl;
     substitute_all(out, "{{MODEL}}", model);
     substitute_all(out, "{{OS}}", os_info);
     substitute_all(out, "{{PROJECT_DIR}}", project_dir);
+    substitute_all(out, "{{STEPS_LEFT}}", std::to_string(steps_left));
     return out;
 }
 
@@ -219,10 +221,14 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
     auto* interrupt_flag = interrupt_flags_[session_id];
     std::string prompt_tmpl = kDefaultSystemPrompt;
-    if (!config_.agents.empty()) {
-        auto ait = config_.agents.find(session.agent);
-        if (ait != config_.agents.end() && ait->second.system_prompt)
+    constexpr int DEFAULT_MAX_STEPS = 50;
+    int max_steps = DEFAULT_MAX_STEPS;
+    auto ait = config_.agents.find(session.agent);
+    if (ait != config_.agents.end()) {
+        if (ait->second.system_prompt)
             prompt_tmpl = *ait->second.system_prompt;
+        if (ait->second.max_steps && *ait->second.max_steps > 0)
+            max_steps = *ait->second.max_steps;
     }
 
     std::string os_info;
@@ -231,15 +237,35 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         os_info = std::string(uts.sysname) + " " + uts.release
               + " (" + uts.machine + ")";
 
-    std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory);
+    // Build the static instruction block once. Appended to the system prompt
+    // every step so it survives the {{STEPS_LEFT}} re-render.
+    std::string instructions_block;
+    if (!config_.instructions.empty()) {
+        instructions_block = "\n\n# Additional instructions\n\n";
+        for (auto& s : config_.instructions) {
+            if (s.empty()) continue;
+            instructions_block += "- ";
+            instructions_block += s;
+            instructions_block += "\n";
+        }
+    }
 
-    fprintf(stderr, "[engine] session=%s dir='%s'\n[engine] system prompt:\n%s\n---\n",
-            session_id.c_str(), session.directory.c_str(), system.c_str());
+    std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
+                       + instructions_block;
+
+    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
+            session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
+            max_steps, config_.instructions.size(), system.c_str());
     fflush(stderr);
 
     // Agentic loop
-    for (int step = 0; step < 20; ++step) {
+    int step = 0;
+    for (; step < max_steps; ++step) {
         if (interrupt_flag && interrupt_flag->load()) break;
+
+        // Re-render the system prompt each step so {{STEPS_LEFT}} stays current.
+        system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
+                               max_steps - step) + instructions_block;
 
         auto messages = store_.load_messages(session_id);
 
@@ -375,6 +401,18 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             bus_.publish(events::EventType::StepFailed, ev);
             break;
         }
+    }
+
+    // Loop exited because the step budget ran out (no break fired, so step == max_steps).
+    // The last iteration would have left the UI in "tool_use ended, waiting for next step"
+    // state with no follow-up ever coming — surface a clear message so the user isn't
+    // left staring at silence.
+    if (step == max_steps) {
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["error"] = "Step limit reached (" + std::to_string(max_steps)
+                     + "). Send another message to continue.";
+        bus_.publish(events::EventType::StepFailed, ev);
     }
 }
 

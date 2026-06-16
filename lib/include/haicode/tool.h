@@ -32,6 +32,14 @@ public:
     virtual std::string description() const = 0;
     virtual nlohmann::json input_schema() const = 0;
     virtual std::string required_permission() const { return name(); }
+    // Resource string presented to the permission gate. Default is the working
+    // directory; tools override to return a meaningful target (command, path,
+    // search pattern, etc.) so permission rules can scope by `resource`.
+    virtual std::string resource(const nlohmann::json& input,
+                                 const ToolContext& ctx) const {
+        (void)input;
+        return ctx.working_dir;
+    }
     virtual ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) = 0;
 };
 

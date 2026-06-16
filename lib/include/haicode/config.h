@@ -28,6 +28,7 @@ struct AgentConfig {
     std::string id;
     std::optional<std::string> model;
     std::optional<std::string> system_prompt;
+    std::optional<int> max_steps;
     std::vector<PermissionRule> permissions;
     std::string color;
 };
@@ -54,9 +55,6 @@ public:
 
 private:
     AppConfig merge(const AppConfig& base, const AppConfig& overlay);
-    PermissionRule parse_permission(const std::string& effect,
-                                    const std::string& action,
-                                    const std::string& resource);
 };
 
 } // namespace haicode

@@ -15,6 +15,23 @@ static std::string read_file(const std::string& path) {
     return ss.str();
 }
 
+// Parse one permission object {action, resource, effect} into `out`.
+// `effect` defaults to "ask" when missing or unrecognized. Entries with no
+// action are silently skipped.
+static void append_permission(std::vector<PermissionRule>& out,
+                              const nlohmann::json& p,
+                              PermissionEffect default_effect = PermissionEffect::Ask) {
+    std::string action   = p.value("action", "");
+    std::string resource = p.value("resource", "*");
+    std::string effect   = p.value("effect", "");
+    if (action.empty()) return;
+    PermissionEffect e = default_effect;
+    if (effect == "allow") e = PermissionEffect::Allow;
+    else if (effect == "deny") e = PermissionEffect::Deny;
+    else if (effect == "ask")  e = PermissionEffect::Ask;
+    out.push_back({action, resource, e});
+}
+
 AppConfig ConfigLoader::load(const std::string& project_dir) {
     // Global config: B_USER_SETTINGS_DIRECTORY/haicode/config.json
     BPath settings_path;
@@ -57,6 +74,41 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 cfg.providers[k] = p;
             }
         }
+
+        if (j.contains("agents") && j["agents"].is_object()) {
+            for (auto& [k, v] : j["agents"].items()) {
+                AgentConfig a;
+                a.id = k;
+                if (v.contains("model") && v["model"].is_string())
+                    a.model = v["model"].get<std::string>();
+                if (v.contains("system_prompt") && v["system_prompt"].is_string())
+                    a.system_prompt = v["system_prompt"].get<std::string>();
+                if (v.contains("color") && v["color"].is_string())
+                    a.color = v["color"].get<std::string>();
+                if (v.contains("max_steps") && v["max_steps"].is_number_integer()) {
+                    int ms = v["max_steps"].get<int>();
+                    if (ms > 0) a.max_steps = ms;
+                }
+                if (v.contains("permissions") && v["permissions"].is_array()) {
+                    for (auto& p : v["permissions"])
+                        if (p.is_object())
+                            append_permission(a.permissions, p);
+                }
+                cfg.agents[k] = std::move(a);
+            }
+        }
+
+        if (j.contains("permissions") && j["permissions"].is_array()) {
+            for (auto& p : j["permissions"])
+                if (p.is_object())
+                    append_permission(cfg.permissions, p);
+        }
+
+        if (j.contains("instructions") && j["instructions"].is_array()) {
+            for (auto& s : j["instructions"])
+                if (s.is_string())
+                    cfg.instructions.push_back(s.get<std::string>());
+        }
     } catch (...) {}
 
     return cfg;
@@ -69,23 +121,20 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
     if (overlay.shell) result.shell = overlay.shell;
     for (auto& [k, v] : overlay.providers)
         result.providers[k] = v;
+    for (auto& [id, ov] : overlay.agents) {
+        AgentConfig& dst = result.agents[id];
+        dst.id = id;
+        if (ov.model)         dst.model         = *ov.model;
+        if (ov.system_prompt) dst.system_prompt = *ov.system_prompt;
+        if (ov.max_steps)     dst.max_steps     = *ov.max_steps;
+        if (!ov.color.empty()) dst.color        = ov.color;
+        if (!ov.permissions.empty()) dst.permissions = ov.permissions;
+    }
     for (auto& r : overlay.permissions)
         result.permissions.push_back(r);
     for (auto& s : overlay.instructions)
         result.instructions.push_back(s);
     return result;
-}
-
-PermissionRule ConfigLoader::parse_permission(const std::string& effect,
-                                               const std::string& action,
-                                               const std::string& resource) {
-    PermissionRule r;
-    r.action = action;
-    r.resource = resource;
-    if (effect == "allow") r.effect = PermissionEffect::Allow;
-    else if (effect == "deny") r.effect = PermissionEffect::Deny;
-    else r.effect = PermissionEffect::Ask;
-    return r;
 }
 
 } // namespace haicode
