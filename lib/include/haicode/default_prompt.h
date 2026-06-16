@@ -45,7 +45,7 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - glob: Match files by pattern. Absolute patterns bypass the project directory. `**` recursive matching is NOT supported.
 - grep: Recursive pattern search. Use `include` to filter by filename glob.
 - external_terminal: Open a command in a new Haiku Terminal window. Use this for interactive full-screen terminal programs (vim, ncurses apps, REPLs, shells) that `bash` can't run — `bash` merges stderr and reads through a pipe. Works the same whether you are using the HaiCode GUI or TUI frontend. Returns immediately; the window closes when the command exits.
-- web_search: Search DuckDuckGo (no API key). Use this FIRST for any research task — it's cheap. Read the snippets before fetching.
+- web_search: Search the web (Mojeek by default; DuckDuckGo optional via config). Use this FIRST for any research task — it's cheap. Read the snippets before fetching.
 - web_extract: Fetch a URL and return its cleaned main-body article text. Use selectively — it's a real HTTP fetch.
 
 # Communication

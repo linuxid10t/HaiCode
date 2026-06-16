@@ -499,6 +499,87 @@ static std::vector<SearchResult> parse_ddg_results(const std::string& html,
     return out;
 }
 
+// Parse Mojeek's results page. Each result is an `<li class="rN">` containing
+// `<a class="title" href="URL">TITLE</a>` and a `<p class="s">SNIPPET</p>`.
+// URLs are direct (no redirect wrapper), so we take href verbatim.
+static std::vector<SearchResult> parse_mojeek_results(const std::string& html,
+                                                      int max_results) {
+    std::vector<SearchResult> out;
+    if (max_results <= 0) return out;
+
+    std::string lower = to_lower(html);
+    const std::string title_needle   = "class=\"title\"";
+    const std::string snippet_needle = "class=\"s\"";
+
+    auto trim = [](std::string& t) {
+        size_t a = t.find_first_not_of(" \t\r\n");
+        size_t b = t.find_last_not_of(" \t\r\n");
+        if (a == std::string::npos) { t.clear(); return; }
+        t = t.substr(a, b - a + 1);
+    };
+
+    size_t cursor = 0;
+    while ((int)out.size() < max_results) {
+        size_t anchor = find_ci(lower, cursor, title_needle);
+        if (anchor == std::string::npos) break;
+
+        // Backtrack to opening '<' so we can read the start tag (for href).
+        size_t lt = lower.rfind('<', anchor);
+        if (lt == std::string::npos) { cursor = anchor + title_needle.size(); continue; }
+
+        size_t tag_end = lower.find('>', anchor);
+        if (tag_end == std::string::npos) break;
+
+        std::string start_tag = html.substr(lt, tag_end - lt + 1);
+        std::string href;
+        {
+            size_t hp = find_ci(start_tag, 0, "href=\"");
+            if (hp != std::string::npos) {
+                hp += 6;
+                size_t quote = start_tag.find('"', hp);
+                if (quote != std::string::npos)
+                    href = start_tag.substr(hp, quote - hp);
+            }
+        }
+
+        // Title text sits between the opening tag's '>' and the next '<'.
+        size_t title_start = tag_end + 1;
+        size_t title_end = lower.find('<', title_start);
+        std::string title;
+        if (title_end != std::string::npos) {
+            title = decode_html_entities(html.substr(title_start, title_end - title_start));
+            trim(title);
+        }
+
+        // Snippet: first <p class="s"> after the title. Read to </p> (not just
+        // the next '<', since Mojeek bolds query terms with <strong>).
+        std::string snippet;
+        size_t search_from = (title_end == std::string::npos) ? tag_end : title_end;
+        size_t snip = find_ci(lower, search_from, snippet_needle);
+        if (snip != std::string::npos) {
+            size_t snip_tag_end = lower.find('>', snip);
+            if (snip_tag_end != std::string::npos) {
+                size_t snip_start = snip_tag_end + 1;
+                size_t snip_close = find_ci(lower, snip_start, "</p>");
+                if (snip_close == std::string::npos)
+                    snip_close = lower.find('<', snip_start);
+                if (snip_close != std::string::npos) {
+                    snippet = strip_remaining_tags(html.substr(snip_start, snip_close - snip_start));
+                    snippet = decode_html_entities(snippet);
+                    trim(snippet);
+                }
+            }
+        }
+
+        if (!href.empty() || !title.empty()) {
+            out.push_back({ std::move(title), std::move(href), std::move(snippet) });
+        }
+
+        cursor = (title_end == std::string::npos) ? lower.size() : title_end + 1;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // WebSearchTool
 // ---------------------------------------------------------------------------
@@ -507,7 +588,7 @@ class WebSearchTool : public Tool {
 public:
     std::string name() const override { return "web_search"; }
     std::string description() const override {
-        return "Search the web (DuckDuckGo, no API key) and return ranked results. "
+        return "Search the web (Mojeek, no API key) and return ranked results. "
                "Use this FIRST when researching — it's cheap. Read the snippets "
                "before calling web_extract on any URL.";
     }
@@ -538,10 +619,12 @@ public:
         }
         if (max_results > 10) max_results = 10;
 
-        // Engine: read from config if available; default ddg_lite.
-        std::string engine = "ddg_lite";
-        if (ctx.config) engine = ctx.config->web_search_engine;
-        if (engine != "ddg_html" && engine != "ddg_lite") engine = "ddg_lite";
+        // Engine: read from config if available; default mojeek.
+        std::string engine = "mojeek";
+        if (ctx.config && !ctx.config->web_search_engine.empty())
+            engine = ctx.config->web_search_engine;
+        if (engine != "mojeek" && engine != "ddg_lite" && engine != "ddg_html")
+            engine = "mojeek";
 
         std::string url;
         std::string anchor_class, snippet_class;
@@ -549,11 +632,11 @@ public:
             url = "https://html.duckduckgo.com/html/?q=" + url_encode(query);
             anchor_class  = "result__a";
             snippet_class = "result__snippet";
-        } else {
+        } else if (engine == "ddg_lite") {
             url = "https://lite.duckduckgo.com/lite/?q=" + url_encode(query) + "&kl=us-en";
             anchor_class  = "result-link";
             snippet_class = "result-snippet";
-        }
+        }  // mojeek: URL built below.
 
         std::map<std::string, std::string> headers = {
             {"User-Agent", kBrowserUA},
@@ -562,14 +645,37 @@ public:
 
         std::string body;
         try {
-            body = http_.get(url, headers, 20L);
+            if (engine == "mojeek") {
+                std::string murl = "https://www.mojeek.com/search?q=" + url_encode(query);
+                body = http_.get(murl, headers, 20L);
+            } else {
+                body = http_.get(url, headers, 20L);
+            }
         } catch (const std::exception& e) {
             return {false, "", std::string("web_search fetch failed: ") + e.what()};
         }
         if (body.empty())
             return {true, "(no results — empty response from search engine)", ""};
 
-        auto results = parse_ddg_results(body, anchor_class, snippet_class, max_results);
+        // DuckDuckGo now serves an "anomaly" CAPTCHA page (HTTP 202) to many
+        // clients; parsing it yields zero results and a confusing "(no results)"
+        // message. Detect the markers and tell the user how to recover.
+        if (engine == "ddg_lite" || engine == "ddg_html") {
+            std::string lower = to_lower(body);
+            if (lower.find("anomaly-modal") != std::string::npos ||
+                lower.find("bots use duckduckgo") != std::string::npos) {
+                return {false, "",
+                    "web_search: DuckDuckGo returned a CAPTCHA challenge page. "
+                    "Switch engine to 'mojeek' in config (web_search.engine) and retry."};
+            }
+        }
+
+        std::vector<SearchResult> results;
+        if (engine == "mojeek") {
+            results = parse_mojeek_results(body, max_results);
+        } else {
+            results = parse_ddg_results(body, anchor_class, snippet_class, max_results);
+        }
 
         if (results.empty())
             return {true, "(no results)", ""};

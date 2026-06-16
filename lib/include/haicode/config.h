@@ -50,8 +50,10 @@ struct AppConfig {
     // populated from the top-level "models" object in config.json. Used by
     // get_context_window() as a hard override on top of the hardcoded prefix table.
     std::map<std::string, int> model_contexts;
-    // web_search tool config. engine = "ddg_lite" (default) or "ddg_html".
-    std::string web_search_engine = "ddg_lite";
+    // web_search tool config. engine = "mojeek" (default), "ddg_lite", or "ddg_html".
+    // Mojeek is the default because DuckDuckGo's lite/html endpoints now serve a
+    // CAPTCHA "anomaly" page to most non-browser clients.
+    std::string web_search_engine = "mojeek";
     int         web_search_max_results = 5;
 };
 
