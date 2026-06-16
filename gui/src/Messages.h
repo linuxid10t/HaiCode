@@ -36,6 +36,9 @@ static const uint32 MSG_DIR_CHANGED     = 'DChr';  // MainWindow → be_app; "pa
 // Permission management
 static const uint32 MSG_ADD_PERMISSION  = 'ADpm';  // MainWindow → be_app; "action"+"resource" strings
 
+// Provider/model persistence — MainWindow → be_app; "provider"+"model" strings
+static const uint32 MSG_PERSIST_PM      = 'PMps';
+
 // Session tracking
 static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string
 static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32

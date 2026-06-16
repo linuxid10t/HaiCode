@@ -130,7 +130,8 @@ static std::string dir_basename(const std::string& path) {
 MainWindow::MainWindow(haicode::SessionEngine& engine,
                        haicode::SessionStore& store,
                        const std::string& project_dir,
-                       const std::string& default_model)
+                       const std::string& default_model,
+                       const std::string& default_provider)
     : BWindow(BRect(100, 100, 1100, 750),
               "HaiCode",
               B_TITLED_WINDOW,
@@ -139,6 +140,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     , store_(store)
     , project_dir_(project_dir)
     , default_model_(default_model)
+    , default_provider_(default_provider.empty() ? "anthropic" : default_provider)
 {
     // ---- Menu bar ----
     menu_bar_ = new BMenuBar("menu_bar");
@@ -158,9 +160,12 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // Provider selector — user picks endpoint type; model list is fetched dynamically
     provider_menu_ = new BPopUpMenu("Anthropic");
     auto* ap_item = new BMenuItem("Anthropic", new BMessage(MSG_FETCH_MODELS));
-    ap_item->SetMarked(true);
+    auto* oi_item = new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS));
+    // Mark the restored provider (default_provider_ was seeded from config
+    // by HaiCodeApp). Falls back to Anthropic when unset.
+    (default_provider_ == "openai" ? oi_item : ap_item)->SetMarked(true);
     provider_menu_->AddItem(ap_item);
-    provider_menu_->AddItem(new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS)));
+    provider_menu_->AddItem(oi_item);
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
 
     // Model list — starts empty; populated after MSG_MODELS_LOADED.
@@ -413,6 +418,7 @@ MainWindow::MessageReceived(BMessage* msg)
             }
             default_provider_ = (pid == "openai") ? "openai" : "anthropic";
             _ApplyProviderModelToActiveSession();
+            _PersistProviderModel();
 
             // Immediately reset the model dropdown so the user isn't shown the
             // previous provider's models with a stale mark while the fetch is
@@ -440,6 +446,7 @@ MainWindow::MessageReceived(BMessage* msg)
                 default_model_ = marked->Label();
                 _ApplyProviderModelToActiveSession();
                 _UpdateMaxContext();
+                _PersistProviderModel();
             }
             break;
         }
@@ -475,6 +482,12 @@ MainWindow::MessageReceived(BMessage* msg)
             to_mark->SetMarked(true);
             default_model_ = to_mark->Label();
             _UpdateMaxContext();
+            // Sync the engine: without this, switching provider leaves the
+            // active session's stored model stale (the auto-marked default
+            // never reaches the DB), so the next prompt goes out against
+            // the wrong API.
+            _ApplyProviderModelToActiveSession();
+            _PersistProviderModel();
             break;
         }
         case MSG_PERMISSION_REP: {
@@ -1026,4 +1039,15 @@ MainWindow::_ApplyProviderModelToActiveSession()
     // immediately on the session they're looking at.
     if (!engine_ || active_session_id_.empty()) return;
     engine_->update_provider_model(active_session_id_, default_provider_, default_model_);
+}
+
+void
+MainWindow::_PersistProviderModel()
+{
+    // Mirror the current dropdowns into the global config so they survive
+    // restart. Posted to be_app, which owns the ConfigLoader and JSON file.
+    BMessage pm(MSG_PERSIST_PM);
+    pm.AddString("provider", default_provider_.c_str());
+    pm.AddString("model",    default_model_.c_str());
+    be_app->PostMessage(&pm);
 }

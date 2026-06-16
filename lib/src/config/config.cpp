@@ -90,6 +90,8 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
 
         if (j.contains("model") && j["model"].is_string())
             cfg.model = j["model"].get<std::string>();
+        if (j.contains("provider") && j["provider"].is_string())
+            cfg.provider = j["provider"].get<std::string>();
         if (j.contains("agent") && j["agent"].is_string())
             cfg.agent = j["agent"].get<std::string>();
         if (j.contains("shell") && j["shell"].is_string())
@@ -168,6 +170,7 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
 AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
     AppConfig result = base;
     if (!overlay.model.empty()) result.model = overlay.model;
+    if (!overlay.provider.empty()) result.provider = overlay.provider;
     if (!overlay.agent.empty()) result.agent = overlay.agent;
     if (overlay.shell) result.shell = overlay.shell;
     for (auto& [k, v] : overlay.providers)

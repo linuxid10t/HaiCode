@@ -35,6 +35,7 @@ struct AgentConfig {
 
 struct AppConfig {
     std::string model;
+    std::string provider;
     std::string agent;
     std::optional<std::string> shell;
     bool autoupdate = false;

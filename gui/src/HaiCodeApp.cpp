@@ -243,7 +243,7 @@ HaiCodeApp::ReadyToRun()
         *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
 
     // --- 11. Create MainWindow ---
-    main_window_ = new MainWindow(*engine_, *store_, project_dir_, config_.model);
+    main_window_ = new MainWindow(*engine_, *store_, project_dir_, config_.model, config_.provider);
     *window_holder_ = main_window_;
 
     // --- 12. Create GuiEventRelay and attach to bus ---
@@ -256,10 +256,16 @@ HaiCodeApp::ReadyToRun()
     // --- 13. Show the window ---
     main_window_->Show();
 
-    // --- 14. Kick off initial model fetch for the first configured provider ---
-    std::string initial_pid;
-    if (providers_->get("anthropic"))      initial_pid = "anthropic";
-    else if (providers_->get("openai"))    initial_pid = "openai";
+    // --- 14. Kick off initial model fetch for the restored provider (or
+    // the first configured one if config has no `provider` field yet).
+    // MainWindow's ctor already marked the dropdown from config_.provider,
+    // so we don't override it here — we only fetch models for whichever
+    // provider is currently selected.
+    std::string initial_pid = config_.provider;
+    if (initial_pid.empty() || !providers_->get(initial_pid)) {
+        if (providers_->get("anthropic"))      initial_pid = "anthropic";
+        else if (providers_->get("openai"))    initial_pid = "openai";
+    }
     if (!initial_pid.empty()) {
         main_window_->SelectProvider(initial_pid);
         BMessage fetch(MSG_FETCH_MODELS);
@@ -289,6 +295,33 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             msg->FindString("resource", &resource);
             if (action && resource)
                 perm_gate_->add_allow(action, resource);
+            break;
+        }
+        case MSG_PERSIST_PM: {
+            const char* provider = nullptr;
+            const char* model    = nullptr;
+            msg->FindString("provider", &provider);
+            msg->FindString("model",    &model);
+            if (provider) config_.provider = provider;
+            if (model)    config_.model    = model;
+
+            BPath settings_path;
+            if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
+                BPath cfg_path(settings_path);
+                cfg_path.Append("haicode");
+                create_directory(cfg_path.Path(), 0755);
+                cfg_path.Append("config.json");
+
+                nlohmann::json j;
+                {
+                    std::ifstream f(cfg_path.Path());
+                    if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
+                }
+                if (!config_.provider.empty()) j["provider"] = config_.provider;
+                if (!config_.model.empty())    j["model"]    = config_.model;
+                std::ofstream f(cfg_path.Path());
+                if (f.is_open()) f << j.dump(2);
+            }
             break;
         }
         case MSG_DIR_CHANGED: {
@@ -408,6 +441,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
 
                 nlohmann::json j;
                 j["model"] = config_.model;
+                if (!config_.provider.empty()) j["provider"] = config_.provider;
                 j["providers"]["anthropic"]["api_key"]  = ap.api_key;
                 j["providers"]["anthropic"]["base_url"] = ap.base_url;
                 j["providers"]["openai"]["api_key"]     = op.api_key;

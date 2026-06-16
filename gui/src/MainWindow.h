@@ -31,7 +31,8 @@ public:
     MainWindow(haicode::SessionEngine& engine,
                haicode::SessionStore& store,
                const std::string& project_dir,
-               const std::string& default_model);
+               const std::string& default_model,
+               const std::string& default_provider);
 
     void MessageReceived(BMessage* msg) override;
     bool QuitRequested() override;
@@ -78,6 +79,7 @@ private:
     void _UpdateMaxContext();
     void _RefreshModeButton();
     void _ApplyProviderModelToActiveSession();
+    void _PersistProviderModel();
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change
