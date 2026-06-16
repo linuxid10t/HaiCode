@@ -47,8 +47,13 @@ ChatView::AppendStyled(const std::string& text, rgb_color color, bool bold)
         font = *be_plain_font;
     }
 
+    // Insert at end via the explicit-offset overload. The no-offset
+    // Insert() inserts at the current selection — and because the view
+    // is selectable, a user click anywhere in the transcript moves the
+    // selection there, causing subsequent appends to land mid-text
+    // (the "bottom lines stuck, new lines above" symptom).
     int32 start = text_view_->TextLength();
-    text_view_->Insert(text.c_str());
+    text_view_->Insert(start, text.c_str(), text.size());
     int32 end = text_view_->TextLength();
     text_view_->SetFontAndColor(start, end, &font, B_FONT_ALL, &color);
     ScrollToBottom();
