@@ -126,13 +126,29 @@ public:
                             ToolCall tc;
                             tc.id = state.current_tool_call_id;
                             tc.name = state.current_tool_name;
+                            tc.raw_input = state.accumulated_tool_input;
                             try {
                                 tc.input = nlohmann::json::parse(
                                     state.accumulated_tool_input, nullptr, false);
-                                if (tc.input.is_discarded())
+                                if (tc.input.is_discarded()) {
                                     tc.input = nlohmann::json::object();
+                                    tc.parse_failed = true;
+                                    fprintf(stderr,
+                                        "[anthropic] tool_use %s (%s) input parse failed; "
+                                        "raw=%zu bytes: %.200s\n",
+                                        tc.id.c_str(), tc.name.c_str(),
+                                        state.accumulated_tool_input.size(),
+                                        state.accumulated_tool_input.c_str());
+                                }
                             } catch (...) {
                                 tc.input = nlohmann::json::object();
+                                tc.parse_failed = true;
+                                fprintf(stderr,
+                                    "[anthropic] tool_use %s (%s) input parse threw; "
+                                    "raw=%zu bytes: %.200s\n",
+                                    tc.id.c_str(), tc.name.c_str(),
+                                    state.accumulated_tool_input.size(),
+                                    state.accumulated_tool_input.c_str());
                             }
                             state.tool_calls.push_back(tc);
                         }

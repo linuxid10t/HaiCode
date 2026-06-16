@@ -256,13 +256,28 @@ public:
         std::vector<ToolCall> tool_calls;
         for (auto& [idx, state] : tool_call_map) {
             ToolCall tc;
-            tc.id   = state.id.empty() ? util::make_id("tc") : state.id;
-            tc.name = state.name;
+            tc.id       = state.id.empty() ? util::make_id("tc") : state.id;
+            tc.name     = state.name;
+            tc.raw_input = state.arguments;
             try {
                 tc.input = nlohmann::json::parse(state.arguments, nullptr, false);
-                if (tc.input.is_discarded()) tc.input = nlohmann::json::object();
+                if (tc.input.is_discarded()) {
+                    tc.input = nlohmann::json::object();
+                    tc.parse_failed = true;
+                    fprintf(stderr,
+                        "[openai] tool_call %s (%s) arguments parse failed; "
+                        "raw=%zu bytes: %.200s\n",
+                        tc.id.c_str(), tc.name.c_str(),
+                        state.arguments.size(), state.arguments.c_str());
+                }
             } catch (...) {
                 tc.input = nlohmann::json::object();
+                tc.parse_failed = true;
+                fprintf(stderr,
+                    "[openai] tool_call %s (%s) arguments parse threw; "
+                    "raw=%zu bytes: %.200s\n",
+                    tc.id.c_str(), tc.name.c_str(),
+                    state.arguments.size(), state.arguments.c_str());
             }
             tool_calls.push_back(std::move(tc));
         }

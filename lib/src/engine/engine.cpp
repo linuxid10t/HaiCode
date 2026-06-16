@@ -325,7 +325,34 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         if (step_failed) break;
 
-        // Persist assistant turn (text and/or tool calls)
+        // Split off tool calls whose streamed input failed to parse. We don't
+        // execute them, and crucially we don't persist them — otherwise the
+        // next iteration would send the model its own phantom empty tool_use
+        // block, which is what causes the "stumble on empty toolcall" loop.
+        bool had_parse_failure = false;
+        for (auto it = tool_calls.begin(); it != tool_calls.end(); ) {
+            if (it->parse_failed) {
+                had_parse_failure = true;
+                fprintf(stderr,
+                    "[engine] dropping malformed tool_call %s (%s); raw=%zu bytes: %.200s\n",
+                    it->id.c_str(), it->name.c_str(),
+                    it->raw_input.size(), it->raw_input.c_str());
+
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["call_id"]    = it->id;
+                ev["tool_name"]  = it->name;
+                ev["input"]      = it->input;
+                ev["error"]      = "Tool input could not be parsed (likely lost during "
+                                   "streaming). Not executed — retry the tool call.";
+                bus_.publish(events::EventType::ToolFailed, ev);
+                it = tool_calls.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        // Persist assistant turn (text and/or valid tool calls only)
         if (!full_text.empty() || !tool_calls.empty()) {
             nlohmann::json data;
             data["role"] = "assistant";
@@ -351,7 +378,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             bus_.publish(events::EventType::StepEnded, ev);
         }
 
-        if (finish_reason != FinishReason::ToolUse || tool_calls.empty()) break;
+        // Break unless the model wanted to call tools and we have at least one
+        // valid call to run. If every call was dropped due to a parse failure,
+        // continue the loop so the model gets another turn to retry.
+        if (finish_reason != FinishReason::ToolUse) break;
+        if (tool_calls.empty() && !had_parse_failure) break;
         if (interrupt_flag && interrupt_flag->load()) break;
 
         // Execute tool calls

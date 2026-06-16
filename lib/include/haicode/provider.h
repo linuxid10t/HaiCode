@@ -30,6 +30,11 @@ struct ToolCall {
     std::string id;
     std::string name;
     nlohmann::json input;
+    // Set when the streamed tool input could not be parsed (empty/partial JSON).
+    // The engine drops these calls so the model isn't shown a phantom empty
+    // tool_use on the next turn.
+    bool parse_failed = false;
+    std::string raw_input;
 };
 
 struct LLMResponse {

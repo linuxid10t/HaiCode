@@ -1,7 +1,63 @@
 #include <haicode/tool.h>
 #include <fnmatch.h>
+#include <string>
+#include <vector>
 
 namespace haicode {
+
+// Lexically normalize a POSIX path: collapses "//", resolves "." and "..",
+// preserves whether the input was absolute. Does not touch the filesystem,
+// so a ".." escape in `path` is caught even if the resolved target is missing.
+static std::string normalize_path(const std::string& p) {
+    bool absolute = (!p.empty() && p[0] == '/');
+    std::vector<std::string> parts;
+    std::string seg;
+    auto flush = [&]() {
+        if (seg == "..") {
+            if (!parts.empty() && parts.back() != "..") parts.pop_back();
+            else if (!absolute) parts.push_back("..");
+        } else if (seg != "." && !seg.empty()) {
+            parts.push_back(seg);
+        }
+        seg.clear();
+    };
+    for (char c : p) {
+        if (c == '/') flush();
+        else seg += c;
+    }
+    flush();
+
+    if (absolute) {
+        std::string out = "/";
+        for (size_t i = 0; i < parts.size(); i++) {
+            if (i > 0) out += "/";
+            out += parts[i];
+        }
+        return out;
+    }
+    if (parts.empty()) return ".";
+    std::string out;
+    for (size_t i = 0; i < parts.size(); i++) {
+        if (i > 0) out += "/";
+        out += parts[i];
+    }
+    return out;
+}
+
+// True if `path` is `base` itself or somewhere underneath it. Both inputs are
+// normalized lexically first; both must be absolute for an unambiguous answer.
+static bool is_path_within(const std::string& path, const std::string& base) {
+    if (path.empty() || base.empty()) return false;
+    std::string npath = normalize_path(path);
+    std::string nbase = normalize_path(base);
+    if (npath.empty() || npath[0] != '/') return false;
+    if (nbase.empty() || nbase[0] != '/') return false;
+    if (nbase == "/") return true;
+    if (npath == nbase) return true;
+    return npath.size() > nbase.size()
+        && npath[nbase.size()] == '/'
+        && npath.compare(0, nbase.size(), nbase) == 0;
+}
 
 void PermissionGate::set_rules(const std::vector<PermissionRule>& rules) {
     rules_ = rules;
@@ -91,6 +147,16 @@ ToolResult ToolRegistry::execute(const std::string& name,
         r.success = false;
         r.error = "Unknown tool: " + name;
         return r;
+    }
+
+    // Reads inside the working directory are always allowed — no prompt, no
+    // rule lookup. The user has implicitly trusted the project tree by
+    // opening it. Reads outside the working dir still go through the gate.
+    if (name == "read" && !ctx.working_dir.empty()) {
+        std::string resource = tool->resource(input, ctx);
+        if (is_path_within(resource, ctx.working_dir)) {
+            return tool->execute(input, ctx);
+        }
     }
 
     auto perm = gate.check(tool->required_permission(),

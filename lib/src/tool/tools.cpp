@@ -55,6 +55,19 @@ static std::string resolve_path(const std::string& path, const std::string& work
     return (base.empty() ? "." : base) + "/" + path;
 }
 
+// Build an error string for a missing/empty required field. If `input` is an
+// empty object, the most likely cause is lost streaming arguments — say so
+// so the model retries rather than guessing what it did wrong.
+static std::string missing_field(const std::string& tool, const std::string& field,
+                                 const nlohmann::json& input) {
+    std::string err = tool + ": missing or empty '" + field + "'.";
+    if (input.is_object() && input.empty())
+        err += " Input is empty — the tool arguments were likely lost in streaming. Retry the tool call.";
+    else
+        err += " Received input: " + input.dump();
+    return err;
+}
+
 // ---- BashTool ----
 
 class BashTool : public Tool {
@@ -82,7 +95,7 @@ public:
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string command = input.value("command", "");
         if (command.empty())
-            return {false, "", "No command provided"};
+            return {false, "", missing_field("bash", "command", input)};
 
         int timeout_sec = input.value("timeout", 30);
         if (timeout_sec <= 0) timeout_sec = 30;
@@ -150,7 +163,7 @@ public:
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string path = input.value("path", "");
         if (path.empty())
-            return {false, "", "No path provided"};
+            return {false, "", missing_field("read", "path", input)};
 
         // Resolve relative paths
         if (path[0] != '/') {
@@ -237,7 +250,10 @@ public:
         std::string path = input.value("path", "");
         std::string content = input.value("content", "");
         if (path.empty())
-            return {false, "", "No path provided"};
+            return {false, "", missing_field("write", "path", input)};
+        // content may be legitimately empty (writing an empty file) — but if
+        // path is also missing and input is otherwise empty, the streaming
+        // layer dropped the args. missing_field() above already flags that.
 
         // Resolve relative paths
         if (path[0] != '/') {
@@ -303,7 +319,7 @@ public:
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string pattern = input.value("pattern", "");
         if (pattern.empty())
-            return {false, "", "No pattern provided"};
+            return {false, "", missing_field("glob", "pattern", input)};
 
         std::string full_pattern;
         if (pattern[0] == '/') {
@@ -375,7 +391,7 @@ public:
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string pattern = input.value("pattern", "");
         if (pattern.empty())
-            return {false, "", "No pattern provided"};
+            return {false, "", missing_field("grep", "pattern", input)};
 
         // Resolve search path
         std::string path;
@@ -493,9 +509,9 @@ public:
         bool replace_all = input.value("replace_all", false);
 
         if (path.empty())
-            return {false, "", "No path provided"};
+            return {false, "", missing_field("edit", "path", input)};
         if (old_string.empty())
-            return {false, "", "old_string is empty; nothing to find. "
+            return {false, "", "edit: old_string is empty; nothing to find. "
                                "To delete text, provide both old_string and an empty new_string."};
 
         path = resolve_path(path, ctx.working_dir);
@@ -662,7 +678,7 @@ public:
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string command = input.value("command", "");
         if (command.empty())
-            return {false, "", "No command provided"};
+            return {false, "", missing_field("external_terminal", "command", input)};
 
         std::string dir;
         if (input.contains("working_dir") && input["working_dir"].is_string()
