@@ -7,8 +7,54 @@
 #include <sys/utsname.h>
 #include <cstdio>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <dirent.h>
 
 namespace haicode {
+
+// Return the content of the most recently written *active* plan file under
+// <project_dir>/.haicode/plans/, or empty string if none exist.
+// Plans tagged <!-- haicode-status: active --> are live; any other status
+// (implemented, discarded, …) is treated as retired and skipped.
+// The status header line is stripped before returning the content.
+static std::string load_latest_plan(const std::string& project_dir) {
+    std::string plans_dir = project_dir + "/.haicode/plans";
+    DIR* d = opendir(plans_dir.c_str());
+    if (!d) return {};
+
+    std::string latest_name;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string n = ent->d_name;
+        if (n.size() < 4 || n.substr(n.size() - 3) != ".md") continue;
+        if (n <= latest_name) continue;
+        // Only consider plans marked active.
+        std::ifstream probe(plans_dir + "/" + n);
+        std::string first_line;
+        if (std::getline(probe, first_line) &&
+            first_line.find("haicode-status: active") != std::string::npos) {
+            latest_name = n;
+        }
+    }
+    closedir(d);
+
+    if (latest_name.empty()) return {};
+
+    std::ifstream f(plans_dir + "/" + latest_name);
+    if (!f.is_open()) return {};
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    std::string content = ss.str();
+
+    // Strip the status header line so it doesn't appear in the prompt.
+    auto newline = content.find('\n');
+    if (newline != std::string::npos &&
+        content.substr(0, newline).find("haicode-status:") != std::string::npos) {
+        content = content.substr(newline + 1);
+    }
+    return content;
+}
 
 static void substitute_all(std::string& s, const std::string& from, const std::string& to) {
     if (from.empty()) return;
@@ -340,6 +386,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             "your system prompt for every future session in this project.";
     }
 
+    // Inject the most recent plan file so the agent has it in context even
+    // when starting a fresh session after planning was done in a prior one.
+    std::string latest_plan_block;
+    {
+        std::string plan_content = load_latest_plan(session.directory);
+        if (!plan_content.empty()) {
+            latest_plan_block = "\n\n# Most recent plan (.haicode/plans/)\n\n"
+                              + plan_content;
+        }
+    }
+
     // Plan-mode block: appended only when the session is in Plan mode. Tells
     // the model it must research and propose_plan rather than modify files.
     // The engine separately filters out state-modifying tools when this block
@@ -351,6 +408,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
     std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
                        + agents_md_block
+                       + latest_plan_block
                        + instructions_block
                        + plan_mode_block;
 
@@ -387,8 +445,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
         // stay current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
-                               max_steps - step) + agents_md_block + instructions_block
-                              + plan_mode_block;
+                               max_steps - step) + agents_md_block + latest_plan_block
+                              + instructions_block + plan_mode_block;
         // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
         system_dynamic = render_prompt(kDynamicSystemPrompt, model_id, os_info,
                                         session.directory, max_steps - step);
@@ -633,6 +691,47 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 }
                 ev["todos"] = arr;
                 bus_.publish(events::EventType::TodoUpdated, ev);
+
+                // Auto-retire the active plan when every todo is completed.
+                if (!todos.empty() &&
+                    std::all_of(todos.begin(), todos.end(),
+                                [](const Todo& t){ return t.status == "completed"; })) {
+                    std::string plans_dir = session.directory + "/.haicode/plans";
+                    DIR* pd = opendir(plans_dir.c_str());
+                    if (pd) {
+                        std::string latest;
+                        struct dirent* pe;
+                        while ((pe = readdir(pd)) != nullptr) {
+                            std::string n = pe->d_name;
+                            if (n.size() < 4 || n.substr(n.size() - 3) != ".md") continue;
+                            if (n <= latest) continue;
+                            std::ifstream probe(plans_dir + "/" + n);
+                            std::string first;
+                            if (std::getline(probe, first) &&
+                                first.find("haicode-status: active") != std::string::npos)
+                                latest = n;
+                        }
+                        closedir(pd);
+                        if (!latest.empty()) {
+                            std::string plan_path = plans_dir + "/" + latest;
+                            std::ifstream pf(plan_path);
+                            std::ostringstream pss;
+                            pss << pf.rdbuf();
+                            std::string pcontent = pss.str();
+                            const std::string kOld = "<!-- haicode-status: active -->";
+                            const std::string kNew = "<!-- haicode-status: implemented -->";
+                            auto ppos = pcontent.find(kOld);
+                            if (ppos != std::string::npos)
+                                pcontent.replace(ppos, kOld.size(), kNew);
+                            // Best-effort: ignore write errors (plan still implemented).
+                            std::string tmp = plan_path + ".tmp_write";
+                            if (std::ofstream out{tmp, std::ios::binary}) {
+                                out.write(pcontent.data(), pcontent.size());
+                                if (out.good()) rename(tmp.c_str(), plan_path.c_str());
+                            }
+                        }
+                    }
+                }
             }
 
             if (result.denied) { any_denied = true; break; }

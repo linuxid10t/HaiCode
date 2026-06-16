@@ -775,7 +775,8 @@ public:
 
         std::string path = plans_dir + "/plan_" + ts + "_" + rand_suffix + ".md";
 
-        std::string err = atomic_write(path, plan);
+        std::string err = atomic_write(path,
+            "<!-- haicode-status: active -->\n" + plan);
         if (!err.empty())
             return {false, "", err};
 
@@ -849,6 +850,99 @@ public:
             {"note", "agents.md written. It will be included in the system "
                      "prompt starting from the next session."}
         };
+        return {true, out.dump(2), ""};
+    }
+};
+
+// ---- DiscardPlanTool ----
+//
+// Marks the most recent active plan as discarded so it is no longer
+// injected into the system prompt. Use when abandoning a plan without
+// implementing it, or after the plan has been fully implemented.
+
+class DiscardPlanTool : public Tool {
+public:
+    std::string name() const override { return "discard_plan"; }
+    std::string description() const override {
+        return "Retire the most recent active plan. Call this when the plan "
+               "has been fully implemented or when the user wants to abandon "
+               "it. Retired plans are no longer injected into future sessions.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"reason", {
+                    {"type", "string"},
+                    {"description", "Brief reason: 'implemented' or 'abandoned'."}
+                }}
+            }},
+            {"required", nlohmann::json::array({"reason"})}
+        };
+    }
+    std::string required_permission() const override { return "write"; }
+    std::string resource(const nlohmann::json& /*input*/,
+                         const ToolContext& ctx) const override {
+        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        return base + "/.haicode/plans/";
+    }
+
+    ToolResult execute(const nlohmann::json& input,
+                       const ToolContext& ctx) override {
+        std::string reason = input.value("reason", "discarded");
+
+        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        std::string plans_dir = base + "/.haicode/plans";
+
+        // Find the latest active plan (lexicographic = chronological).
+        DIR* d = opendir(plans_dir.c_str());
+        if (!d)
+            return {false, "", "discard_plan: no plans directory found."};
+
+        std::string latest_name;
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            std::string n = ent->d_name;
+            if (n.size() < 4 || n.substr(n.size() - 3) != ".md") continue;
+            if (n <= latest_name) continue;
+            // Peek at the status header.
+            std::string path = plans_dir + "/" + n;
+            std::ifstream f(path);
+            std::string first_line;
+            if (std::getline(f, first_line) &&
+                first_line.find("haicode-status: active") != std::string::npos) {
+                latest_name = n;
+            }
+        }
+        closedir(d);
+
+        if (latest_name.empty())
+            return {false, "", "discard_plan: no active plan found."};
+
+        std::string path = plans_dir + "/" + latest_name;
+
+        // Read the file, swap the status line, rewrite atomically.
+        std::ifstream f(path);
+        if (!f.is_open())
+            return {false, "", "discard_plan: cannot read " + path};
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        f.close();
+        std::string content = ss.str();
+
+        const std::string old_header = "<!-- haicode-status: active -->";
+        const std::string new_header = "<!-- haicode-status: " + reason + " -->";
+        auto pos = content.find(old_header);
+        if (pos != std::string::npos)
+            content.replace(pos, old_header.size(), new_header);
+
+        std::string err = atomic_write(path, content);
+        if (!err.empty())
+            return {false, "", err};
+
+        nlohmann::json out = {{"path", path}, {"status", reason}};
         return {true, out.dump(2), ""};
     }
 };
@@ -953,6 +1047,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<LsTool>());
     registry.register_tool(std::make_shared<ExternalTerminalTool>());
     registry.register_tool(std::make_shared<ProposePlanTool>());
+    registry.register_tool(std::make_shared<DiscardPlanTool>());
     registry.register_tool(std::make_shared<WriteAgentsMdTool>());
     registry.register_tool(std::make_shared<TodoWriteTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
