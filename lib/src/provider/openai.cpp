@@ -2,6 +2,7 @@
 #include <haicode/util.h>
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <cstdio>
 #include <map>
 #include <string>
 
@@ -65,6 +66,14 @@ translate_messages(const std::string& system,
                                 ? block["input"].dump() : "{}"}
                         };
                         tc_arr.push_back(tc);
+                    } else {
+                        // Unknown assistant block (thinking, image, etc.).
+                        // Warn rather than silently drop so future additions
+                        // surface visibly instead of vanishing from the
+                        // OpenAI request.
+                        fprintf(stderr, "openai: dropping unknown assistant "
+                                "content block type '%s'\n",
+                                btype.c_str());
                     }
                 }
                 nlohmann::json asst;
@@ -75,7 +84,14 @@ translate_messages(const std::string& system,
                     asst["tool_calls"] = tc_arr;
                 out.push_back(asst);
             } else {
-                // User content array: look for tool_result blocks
+                // User content array. Anthropic allows mixing text,
+                // tool_result, image blocks; OpenAI can't carry all of
+                // these in one message. tool_result blocks become separate
+                // "tool" role messages; remaining text blocks concatenate
+                // into a single "user" message emitted AFTER the tool
+                // messages (flow: assistant tool_calls → tool responses →
+                // user follow-up). Unknown block types warn but don't fail.
+                std::string user_text;
                 for (auto& block : content) {
                     std::string btype = block.value("type", "");
                     if (btype == "tool_result") {
@@ -83,14 +99,50 @@ translate_messages(const std::string& system,
                         tr["role"]         = "tool";
                         tr["tool_call_id"] = block.value("tool_use_id", "");
                         auto& bc = block["content"];
-                        if (bc.is_string())
+                        if (bc.is_string()) {
                             tr["content"] = bc;
-                        else if (bc.is_array() && !bc.empty())
-                            tr["content"] = bc[0].value("text", bc.dump());
-                        else
+                        } else if (bc.is_array() && !bc.empty()) {
+                            // Concatenate string and text blocks; warn on
+                            // anything else (image results, etc.) instead
+                            // of silently keeping only the first element.
+                            std::string acc;
+                            for (auto& sub : bc) {
+                                if (sub.is_string())
+                                    acc += sub.get<std::string>();
+                                else if (sub.value("type", "") == "text")
+                                    acc += sub.value("text", "");
+                                else
+                                    fprintf(stderr,
+                                        "openai: dropping unsupported "
+                                        "tool_result content block type "
+                                        "'%s'\n",
+                                        sub.value("type", "(none)").c_str());
+                            }
+                            tr["content"] = acc;
+                        } else {
                             tr["content"] = "";
+                        }
                         out.push_back(tr);
+                    } else if (btype == "text") {
+                        user_text += block.value("text", "");
+                    } else if (btype == "image") {
+                        // OpenAI vision uses {type:"image_url", image_url:{...}}
+                        // but the Anthropic source shape {type:"image",
+                        // source:{...}} differs. Warn until that mapping
+                        // is implemented — don't silently drop.
+                        fprintf(stderr, "openai: image block in user content "
+                                "not yet translated (needs Anthropic source "
+                                "→ image_url conversion)\n");
+                    } else {
+                        fprintf(stderr, "openai: dropping unknown user "
+                                "content block type '%s'\n",
+                                btype.c_str());
                     }
+                }
+                if (!user_text.empty()) {
+                    out.push_back({
+                        {"role", "user"}, {"content", user_text}
+                    });
                 }
             }
             continue;
