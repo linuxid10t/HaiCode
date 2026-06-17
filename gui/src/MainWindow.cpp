@@ -1023,8 +1023,8 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
             streaming_state_ = "thinking";
             current_tool_name_.clear();
             _UpdateStatusStrip();
-            engine_->continue_session(sid);
         }
+        engine_->continue_session(sid);
     }
 }
 
