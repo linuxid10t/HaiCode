@@ -1,5 +1,6 @@
 #include <haicode/tool.h>
 #include <fnmatch.h>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -154,8 +155,9 @@ ToolResult ToolRegistry::execute(const std::string& name,
     // tree by opening it. Operations outside the working dir still go
     // through the gate.
     if (!ctx.working_dir.empty()) {
-        // read, ls, grep: resource() returns a resolved absolute path.
-        if (name == "read" || name == "ls" || name == "grep") {
+        // read, ls, grep, diff, find: resource() returns a resolved absolute path.
+        if (name == "read" || name == "ls" || name == "grep" ||
+            name == "diff" || name == "find") {
             if (is_path_within(tool->resource(input, ctx), ctx.working_dir))
                 return tool->execute(input, ctx);
         }
@@ -174,6 +176,15 @@ ToolResult ToolRegistry::execute(const std::string& name,
             if (is_path_within(normalize_path(prefix), ctx.working_dir))
                 return tool->execute(input, ctx);
         }
+        // git read-only subcommands never modify the repo — always allow.
+        if (name == "git") {
+            static const std::set<std::string> git_readonly = {
+                "status", "diff", "log", "show", "branch", "blame",
+                "ls-files", "shortlog", "describe", "rev-parse",
+            };
+            if (git_readonly.count(input.value("subcommand", "")))
+                return tool->execute(input, ctx);
+        }
     }
     // Web tools have no filesystem side effects — always allow.
     if (name == "web_search" || name == "web_extract")
@@ -182,6 +193,13 @@ ToolResult ToolRegistry::execute(const std::string& name,
     // propose_plan and todo_write only write internal state — always allow.
     if (name == "propose_plan" || name == "todo_write")
         return tool->execute(input, ctx);
+
+    // process list and check_port are read-only — always allow.
+    if (name == "process") {
+        std::string action = input.value("action", "");
+        if (action == "list" || action == "check_port")
+            return tool->execute(input, ctx);
+    }
 
     auto perm = gate.check(tool->required_permission(),
                            tool->resource(input, ctx),

@@ -124,6 +124,7 @@ Tool call bodies (`╔ … ╚` block) are hidden by default. `x` expands all bl
 - **BeAPI `BScrollView` constructor**: use the 6-arg layout-aware form (no `resizingMode` parameter) when building layout-managed views. The 7-arg old-style form breaks layout and grays out child views.
 - **SQLite schema**: `session`, `session_message` (types: `user_prompted`, `assistant_text`, `tool_called`, `tool_result`), `permission`. WAL mode + FK constraints (`ON DELETE CASCADE`) enabled.
 - **Tool context messages**: assistant messages that include tool calls must be stored and reassembled with Anthropic `tool_use` content blocks (not plain text). Missing these causes orphaned `tool_result` blocks in the next request, making the model repeat work it already completed.
+- **Non-destructive tools are always allowed within the project directory** (`ToolRegistry::execute()` in `lib/src/permission/permission.cpp`): `read`, `ls`, `grep`, `diff`, `find` bypass the gate when their resolved path is inside `ctx.working_dir`; `glob` bypasses for relative patterns or absolute patterns rooted inside the project; read-only `git` subcommands (`status`, `diff`, `log`, `show`, `branch`, `blame`, `ls-files`, `shortlog`, `describe`, `rev-parse`) always bypass; `process list` and `process check_port` always bypass; `web_search`, `web_extract`, `propose_plan`, `todo_write` always bypass regardless of directory.
 - **SSE parser state must persist across `write_cb` invocations** (`lib/src/util/util.cpp`). `event_type` and `event_data` live on `HttpClient::State`, not as locals — libcurl invokes the write callback once per network chunk and a single SSE event (event:/data:/blank line) frequently straddles those chunks for large tool inputs (e.g. `propose_plan` markdown). Locals silently dropped half-parsed events, truncating tool input JSON and causing `parse_failed` drops in the engine. Clear both fields at the start of every new `post_sse()`.
 - **`ToolResult` struct field order**: `{bool success, string output, string error, bool denied}`. The `denied` field is last — do not insert fields before it or existing brace-initializers break.
 - Tool output is truncated to 100 KB (`MAX_OUTPUT` in `tools.cpp`).
@@ -210,21 +211,21 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Writes proposed content to `<path>.tmp_diff`, runs `diff -u <original> <tmp>`, then `unlink`s the temp file
 - Exit code 1 (differences found) is treated as success; exit code 2 is a diff error (returns failure)
 - Returns `"(no differences)"` when the content is identical
-- Required permission: `read`
+- Always allowed within the project directory; paths outside go through the gate (`read` permission)
 
 ### GitTool (`git`)
 - Runs `git -C <working_dir> <subcommand> [args...]` via `popen`
 - Subcommand allowlist (validated before execution): `status`, `diff`, `log`, `show`, `branch`, `blame`, `stash`, `add`, `commit`, `checkout`, `reset`, `remote`, `merge`, `rebase`, `pull`, `push`, `fetch`, `tag`, `shortlog`, `describe`, `rev-parse`, `ls-files`
 - All args passed through `sq()` — no shell injection possible
 - Non-zero exit with non-empty output returns `success=false` with the output in `error`
-- Required permission: `git`; resource is the subcommand name (e.g. `push`, `commit`) for fine-grained permission rules
+- Read-only subcommands (`status`, `diff`, `log`, `show`, `branch`, `blame`, `ls-files`, `shortlog`, `describe`, `rev-parse`) are always allowed; mutating subcommands go through the gate (`git` permission, resource = subcommand name)
 
 ### FindTool (`find`)
 - Wraps `find(1)` with optional `-maxdepth`, `-type`, `-name`, `-mtime`, `-size` flags
 - All user-supplied values passed through `sq()` — safe against injection
 - `type` is validated to one of `f`, `d`, `l` before being passed to the shell
 - Relative `path` resolved against `ctx.working_dir`; defaults to `ctx.working_dir` if omitted
-- Returns `"(no matches)"` on empty output; required permission: `read`
+- Always allowed within the project directory; paths outside go through the gate (`read` permission)
 - Fills the gap left by GlobTool, which does not support `**` recursive matching
 
 ### ProcessTool (`process`)
@@ -232,7 +233,7 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - **list**: runs `ps` and optionally filters output lines by a `filter` substring (header always stripped from the no-match path); returns `"(no matching processes)"` if filter matches nothing
 - **kill**: calls `kill(2)` directly (not a shell command) with the given `pid` and `signal` (TERM, KILL, HUP, INT, USR1, USR2, STOP, CONT; default TERM)
 - **check_port**: runs `netstat -n` and filters for lines containing `:<port>`; returns `"Nothing listening on port N"` if none found
-- Required permission: `process`; resource is `pid:<N>` for kill, `port:<N>` for check_port, action name otherwise
+- `list` and `check_port` are always allowed; `kill` goes through the gate (`process` permission, resource `pid:<N>`)
 
 ### WebSearchTool (`web_search`) — `web_tools.cpp`
 - Backends: `mojeek` (default, no API key), `ddg_lite`, `ddg_html`. Configurable via `AppConfig::web_search_engine`
