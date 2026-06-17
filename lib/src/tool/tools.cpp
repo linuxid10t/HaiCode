@@ -1098,6 +1098,145 @@ public:
     }
 };
 
+// ---- GitTool ----
+
+class GitTool : public Tool {
+    static constexpr const char* kAllowed[] = {
+        "status", "diff", "log", "show", "branch", "blame",
+        "stash", "add", "commit", "checkout", "reset", "remote",
+        "merge", "rebase", "pull", "push", "fetch", "tag",
+        "shortlog", "describe", "rev-parse", "ls-files",
+    };
+
+    static bool is_allowed(const std::string& sub) {
+        for (auto* s : kAllowed) if (sub == s) return true;
+        return false;
+    }
+
+public:
+    std::string name() const override { return "git"; }
+    std::string description() const override {
+        return "Run a git subcommand (status, diff, log, add, commit, branch, blame, "
+               "stash, checkout, reset, remote, merge, rebase, pull, push, fetch, tag, "
+               "shortlog, describe, rev-parse, ls-files) in the project directory. "
+               "Pass extra flags via the args array.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"subcommand", {{"type", "string"}, {"description", "Git subcommand to run."}}},
+                {"args",       {{"type", "array"},  {"items", {{"type", "string"}}},
+                                {"description", "Additional arguments and flags passed to git after the subcommand."}}}
+            }},
+            {"required", nlohmann::json::array({"subcommand"})}
+        };
+    }
+    std::string required_permission() const override { return "git"; }
+    std::string resource(const nlohmann::json& input, const ToolContext&) const override {
+        return input.value("subcommand", "");
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string sub = input.value("subcommand", "");
+        if (sub.empty())
+            return {false, "", missing_field("git", "subcommand", input)};
+        if (!is_allowed(sub))
+            return {false, "", "git: subcommand not allowed: " + sub};
+
+        std::string cmd = "git -C " + sq(ctx.working_dir) + " " + sub;
+        if (input.contains("args") && input["args"].is_array()) {
+            for (const auto& a : input["args"]) {
+                if (a.is_string()) cmd += " " + sq(a.get<std::string>());
+            }
+        }
+        cmd += " 2>&1";
+
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe)
+            return {false, "", "popen failed: " + std::string(strerror(errno))};
+        std::string output = read_pipe(pipe);
+        int rc = pclose(pipe);
+        int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+
+        if (exit_code != 0 && output.empty())
+            return {false, "", "git exited with code " + std::to_string(exit_code)};
+
+        return {exit_code == 0, output, exit_code == 0 ? "" : output};
+    }
+};
+
+// ---- FindTool ----
+
+class FindTool : public Tool {
+public:
+    std::string name() const override { return "find"; }
+    std::string description() const override {
+        return "Recursively search for files and directories. Supports filtering by name "
+               "pattern, type (f/d/l), max depth, modification time (mtime), and size. "
+               "Use this instead of glob when you need recursive matching or time/size filters.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"path",     {{"type", "string"}, {"description", "Directory to search. Defaults to the project directory."}}},
+                {"name",     {{"type", "string"}, {"description", "Filename glob pattern, e.g. \"*.cpp\"."}}},
+                {"type",     {{"type", "string"}, {"enum", {"f", "d", "l"}},
+                              {"description", "Limit to files (f), directories (d), or symlinks (l)."}}},
+                {"maxdepth", {{"type", "integer"}, {"description", "Maximum directory depth to descend."}}},
+                {"mtime",    {{"type", "string"}, {"description", "Filter by modification time in days, e.g. \"-1\" = modified in last day, \"+7\" = older than 7 days."}}},
+                {"size",     {{"type", "string"}, {"description", "Filter by size, e.g. \"+1M\" = larger than 1 MB, \"-100k\" = smaller than 100 KB."}}}
+            }},
+            {"required", nlohmann::json::array()}
+        };
+    }
+    std::string required_permission() const override { return "read"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        std::string path = input.value("path", "");
+        return path.empty() ? ctx.working_dir : resolve_path(path, ctx.working_dir);
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string path = input.value("path", "");
+        path = path.empty() ? ctx.working_dir : resolve_path(path, ctx.working_dir);
+
+        std::string cmd = "find " + sq(path);
+
+        if (input.contains("maxdepth") && input["maxdepth"].is_number_integer())
+            cmd += " -maxdepth " + std::to_string(input["maxdepth"].get<int>());
+
+        if (input.contains("type") && input["type"].is_string()) {
+            std::string t = input["type"].get<std::string>();
+            if (t == "f" || t == "d" || t == "l")
+                cmd += " -type " + t;
+        }
+
+        if (input.contains("name") && input["name"].is_string())
+            cmd += " -name " + sq(input["name"].get<std::string>());
+
+        if (input.contains("mtime") && input["mtime"].is_string())
+            cmd += " -mtime " + sq(input["mtime"].get<std::string>());
+
+        if (input.contains("size") && input["size"].is_string())
+            cmd += " -size " + sq(input["size"].get<std::string>());
+
+        cmd += " 2>&1";
+
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe)
+            return {false, "", "popen failed: " + std::string(strerror(errno))};
+        std::string output = read_pipe(pipe);
+        int rc = pclose(pipe);
+        int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+
+        if (exit_code != 0)
+            return {false, "", "find error: " + output};
+
+        return {true, output.empty() ? "(no matches)" : output, ""};
+    }
+};
+
 // Registration function
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
@@ -1113,6 +1252,8 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<WriteAgentsMdTool>());
     registry.register_tool(std::make_shared<TodoWriteTool>());
     registry.register_tool(std::make_shared<DiffTool>());
+    registry.register_tool(std::make_shared<GitTool>());
+    registry.register_tool(std::make_shared<FindTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know
     // about HttpClient.
