@@ -1036,6 +1036,68 @@ public:
     }
 };
 
+// ---- DiffTool ----
+
+class DiffTool : public Tool {
+public:
+    std::string name() const override { return "diff"; }
+    std::string description() const override {
+        return "Show a unified diff between the current contents of a file and proposed "
+               "new content. Useful for previewing edits before applying them.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"path",    {{"type", "string"}, {"description", "File to compare. Absolute or relative to the project directory."}}},
+                {"content", {{"type", "string"}, {"description", "Proposed new file contents."}}}
+            }},
+            {"required", nlohmann::json::array({"path", "content"})}
+        };
+    }
+    std::string required_permission() const override { return "read"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        std::string path = input.value("path", "");
+        return path.empty() ? ctx.working_dir : resolve_path(path, ctx.working_dir);
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string path = input.value("path", "");
+        std::string content = input.value("content", "");
+        if (path.empty())
+            return {false, "", missing_field("diff", "path", input)};
+
+        path = resolve_path(path, ctx.working_dir);
+
+        // Write proposed content to a temp file
+        std::string tmp = path + ".tmp_diff";
+        {
+            std::ofstream fout(tmp, std::ios::binary);
+            if (!fout.is_open())
+                return {false, "", "Cannot write temp file: " + tmp + ": " + strerror(errno)};
+            fout.write(content.data(), static_cast<std::streamsize>(content.size()));
+            if (!fout)
+                return {false, "", "Write failed: " + tmp};
+        }
+
+        std::string cmd = "diff -u " + sq(path) + " " + sq(tmp) + " 2>&1";
+        FILE* pipe = popen(cmd.c_str(), "r");
+        if (!pipe) {
+            ::unlink(tmp.c_str());
+            return {false, "", "popen failed: " + std::string(strerror(errno))};
+        }
+        std::string output = read_pipe(pipe);
+        int rc = pclose(pipe);
+        ::unlink(tmp.c_str());
+
+        int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+        if (exit_code == 2)
+            return {false, "", "diff error: " + output};
+
+        return {true, output.empty() ? "(no differences)" : output, ""};
+    }
+};
+
 // Registration function
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
@@ -1050,6 +1112,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<DiscardPlanTool>());
     registry.register_tool(std::make_shared<WriteAgentsMdTool>());
     registry.register_tool(std::make_shared<TodoWriteTool>());
+    registry.register_tool(std::make_shared<DiffTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know
     // about HttpClient.
