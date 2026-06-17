@@ -192,6 +192,9 @@ private:
     int  max_context_            = 0;
     double session_cost_         = 0.0;
 
+    // --- Tool block collapse state ---
+    bool tools_expanded_ = false;   // x key toggles; collapsed by default
+
     // --- TodoWrite state ---
     std::vector<haicode::Todo> current_todos_;
     bool   todos_visible_ = false;

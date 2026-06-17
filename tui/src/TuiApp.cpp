@@ -470,9 +470,8 @@ void TuiApp::end_streaming() {
 
 void TuiApp::append_tool_called(const std::string& tool_name,
                                  const std::string& input_json) {
-    // Header line: ╔ bash ════
-    append_line({ LineType::ToolHeader,
-                  std::string("╔ ") + tool_name + " ════════════════════════" });
+    // Store just the tool name; render_chat formats with ▶/▼ based on tools_expanded_
+    append_line({ LineType::ToolHeader, tool_name });
 
     // Show first ~5 lines of the input as tool body
     std::string body;
@@ -720,6 +719,12 @@ void TuiApp::handle_key(int key) {
         render_all();
         return;
 
+    case 'x': // Toggle tool body expand/collapse
+    case 'X':
+        tools_expanded_ = !tools_expanded_;
+        render_all();
+        return;
+
     case '\t': // Tab — switch focus
         focus_ = (focus_ == 0) ? 1 : 0;
         render_all();
@@ -952,7 +957,17 @@ void TuiApp::render_chat() {
             display.push_back({ cl.type, "", false });
             continue;
         }
-        auto wrapped = wrap(cl.text, w - 1);
+        // When collapsed, hide all tool body lines (input and closing border)
+        if (cl.type == LineType::ToolBody && !tools_expanded_) {
+            continue;
+        }
+        std::string display_text = cl.text;
+        if (cl.type == LineType::ToolHeader) {
+            // Format: ╔ <name> ▶/▼
+            std::string indicator = tools_expanded_ ? " ▼" : " ▶";
+            display_text = "╔ " + cl.text + indicator;
+        }
+        auto wrapped = wrap(display_text, w - 1);
         for (int k = 0; k < (int)wrapped.size(); ++k) {
             display.push_back({ cl.type, wrapped[k],
                                 cl.streaming && k == (int)wrapped.size() - 1 });
