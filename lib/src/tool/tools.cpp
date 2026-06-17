@@ -139,6 +139,7 @@ static bool is_binary(std::ifstream& f) {
     for (std::streamsize i = 0; i < n; i++) {
         if (buf[i] == '\0') return true;
     }
+    f.clear();   // read() past EOF sets eofbit; clear it before seeking back
     f.seekg(0);
     return false;
 }
