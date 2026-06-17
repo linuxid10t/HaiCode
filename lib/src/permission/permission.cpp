@@ -179,8 +179,8 @@ ToolResult ToolRegistry::execute(const std::string& name,
     if (name == "web_search" || name == "web_extract")
         return tool->execute(input, ctx);
 
-    // propose_plan only writes a plan file and flips session state — always allow.
-    if (name == "propose_plan")
+    // propose_plan and todo_write only write internal state — always allow.
+    if (name == "propose_plan" || name == "todo_write")
         return tool->execute(input, ctx);
 
     auto perm = gate.check(tool->required_permission(),
