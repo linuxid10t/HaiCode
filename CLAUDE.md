@@ -194,10 +194,10 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 
 ### ProposePlanTool (`propose_plan`)
 - Available in both Plan and Build mode — no engine-level filter removes it
+- Always allowed — `ToolRegistry::execute()` bypasses the permission gate (same as web tools)
 - Writes the plan markdown to `<project_dir>/.haicode/plans/plan_YYYYMMDD_HHMMSS_<4-hex-rand>.md`
 - Parent directory created with `mkdir()` walking (same pattern as WriteTool)
 - Returns the on-disk path so the engine can surface it via `PlanProposed` and end the turn
-- Required permission: `propose_plan`
 
 ### DiffTool (`diff`)
 - Writes proposed content to `<path>.tmp_diff`, runs `diff -u <original> <tmp>`, then `unlink`s the temp file
