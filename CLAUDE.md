@@ -128,6 +128,7 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - `offset` is 1-based (offset=1 starts at line 1, the default)
 - Enforces 100 KB cap mid-read
 - Error messages include `strerror(errno)`
+- **`f.clear()` is called before `seekg(0)` after the binary scan** — `read()` past EOF sets `eofbit`; without the clear, `getline()` fails immediately and returns empty output for any file smaller than 8 KB
 
 ### WriteTool (`write`)
 - Resolves relative paths against `ctx.working_dir`
