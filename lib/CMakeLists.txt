@@ -34,3 +34,6 @@ target_link_libraries(test_diff haicode)
 
 add_executable(test_git_find tests/test_git_find.cpp)
 target_link_libraries(test_git_find haicode)
+
+add_executable(test_process tests/test_process.cpp)
+target_link_libraries(test_process haicode)

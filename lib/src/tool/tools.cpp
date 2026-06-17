@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <csignal>
 
 namespace haicode {
 
@@ -1237,6 +1238,123 @@ public:
     }
 };
 
+// ---- ProcessTool ----
+
+class ProcessTool : public Tool {
+    static int parse_signal(const std::string& name) {
+        if (name == "TERM" || name == "15") return SIGTERM;
+        if (name == "KILL" || name == "9")  return SIGKILL;
+        if (name == "HUP"  || name == "1")  return SIGHUP;
+        if (name == "INT"  || name == "2")  return SIGINT;
+        if (name == "USR1" || name == "10") return SIGUSR1;
+        if (name == "USR2" || name == "12") return SIGUSR2;
+        if (name == "STOP" || name == "19") return SIGSTOP;
+        if (name == "CONT" || name == "18") return SIGCONT;
+        return -1;
+    }
+
+public:
+    std::string name() const override { return "process"; }
+    std::string description() const override {
+        return "Inspect and manage running processes. "
+               "Actions: \"list\" — show running processes (optional \"filter\" substring match on name); "
+               "\"kill\" — send a signal to a process by \"pid\" (default signal: TERM; "
+               "supported: TERM, KILL, HUP, INT, USR1, USR2, STOP, CONT); "
+               "\"check_port\" — show which process (if any) is listening on \"port\".";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"action", {{"type", "string"}, {"enum", {"list", "kill", "check_port"}},
+                            {"description", "Action to perform."}}},
+                {"filter", {{"type", "string"}, {"description", "Substring filter on process name (list only)."}}},
+                {"pid",    {{"type", "integer"}, {"description", "Process ID to signal (kill only)."}}},
+                {"signal", {{"type", "string"}, {"description", "Signal name or number (kill only, default: TERM)."}}},
+                {"port",   {{"type", "integer"}, {"description", "TCP/UDP port number (check_port only)."}}}
+            }},
+            {"required", nlohmann::json::array({"action"})}
+        };
+    }
+    std::string required_permission() const override { return "process"; }
+    std::string resource(const nlohmann::json& input, const ToolContext&) const override {
+        std::string action = input.value("action", "");
+        if (action == "kill" && input.contains("pid"))
+            return "pid:" + std::to_string(input["pid"].get<int>());
+        if (action == "check_port" && input.contains("port"))
+            return "port:" + std::to_string(input["port"].get<int>());
+        return action;
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string action = input.value("action", "");
+        if (action.empty())
+            return {false, "", missing_field("process", "action", input)};
+
+        if (action == "list") {
+            std::string filter = input.value("filter", "");
+            FILE* pipe = popen("ps 2>&1", "r");
+            if (!pipe)
+                return {false, "", "popen failed: " + std::string(strerror(errno))};
+            std::string raw = read_pipe(pipe);
+            pclose(pipe);
+
+            if (filter.empty())
+                return {true, raw, ""};
+
+            // Keep the header line plus any line containing the filter string
+            std::string header, out;
+            std::istringstream ss(raw);
+            std::string line;
+            bool first = true;
+            while (std::getline(ss, line)) {
+                if (first) { header = line + "\n"; first = false; continue; }
+                if (line.find(filter) != std::string::npos)
+                    out += line + "\n";
+            }
+            return {true, out.empty() ? "(no matching processes)" : header + out, ""};
+        }
+
+        if (action == "kill") {
+            if (!input.contains("pid") || !input["pid"].is_number_integer())
+                return {false, "", "process kill: \"pid\" (integer) is required"};
+            int pid = input["pid"].get<int>();
+            std::string sig_name = input.value("signal", "TERM");
+            int sig = parse_signal(sig_name);
+            if (sig < 0)
+                return {false, "", "process kill: unknown signal: " + sig_name};
+            if (::kill(static_cast<pid_t>(pid), sig) != 0)
+                return {false, "", "kill(" + std::to_string(pid) + ", " + sig_name + ") failed: " + strerror(errno)};
+            return {true, "Signal " + sig_name + " sent to pid " + std::to_string(pid), ""};
+        }
+
+        if (action == "check_port") {
+            if (!input.contains("port") || !input["port"].is_number_integer())
+                return {false, "", "process check_port: \"port\" (integer) is required"};
+            int port = input["port"].get<int>();
+            FILE* pipe = popen("netstat -n 2>&1", "r");
+            if (!pipe)
+                return {false, "", "popen failed: " + std::string(strerror(errno))};
+            std::string raw = read_pipe(pipe);
+            pclose(pipe);
+
+            std::string port_str = ":" + std::to_string(port);
+            std::string out;
+            std::istringstream ss(raw);
+            std::string line;
+            bool first = true;
+            while (std::getline(ss, line)) {
+                if (first) { out += line + "\n"; first = false; continue; }
+                if (line.find(port_str) != std::string::npos)
+                    out += line + "\n";
+            }
+            return {true, out.size() <= (out.find('\n') + 1) ? "Nothing listening on port " + std::to_string(port) : out, ""};
+        }
+
+        return {false, "", "process: unknown action: " + action};
+    }
+};
+
 // Registration function
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
@@ -1254,6 +1372,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<DiffTool>());
     registry.register_tool(std::make_shared<GitTool>());
     registry.register_tool(std::make_shared<FindTool>());
+    registry.register_tool(std::make_shared<ProcessTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know
     // about HttpClient.
