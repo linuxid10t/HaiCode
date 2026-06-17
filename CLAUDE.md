@@ -16,6 +16,9 @@ make -C build -j4
 make -C build haicode-tui
 make -C build haicode-gui
 make -C build test_db
+make -C build test_diff
+make -C build test_git_find
+make -C build test_process
 ```
 
 **Adding new `.cpp` files:** CMake uses `GLOB_RECURSE` to collect sources at configure time. After adding a new file, re-run `cmake -B build -S .` before `make`.
@@ -26,11 +29,21 @@ make -C build test_db
 ./build/tui/haicode-tui [/path/to/project]   # TUI (ncurses)
 ./build/gui/haicode-gui [/path/to/project]   # GUI (BeAPI)
 ./build/lib/test_db                           # Database smoke test
+./build/lib/test_diff                         # DiffTool unit tests
+./build/lib/test_git_find                     # GitTool + FindTool unit tests
+./build/lib/test_process                      # ProcessTool unit tests
 ```
 
 ## Test
 
-The only automated test is `test_db`, a Phase 1 smoke test that creates a session, appends events, and reloads them. It uses `/tmp/test_haicode_fresh.db` and deletes it before each run.
+| Binary | What it tests |
+|--------|--------------|
+| `test_db` | Phase 1 smoke: session create/list, message append/reload, get-by-ID |
+| `test_diff` | DiffTool: identical content, additions, deletions, modifications, error cases |
+| `test_git_find` | GitTool: subcommand allowlist, status/log/branch/ls-files. FindTool: name/type/maxdepth filters, relative paths |
+| `test_process` | ProcessTool: list/filter, kill (via forked subprocess), check_port, error cases |
+
+All tests use `/tmp` for scratch files and clean up after themselves.
 
 ## Architecture
 
@@ -63,9 +76,9 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 
 **Permission gate** (`lib/src/permission/permission.cpp`): `PermissionGate::check()` tests action+resource against fnmatch rules (session rules take priority over config rules). On "Ask", it blocks the engine thread on `std::future<PermissionEffect>` until the UI resolves a `std::promise`. `ToolRegistry::execute()` sets `result.denied = true` when the gate returns `Deny`.
 
-**Config** (`lib/src/config/config.cpp`): Global config at `B_USER_SETTINGS_DIRECTORY/haicode/config.json`; project config at `<project_dir>/.haicode/config.json`. Project values overlay globals. The global config also stores `last_directory` (the most recently used project directory).
+**Config** (`lib/src/config/config.cpp`): Global config at `B_USER_SETTINGS_DIRECTORY/haicode/config.json`; project config at `<project_dir>/.haicode/config.json`. Project values overlay globals. The global config also stores `last_directory` (the most recently used project directory). Notable project-only fields: `build_command` (shell command run after every successful `write`/`edit` — see Build hook below).
 
-**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Eleven built-in tools — see Tool Details below.
+**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Eighteen built-in tools — see Tool Details below.
 
 ### `tui/` — ncurses frontend
 
@@ -167,6 +180,34 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Returns the on-disk path so the engine can surface it via `PlanProposed` and end the turn
 - Required permission: `propose_plan`
 
+### DiffTool (`diff`)
+- Writes proposed content to `<path>.tmp_diff`, runs `diff -u <original> <tmp>`, then `unlink`s the temp file
+- Exit code 1 (differences found) is treated as success; exit code 2 is a diff error (returns failure)
+- Returns `"(no differences)"` when the content is identical
+- Required permission: `read`
+
+### GitTool (`git`)
+- Runs `git -C <working_dir> <subcommand> [args...]` via `popen`
+- Subcommand allowlist (validated before execution): `status`, `diff`, `log`, `show`, `branch`, `blame`, `stash`, `add`, `commit`, `checkout`, `reset`, `remote`, `merge`, `rebase`, `pull`, `push`, `fetch`, `tag`, `shortlog`, `describe`, `rev-parse`, `ls-files`
+- All args passed through `sq()` — no shell injection possible
+- Non-zero exit with non-empty output returns `success=false` with the output in `error`
+- Required permission: `git`; resource is the subcommand name (e.g. `push`, `commit`) for fine-grained permission rules
+
+### FindTool (`find`)
+- Wraps `find(1)` with optional `-maxdepth`, `-type`, `-name`, `-mtime`, `-size` flags
+- All user-supplied values passed through `sq()` — safe against injection
+- `type` is validated to one of `f`, `d`, `l` before being passed to the shell
+- Relative `path` resolved against `ctx.working_dir`; defaults to `ctx.working_dir` if omitted
+- Returns `"(no matches)"` on empty output; required permission: `read`
+- Fills the gap left by GlobTool, which does not support `**` recursive matching
+
+### ProcessTool (`process`)
+- Three actions selected via the `action` field: `list`, `kill`, `check_port`
+- **list**: runs `ps` and optionally filters output lines by a `filter` substring (header always stripped from the no-match path); returns `"(no matching processes)"` if filter matches nothing
+- **kill**: calls `kill(2)` directly (not a shell command) with the given `pid` and `signal` (TERM, KILL, HUP, INT, USR1, USR2, STOP, CONT; default TERM)
+- **check_port**: runs `netstat -n` and filters for lines containing `:<port>`; returns `"Nothing listening on port N"` if none found
+- Required permission: `process`; resource is `pid:<N>` for kill, `port:<N>` for check_port, action name otherwise
+
 ### WebSearchTool (`web_search`) — `web_tools.cpp`
 - Backends: `mojeek` (default, no API key), `ddg_lite`, `ddg_html`. Configurable via `AppConfig::web_search_engine`
 - Returns ranked results: title, URL, snippet — read snippets before calling `web_extract`
@@ -179,3 +220,26 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Returns cleaned main-body text — nav, ads, scripts stripped (HTML stripper is ~400 lines, untested)
 - `max_chars` defaults to 8000; rejects non-http(s) URLs
 - Required permission: `web_extract`
+
+## Build hook
+
+Set `build_command` in `<project_dir>/.haicode/config.json` to automatically run a build after every successful `write` or `edit` tool call:
+
+```json
+{ "build_command": "make -C build -j4 2>&1" }
+```
+
+If the command exits non-zero, its output is appended to the tool result with a `[build_hook]` prefix and `result.success` is set to `false`, so the model sees compile errors immediately and can fix them in the same turn rather than discovering them steps later.
+
+The hook runs synchronously in the engine thread. Avoid commands that take more than ~30 seconds, as the engine is blocked for the duration. The agent detects the build system and sets this field automatically when starting work on a new project (CMake → `make -C build 2>&1`, plain Makefile → `make 2>&1`, npm → `npm run build 2>&1`, Cargo → `cargo build 2>&1`).
+
+## Plan mode
+
+When a session is in Plan mode, the engine:
+- Filters `bash`, `write`, `edit`, `external_terminal` out of the tool list — the model literally cannot attempt them
+- Injects `kPlanModeInstructions` (`lib/include/haicode/default_prompt.h`) into the system prompt
+- Ends the turn automatically after a successful `propose_plan` call and publishes `PlanProposed` so the UI can show the review window
+
+Plan mode instructions tell the model to ask up to two clarifying questions before researching or proposing if the request is ambiguous. Questions that can be answered by reading the codebase should not be asked.
+
+`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, calls `engine_->set_mode(sid, Build)` then `engine_->continue_session(sid)` unconditionally — the UI refresh (mode button, status strip) is gated on `sid == active_session_id_` but the session always resumes regardless of which session is currently visible.
