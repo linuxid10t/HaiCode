@@ -495,6 +495,18 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_MODELS_LOADED: {
+            // Discard results from a provider that is no longer selected.
+            // Without this check, a stale fetch (e.g. Anthropic completing
+            // after the user switched to OpenAI) overwrites default_model_
+            // and patches the active session with the wrong provider's model.
+            {
+                const char* loaded_pid = nullptr;
+                if (msg->FindString("provider_id", &loaded_pid) == B_OK
+                        && loaded_pid && loaded_pid != default_provider_) {
+                    break;
+                }
+            }
+
             // Repopulate model dropdown with server-provided list.
             // default_model_ is preserved across the repopulation: if the
             // freshly fetched list still contains it, we re-mark it; otherwise

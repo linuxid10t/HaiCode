@@ -49,10 +49,17 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 | `db.h` | `Database` (SQLite RAII), `SessionStore`, `SessionInfo`, `SessionMessage` |
 | `config.h` | `AppConfig`, `ConfigLoader` (merges global + project JSON) |
 | `util.h` | `HttpClient` (libcurl SSE + GET), `make_id()`, `now_ms()` |
+| `pricing.h` | `ModelPricing`, `TokenUsage`, `lookup_pricing`, `compute_cost` |
+| `model_info.h` | Model metadata and information |
+| `types.h` | Shared types and constants |
 
 **Agentic loop** (`lib/src/engine/engine.cpp`): `SessionEngine` spawns one `std::thread` per session. The thread runs up to 20 steps: `ContextBuilder::build()` → `Provider::stream()` → collect text/tool-calls via `StreamCallbacks` → execute tools via `ToolRegistry` → repeat if `FinishReason::ToolUse`. An `std::atomic<bool>` per session allows interruption between steps. If any tool returns `result.denied == true`, the loop publishes `StepFailed` and breaks immediately. `session_running_` (a `std::map<string,bool>` under mutex) tracks whether a session thread is active — do not use `std::thread::joinable()` for this, as it returns true even after the thread finishes.
 
 **Providers** (`lib/src/provider/`): `AnthropicProvider` and `OpenAIProvider` each implement `stream()` (SSE) and `list_models()` (HTTP GET). OpenAI's message format differs from Anthropic's; `translate_messages()` in `openai.cpp` converts between them, including converting Anthropic content arrays with `tool_use` blocks into OpenAI `tool_calls`. Register providers via `ProviderRegistry::register_provider()`.
+
+**Pricing** (`lib/src/pricing/`): Handles model costs, token usage calculations, and pricing lookups for various providers.
+
+**Session** (`lib/src/session/`): Manages session-specific events and state.
 
 **Permission gate** (`lib/src/permission/permission.cpp`): `PermissionGate::check()` tests action+resource against fnmatch rules (session rules take priority over config rules). On "Ask", it blocks the engine thread on `std::future<PermissionEffect>` until the UI resolves a `std::promise`. `ToolRegistry::execute()` sets `result.denied = true` when the gate returns `Deny`.
 
@@ -74,6 +81,10 @@ Pure POSIX + Haiku kernel (no `BApplication`). `TuiApp::run()` multiplexes `STDI
 - Session list uses `suppress_next_select_` flag to prevent `BListView::Select()` from triggering a recursive `MSG_SELECT_SESSION` → `_SelectSession()` → `Clear()` cascade. Always call `_SwitchToSession()` (not `_SelectSession()`) when programmatically switching sessions.
 - Selecting a session restores its `project_dir_`, directory button label, provider dropdown, and model dropdown from the DB.
 - `QuitRequested()` calls `std::exit(0)` — engine threads may be blocked in libcurl and cannot be joined cleanly.
+
+## Project Metadata
+
+- `agents.md`: Contains system prompt instructions for agents.
 
 ## Key constraints
 

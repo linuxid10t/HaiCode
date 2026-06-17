@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cctype>
+#include <unistd.h>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -84,6 +85,27 @@ static std::string pick_api_key(const AppConfig& config) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
+    // If not running inside a terminal (e.g. double-clicked in Tracker),
+    // re-exec ourselves inside a Haiku Terminal window. execl replaces
+    // this process so no fork is needed; if Terminal isn't found we fall
+    // through and attempt to run normally.
+    if (!isatty(STDIN_FILENO)) {
+        std::string cmd = "'";
+        for (char c : std::string(argv[0])) {
+            if (c == '\'') cmd += "'\\''"; else cmd += c;
+        }
+        cmd += "'";
+        for (int i = 1; i < argc; ++i) {
+            cmd += " '";
+            for (char c : std::string(argv[i])) {
+                if (c == '\'') cmd += "'\\''"; else cmd += c;
+            }
+            cmd += "'";
+        }
+        execl("/boot/system/apps/Terminal", "Terminal",
+              "/bin/sh", "-c", cmd.c_str(), nullptr);
+    }
+
     // Project directory: first CLI arg, otherwise cwd
     std::string project_dir;
     if (argc >= 2 && argv[1][0] != '-') {

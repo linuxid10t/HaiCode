@@ -215,22 +215,11 @@ HaiCodeApp::ReadyToRun()
     // --- 13. Show the window ---
     main_window_->Show();
 
-    // --- 14. Kick off initial model fetch for the restored provider (or
-    // the first configured one if config has no `provider` field yet).
-    // MainWindow's ctor already marked the dropdown from config_.provider,
-    // so we don't override it here — we only fetch models for whichever
-    // provider is currently selected.
-    std::string initial_pid = config_.provider;
-    if (initial_pid.empty() || !providers_->get(initial_pid)) {
-        if (providers_->get("anthropic"))      initial_pid = "anthropic";
-        else if (providers_->get("openai"))    initial_pid = "openai";
-    }
-    if (!initial_pid.empty()) {
-        main_window_->SelectProvider(initial_pid);
-        BMessage fetch(MSG_FETCH_MODELS);
-        fetch.AddString("provider_id", initial_pid.c_str());
-        PostMessage(&fetch);
-    }
+    // --- 14. Kick off initial model fetch for the provider that the session
+    // (loaded in the constructor via _SwitchToSession) already set. Posting
+    // MSG_FETCH_MODELS to MainWindow lets it read its own marked provider item
+    // rather than overriding it from config (which may differ from the session).
+    main_window_->PostMessage(new BMessage(MSG_FETCH_MODELS));
 }
 
 bool
@@ -351,14 +340,16 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             if (!provider) {
                 // No key configured — send empty list so dropdown shows "(none available)"
                 BMessage reply(MSG_MODELS_LOADED);
+                reply.AddString("provider_id", provider_id.c_str());
                 main_window_->PostMessage(&reply);
                 break;
             }
 
             BMessenger win_msgr(main_window_);
-            std::thread([provider, win_msgr]() {
+            std::thread([provider, provider_id, win_msgr]() {
                 auto models = provider->list_models();
                 BMessage reply(MSG_MODELS_LOADED);
+                reply.AddString("provider_id", provider_id.c_str());
                 for (auto& m : models)
                     reply.AddString("model", m.c_str());
                 win_msgr.SendMessage(&reply);

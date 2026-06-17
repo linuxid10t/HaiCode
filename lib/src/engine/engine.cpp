@@ -98,9 +98,25 @@ LLMRequest ContextBuilder::build(
 std::vector<nlohmann::json> ContextBuilder::assemble_messages(
     const std::vector<SessionMessage>& msgs)
 {
+    // Tool results from past user turns are truncated to keep context lean.
+    // "Past turn" = before the most recent user_prompted message.
+    // Everything from the current user's turn (same agentic loop run) is kept
+    // in full — truncating mid-turn would hide tool outputs the model just
+    // produced and cause it to think its tools are failing.
+    static const size_t MAX_OLD_TOOL_RESULT = 10 * 1024;
+
+    // Find the index of the last user_prompted message.
+    // Tool results before that index are from previous turns and can be trimmed.
+    size_t last_user_prompt_idx = 0;
+    for (size_t i = 0; i < msgs.size(); ++i) {
+        if (msgs[i].type == "user_prompted")
+            last_user_prompt_idx = i;
+    }
+
     std::vector<nlohmann::json> result;
 
-    for (auto& msg : msgs) {
+    for (size_t i = 0; i < msgs.size(); ++i) {
+        auto& msg = msgs[i];
         try {
             auto data = nlohmann::json::parse(msg.data_json);
 
@@ -142,7 +158,17 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 nlohmann::json content;
                 content["type"] = "tool_result";
                 content["tool_use_id"] = data.value("call_id", "");
-                content["content"] = data.value("output", "");
+                std::string output = data.value("output", "");
+                // Truncate outputs from previous user turns. The model already
+                // acted on them; keeping them full inflates context on every step.
+                // Tool results from the current turn are never truncated so the
+                // model can see every tool it called within this agentic run.
+                if (i < last_user_prompt_idx
+                        && output.size() > MAX_OLD_TOOL_RESULT) {
+                    output.resize(MAX_OLD_TOOL_RESULT);
+                    output += "\n[truncated]";
+                }
+                content["content"] = output;
                 m["content"] = nlohmann::json::array({content});
                 result.push_back(m);
             }
