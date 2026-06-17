@@ -192,7 +192,7 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Required permission: `external_terminal`
 
 ### ProposePlanTool (`propose_plan`)
-- Only available in Plan mode — engine filters it out of `tool_defs` in Build mode
+- Available in both Plan and Build mode — no engine-level filter removes it
 - Writes the plan markdown to `<project_dir>/.haicode/plans/plan_YYYYMMDD_HHMMSS_<4-hex-rand>.md`
 - Parent directory created with `mkdir()` walking (same pattern as WriteTool)
 - Returns the on-disk path so the engine can surface it via `PlanProposed` and end the turn
@@ -260,4 +260,4 @@ When a session is in Plan mode, the engine:
 
 Plan mode instructions tell the model to ask up to two clarifying questions before researching or proposing if the request is ambiguous. Questions that can be answered by reading the codebase should not be asked.
 
-`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, calls `engine_->set_mode(sid, Build)` then `engine_->continue_session(sid)` unconditionally — the UI refresh (mode button, status strip) is gated on `sid == active_session_id_` but the session always resumes regardless of which session is currently visible.
+`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, calls `engine_->set_mode(sid, Build)` then `engine_->continue_session(sid)` unconditionally — the UI refresh (mode button, status strip) is gated on `sid == active_session_id_` but the session always resumes regardless of which session is currently visible. On denial, the session stays in Plan mode; a "Plan discarded" system message is appended to the active chat but no mode change or `continue_session` is called.
