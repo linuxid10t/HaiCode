@@ -28,3 +28,6 @@ target_link_libraries(haicode PUBLIC
 # Test executable for Phase 1 verification
 add_executable(test_db tests/test_db.cpp)
 target_link_libraries(test_db haicode)
+
+add_executable(test_diff tests/test_diff.cpp)
+target_link_libraries(test_diff haicode)
