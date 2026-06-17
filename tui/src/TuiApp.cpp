@@ -482,7 +482,7 @@ void TuiApp::append_tool_called(const std::string& tool_name,
             body = "$ " + j["command"].get<std::string>();
         } else if (j.contains("code")) {
             body = j["code"].get<std::string>();
-        } else if (j.contains("path") && j.contains("content")) {
+        } else if (j.contains("path")) {
             body = j["path"].get<std::string>();
         } else {
             body = j.dump(2);

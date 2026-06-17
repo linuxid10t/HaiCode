@@ -143,13 +143,17 @@ ChatView::_Rebuild()
             break;
         }
 
-        case ChatEntry::ToolResult:
+        case ChatEntry::ToolResult: {
+            std::string summary = e.text;
+            auto nl = summary.find('\n');
+            if (nl != std::string::npos) summary = summary.substr(0, nl) + " \xe2\x80\xa6";
             if (e.success) {
-                AppendStyled("[OK] " + e.text + "\n", kColorToolOk, false);
+                AppendStyled("[OK] " + summary + "\n", kColorToolOk, false);
             } else {
-                AppendStyled("[ERR] " + e.text + "\n", kColorToolErr, false);
+                AppendStyled("[ERR] " + summary + "\n", kColorToolErr, false);
             }
             break;
+        }
 
         case ChatEntry::System:
             AppendStyled("\n[System] " + e.text + "\n", kColorSystem, false);
