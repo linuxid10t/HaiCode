@@ -168,6 +168,9 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             }
         }
 
+        if (j.contains("build_command") && j["build_command"].is_string())
+            cfg.build_command = j["build_command"].get<std::string>();
+
         // web_search tool config: {"web_search": {"engine": "mojeek", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
@@ -212,6 +215,8 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.web_search_engine = overlay.web_search_engine;
     if (overlay.web_search_max_results > 0)
         result.web_search_max_results = overlay.web_search_max_results;
+    if (!overlay.build_command.empty())
+        result.build_command = overlay.build_command;
     return result;
 }
 

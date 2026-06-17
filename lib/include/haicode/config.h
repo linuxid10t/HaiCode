@@ -62,6 +62,11 @@ struct AppConfig {
     // CAPTCHA "anomaly" page to most non-browser clients.
     std::string web_search_engine = "mojeek";
     int         web_search_max_results = 5;
+    // Shell command to run after a successful write or edit tool call. If the
+    // command exits non-zero, the output is appended to the tool result so the
+    // model sees the build error immediately. Configured via "build_command" in
+    // project .haicode/config.json (e.g. "make -C build -j4 2>&1").
+    std::string build_command;
 };
 
 class ConfigLoader {

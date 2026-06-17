@@ -644,6 +644,28 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
             auto result = tools_.execute(call.name, call.input, ctx, permissions_);
 
+            // After a successful write or edit, run the configured build command
+            // so the model sees compile errors immediately rather than discovering
+            // them several steps later.
+            if (result.success && !config_.build_command.empty()
+                    && (call.name == "write" || call.name == "edit")) {
+                FILE* bp = popen(config_.build_command.c_str(), "r");
+                if (bp) {
+                    std::string build_out;
+                    std::array<char, 4096> buf;
+                    while (fgets(buf.data(), buf.size(), bp))
+                        build_out += buf.data();
+                    int brc = pclose(bp);
+                    int bec = WIFEXITED(brc) ? WEXITSTATUS(brc) : -1;
+                    if (bec != 0) {
+                        result.output += "\n\n[build_hook] Build failed (exit "
+                                       + std::to_string(bec) + "):\n" + build_out;
+                        result.success = false;
+                        result.error   = result.output;
+                    }
+                }
+            }
+
             // Persist tool result
             nlohmann::json data;
             data["call_id"] = call.id;
