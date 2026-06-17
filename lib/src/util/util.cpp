@@ -34,6 +34,12 @@ std::string make_id(const std::string& prefix) {
 struct HttpClient::State {
     CURL* curl = nullptr;
     std::string buffer;
+    // event_type/event_data must persist across write_cb invocations: a single
+    // SSE event (event:/data:/blank line) can straddle libcurl chunk boundaries
+    // when the data line is large (e.g. propose_plan markdown). Local vars here
+    // silently dropped in-progress events, truncating tool input JSON.
+    std::string event_type;
+    std::string event_data;
     SSECallback callback;
     bool cancelled = false;
 
@@ -45,8 +51,6 @@ struct HttpClient::State {
 
         // Parse SSE lines
         size_t pos = 0;
-        std::string event_type;
-        std::string event_data;
 
         while (true) {
             size_t nl = s->buffer.find('\n', pos);
@@ -59,26 +63,26 @@ struct HttpClient::State {
 
             if (line.empty()) {
                 // End of SSE event
-                if (!event_data.empty()) {
+                if (!s->event_data.empty()) {
                     SSEEvent ev;
-                    ev.event = event_type;
-                    ev.data  = event_data;
+                    ev.event = s->event_type;
+                    ev.data  = s->event_data;
                     if (!s->callback(ev)) {
                         s->cancelled = true;
                         s->buffer.erase(0, pos);
                         return 0;
                     }
                 }
-                event_type.clear();
-                event_data.clear();
+                s->event_type.clear();
+                s->event_data.clear();
             } else if (line.rfind("event:", 0) == 0) {
-                event_type = line.substr(6);
-                if (!event_type.empty() && event_type[0] == ' ')
-                    event_type = event_type.substr(1);
+                s->event_type = line.substr(6);
+                if (!s->event_type.empty() && s->event_type[0] == ' ')
+                    s->event_type = s->event_type.substr(1);
             } else if (line.rfind("data:", 0) == 0) {
-                event_data = line.substr(5);
-                if (!event_data.empty() && event_data[0] == ' ')
-                    event_data = event_data.substr(1);
+                s->event_data = line.substr(5);
+                if (!s->event_data.empty() && s->event_data[0] == ' ')
+                    s->event_data = s->event_data.substr(1);
             }
         }
 
@@ -108,6 +112,8 @@ void HttpClient::post_sse(const std::string& url,
     state_->callback = callback;
     state_->cancelled = false;
     state_->buffer.clear();
+    state_->event_type.clear();
+    state_->event_data.clear();
 
     curl_easy_reset(curl);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
