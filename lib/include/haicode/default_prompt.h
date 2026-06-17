@@ -170,7 +170,7 @@ constexpr const char* kPlanModeInstructions = R"HPCODE(
 
 You are in PLAN MODE. The user wants a researched implementation strategy before any code changes.
 
-- Available tools this turn: read, glob, grep, ls, web_search, web_extract, propose_plan, discard_plan.
+- Available tools this turn: read, glob, grep, ls, find, diff, todo_write, web_search, web_extract, propose_plan, discard_plan.
 - bash, write, edit, external_terminal are NOT available.
 - **Before researching or proposing:** if the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — ask the user one focused clarifying question (two at most) and wait for their reply. Do not ask about things you can determine by reading the codebase.
 - Research thoroughly with read-only tools before proposing. Use web_search when your training data may be stale.

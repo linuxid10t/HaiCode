@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <set>
 #include <dirent.h>
 
 namespace haicode {
@@ -481,13 +482,19 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
-        // Filter tools by mode. In Plan mode the model gets only read-only
-        // research tools plus propose_plan. In Build mode propose_plan is
-        // hidden (it's only meaningful when planning).
+        // Filter tools by mode. Plan mode uses an allowlist (fail-closed):
+        // anything not explicitly safe for research is hidden, so future
+        // tools don't silently leak into Plan turns. In Build mode only
+        // propose_plan is hidden.
         if (mode == SessionMode::Plan) {
+            static const std::set<std::string> plan_allowed = {
+                "read", "glob", "grep", "ls", "find",
+                "web_search", "web_extract",
+                "diff", "todo_write",
+                "propose_plan", "discard_plan",
+            };
             std::erase_if(tool_defs, [](const ToolDefinition& td) {
-                return td.name == "bash" || td.name == "write"
-                    || td.name == "edit" || td.name == "external_terminal";
+                return !plan_allowed.count(td.name);
             });
         } else {
             std::erase_if(tool_defs, [](const ToolDefinition& td) {
