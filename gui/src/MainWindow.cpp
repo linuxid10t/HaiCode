@@ -1012,19 +1012,25 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
     msg->FindString("session_id", &sid_c);
     std::string sid = sid_c ? sid_c : active_session_id_;
 
-    if (approved && !sid.empty() && engine_) {
-        engine_->set_mode(sid, haicode::SessionMode::Build);
-        if (sid == active_session_id_) {
-            _RefreshModeButton();
-            _UpdateStatusStrip();
-            chat_view_->AppendSystem("Plan approved \xe2\x80\x94 switching to Build mode.");
-            interrupt_btn_->SetEnabled(true);
-            engine_running_ = true;
-            streaming_state_ = "thinking";
-            current_tool_name_.clear();
-            _UpdateStatusStrip();
+    if (!sid.empty() && engine_) {
+        if (approved) {
+            engine_->set_mode(sid, haicode::SessionMode::Build);
+            if (sid == active_session_id_) {
+                _RefreshModeButton();
+                _UpdateStatusStrip();
+                chat_view_->AppendSystem("Plan approved \xe2\x80\x94 switching to Build mode.");
+                interrupt_btn_->SetEnabled(true);
+                engine_running_ = true;
+                streaming_state_ = "thinking";
+                current_tool_name_.clear();
+                _UpdateStatusStrip();
+            }
+            engine_->continue_session(sid);
+        } else {
+            if (sid == active_session_id_) {
+                chat_view_->AppendSystem("Plan discarded \xe2\x80\x94 staying in Plan mode.");
+            }
         }
-        engine_->continue_session(sid);
     }
 }
 

@@ -484,8 +484,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         auto tool_defs = tools_.definitions();
         // Filter tools by mode. Plan mode uses an allowlist (fail-closed):
         // anything not explicitly safe for research is hidden, so future
-        // tools don't silently leak into Plan turns. In Build mode only
-        // propose_plan is hidden.
+        // tools don't silently leak into Plan turns. Build mode has no filter.
         if (mode == SessionMode::Plan) {
             static const std::set<std::string> plan_allowed = {
                 "read", "glob", "grep", "ls", "find",
@@ -495,10 +494,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             };
             std::erase_if(tool_defs, [](const ToolDefinition& td) {
                 return !plan_allowed.count(td.name);
-            });
-        } else {
-            std::erase_if(tool_defs, [](const ToolDefinition& td) {
-                return td.name == "propose_plan";
             });
         }
         auto req = builder.build(messages, system, system_dynamic, tool_defs,
