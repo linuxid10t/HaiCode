@@ -252,8 +252,29 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             const char* resource = nullptr;
             msg->FindString("action",   &action);
             msg->FindString("resource", &resource);
-            if (action && resource)
-                perm_gate_->add_allow(action, resource);
+            if (action && resource) {
+                always_rules_.push_back(
+                    {action, resource, haicode::PermissionEffect::Allow});
+                _ApplySessionRules();
+            }
+            break;
+        }
+        case MSG_NEW_SESSION:
+            always_rules_.clear();
+            _ApplySessionRules();
+            break;
+        case MSG_AUTO_ALLOW_EDITS: {
+            int32 value = B_CONTROL_OFF;
+            msg->FindInt32("be:value", &value);
+            auto_edits_on_ = (value == B_CONTROL_ON);
+            _ApplySessionRules();
+            break;
+        }
+        case MSG_YOLO: {
+            int32 value = B_CONTROL_OFF;
+            msg->FindInt32("be:value", &value);
+            yolo_on_ = (value == B_CONTROL_ON);
+            _ApplySessionRules();
             break;
         }
         case MSG_PERSIST_PM: {
@@ -427,4 +448,15 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         default:
             BApplication::MessageReceived(msg);
     }
+}
+
+void
+HaiCodeApp::_ApplySessionRules()
+{
+    std::vector<haicode::PermissionRule> rules = always_rules_;
+    if (auto_edits_on_)
+        rules.push_back({"write", "*", haicode::PermissionEffect::Allow});
+    if (yolo_on_)
+        rules.push_back({"*", "*", haicode::PermissionEffect::Allow});
+    perm_gate_->set_session_rules(rules);
 }

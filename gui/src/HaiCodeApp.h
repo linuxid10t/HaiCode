@@ -44,4 +44,13 @@ private:
     // Shared holder so the permission callback can capture MainWindow*
     // safely even if the callback outlives ReadyToRun scope
     std::shared_ptr<MainWindow*> window_holder_;
+
+    // Session-scoped permission state. always_rules_ accumulates per-resource
+    // Allow-Always rules from PermissionWindow. The two booleans track toolbar
+    // checkbox state. _ApplySessionRules() recomputes perm_gate_ session rules
+    // as the union of all three layers whenever any layer changes.
+    std::vector<haicode::PermissionRule> always_rules_;
+    bool auto_edits_on_ = false;
+    bool yolo_on_       = false;
+    void _ApplySessionRules();
 };

@@ -12,6 +12,7 @@
 #include <GroupView.h>
 #include <Messenger.h>
 #include <FilePanel.h>
+#include <CheckBox.h>
 
 #include "ChatView.h"
 
@@ -106,6 +107,8 @@ private:
     BButton*       new_session_btn_ = nullptr;
     BButton*       dir_btn_         = nullptr;
     BButton*       mode_btn_        = nullptr;
+    BCheckBox*     auto_edits_chk_  = nullptr;
+    BCheckBox*     yolo_chk_        = nullptr;
     BFilePanel*    dir_panel_       = nullptr;
     BMenuField*    model_field_     = nullptr;
     BPopUpMenu*    model_menu_      = nullptr;

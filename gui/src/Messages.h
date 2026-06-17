@@ -36,6 +36,8 @@ static const uint32 MSG_DIR_CHANGED     = 'DChr';  // MainWindow → be_app; "pa
 
 // Permission management
 static const uint32 MSG_ADD_PERMISSION  = 'ADpm';  // MainWindow → be_app; "action"+"resource" strings
+static const uint32 MSG_AUTO_ALLOW_EDITS = 'AAed'; // checkbox → be_app; "be:value" int32
+static const uint32 MSG_YOLO             = 'YOLO'; // checkbox → be_app; "be:value" int32
 
 // Provider/model persistence — MainWindow → be_app; "provider"+"model" strings
 static const uint32 MSG_PERSIST_PM      = 'PMps';

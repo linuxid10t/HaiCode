@@ -185,6 +185,10 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // Mode toggle — switches between Build (default) and Plan
     mode_btn_ = new BButton("mode", "Mode: Build", new BMessage(MSG_TOGGLE_MODE));
 
+    auto_edits_chk_ = new BCheckBox("auto_edits", "Auto-allow edits",
+                                    new BMessage(MSG_AUTO_ALLOW_EDITS));
+    yolo_chk_       = new BCheckBox("yolo", "YOLO", new BMessage(MSG_YOLO));
+
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
     session_scroll_ = new BScrollView("session_scroll", session_list_,
@@ -275,7 +279,12 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                     .Add(status_strip_)
                     .Add(transcript_label)
                     .Add(chat_view_->ScrollContainer())
-                    .Add(prompt_label)
+                    .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+                        .Add(prompt_label)
+                        .AddGlue()
+                        .Add(auto_edits_chk_)
+                        .Add(yolo_chk_)
+                    .End()
                     .Add(input_group)
                 .End()
                 .Add(todos_group_, 0.20f)
@@ -432,6 +441,10 @@ MainWindow::MessageReceived(BMessage* msg)
             _ToggleMode();
             break;
         case MSG_SHOW_SETTINGS:
+            be_app->PostMessage(msg);
+            break;
+        case MSG_AUTO_ALLOW_EDITS:
+        case MSG_YOLO:
             be_app->PostMessage(msg);
             break;
         case MSG_FETCH_MODELS: {
@@ -639,6 +652,23 @@ MainWindow::_NewSession()
     _RefreshTodosFromEngine();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
+
+    // Reset permission checkboxes. SetValue() changes the visual state but
+    // does NOT invoke the message, so post explicit resets to be_app so it
+    // clears always_rules_ and toggle flags via _ApplySessionRules().
+    if (auto_edits_chk_) auto_edits_chk_->SetValue(B_CONTROL_OFF);
+    if (yolo_chk_)       yolo_chk_->SetValue(B_CONTROL_OFF);
+    be_app->PostMessage(MSG_NEW_SESSION);
+    {
+        BMessage m(MSG_AUTO_ALLOW_EDITS);
+        m.AddInt32("be:value", B_CONTROL_OFF);
+        be_app->PostMessage(&m);
+    }
+    {
+        BMessage m(MSG_YOLO);
+        m.AddInt32("be:value", B_CONTROL_OFF);
+        be_app->PostMessage(&m);
+    }
 }
 
 void
