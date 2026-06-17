@@ -77,7 +77,8 @@ public:
     // Load a single JSON file (returns empty config on missing file)
     AppConfig load_file(const std::string& path);
 
-private:
+    // Merge two configs: overlay values win over base for scalars; collections
+    // (permissions, instructions, providers) are merged/appended.
     AppConfig merge(const AppConfig& base, const AppConfig& overlay);
 };
 

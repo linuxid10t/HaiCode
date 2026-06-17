@@ -23,6 +23,7 @@ target_link_libraries(haicode PUBLIC
     ${SQLITE3_LIB}
     ${CURL_LIB}
     ${ROOT_LIB}
+    ${BE_LIB}
 )
 
 # Test executable for Phase 1 verification
@@ -40,3 +41,6 @@ target_link_libraries(test_process haicode)
 
 add_executable(test_file_tools tests/test_file_tools.cpp)
 target_link_libraries(test_file_tools haicode)
+
+add_executable(test_config_permission tests/test_config_permission.cpp)
+target_link_libraries(test_config_permission haicode)
