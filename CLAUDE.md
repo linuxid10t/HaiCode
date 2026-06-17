@@ -199,6 +199,13 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Parent directory created with `mkdir()` walking (same pattern as WriteTool)
 - Returns the on-disk path so the engine can surface it via `PlanProposed` and end the turn
 
+### TodoWriteTool (`todo_write`)
+- Always allowed — `ToolRegistry::execute()` bypasses the permission gate (same as `propose_plan` and web tools)
+- Whole-list replace: the model sends the full todo list every call, never a delta; an empty array clears everything
+- Each item requires `content` (imperative form), `activeForm` (present-continuous for the spinner), and `status` (`pending`, `in_progress`, or `completed`)
+- The engine detects this tool by name, writes the parsed todos to the `session_todo` table, and publishes a `TodoUpdated` event; the tool itself only validates and echoes the input
+- Available in both Plan and Build mode
+
 ### DiffTool (`diff`)
 - Writes proposed content to `<path>.tmp_diff`, runs `diff -u <original> <tmp>`, then `unlink`s the temp file
 - Exit code 1 (differences found) is treated as success; exit code 2 is a diff error (returns failure)
