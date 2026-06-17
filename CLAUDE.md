@@ -90,6 +90,16 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 
 Pure POSIX + Haiku kernel (no `BApplication`). `TuiApp::run()` multiplexes `STDIN_FILENO` and a wake pipe via `select()`. Engine threads post `EngineEvent` objects into a mutex-protected queue and write one byte to the pipe to wake the main loop. Permission requests travel through this same queue carrying a raw `PendingPermission*` (heap-allocated, with a `std::promise*`); the main loop renders the overlay and resolves the promise.
 
+**Key bindings** (global — intercepted before input buffer):
+- `Ctrl+N` — new session
+- `Ctrl+P` — toggle Build/Plan mode
+- `Ctrl+C` / `Ctrl+X` — interrupt running engine
+- `t` / `T` — toggle todo list overlay
+- `x` / `X` — toggle tool body expand/collapse (default: collapsed; header shows `▶`/`▼`)
+- `Tab` — switch focus between session list and chat/input pane
+
+Tool call bodies (`╔ … ╚` block) are hidden by default. `x` expands all blocks globally; `x` again collapses them. The tool result line (`✓`/`✗`) is always visible regardless of expand state. `ToolHeader` lines store just the tool name; `render_chat()` formats the full `╔ <name> ▶/▼` display text dynamically.
+
 ### `gui/` — BeAPI (Haiku native) frontend
 
 - `HaiCodeApp` (BApplication) owns all haicode objects as `unique_ptr`. On startup, reads `last_directory` from settings JSON if no command-line arg was given.
@@ -100,6 +110,7 @@ Pure POSIX + Haiku kernel (no `BApplication`). `TuiApp::run()` multiplexes `STDI
 - Session list uses `suppress_next_select_` flag to prevent `BListView::Select()` from triggering a recursive `MSG_SELECT_SESSION` → `_SelectSession()` → `Clear()` cascade. Always call `_SwitchToSession()` (not `_SelectSession()`) when programmatically switching sessions.
 - Selecting a session restores its `project_dir_`, directory button label, provider dropdown, and model dropdown from the DB.
 - `QuitRequested()` calls `std::exit(0)` — engine threads may be blocked in libcurl and cannot be joined cleanly.
+- **`ChatView` message model**: `ChatView` maintains a `std::vector<ChatEntry>` (kinds: `UserText`, `AssistantText`, `ToolCalled`, `ToolResult`, `System`). Tool call bodies are shown expanded (`▼`) while the tool runs, then `AppendToolResult()` marks the entry `collapsed = true` and calls `_Rebuild()` to redraw the `BTextView` from scratch. Clicking a `[Tool: name] ▶/▼` header (detected via `ClickableTextView::MouseDown` → `OffsetAt()` → `FindBlockAt()`) calls `ToggleBlock()` which flips `collapsed` and rebuilds. `inhibit_scroll_` suppresses `ScrollToBottom()` during rebuild so intermediate appends don't thrash the scrollbar.
 
 ## Project Metadata
 
