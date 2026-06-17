@@ -19,6 +19,8 @@ make -C build test_db
 make -C build test_diff
 make -C build test_git_find
 make -C build test_process
+make -C build test_file_tools
+make -C build test_config_permission
 ```
 
 **Adding new `.cpp` files:** CMake uses `GLOB_RECURSE` to collect sources at configure time. After adding a new file, re-run `cmake -B build -S .` before `make`.
@@ -32,6 +34,8 @@ make -C build test_process
 ./build/lib/test_diff                         # DiffTool unit tests
 ./build/lib/test_git_find                     # GitTool + FindTool unit tests
 ./build/lib/test_process                      # ProcessTool unit tests
+./build/lib/test_file_tools                   # ReadTool / WriteTool / EditTool unit tests
+./build/lib/test_config_permission            # ConfigLoader + PermissionGate unit tests
 ```
 
 ## Test
@@ -42,6 +46,8 @@ make -C build test_process
 | `test_diff` | DiffTool: identical content, additions, deletions, modifications, error cases |
 | `test_git_find` | GitTool: subcommand allowlist, status/log/branch/ls-files. FindTool: name/type/maxdepth filters, relative paths |
 | `test_process` | ProcessTool: list/filter, kill (via forked subprocess), check_port, error cases |
+| `test_file_tools` | ReadTool: offset/limit, binary rejection, relative paths, empty file. WriteTool: atomic write, parent dir creation, binary content, empty content. EditTool: replace_all, duplicate detection, delete, binary rejection, whitespace matching |
+| `test_config_permission` | ConfigLoader::load_file: all fields, permissions (allow/deny/ask/default resource), build_command, web_search, instructions, providers, model contexts, missing/invalid files. ConfigLoader::merge: scalar overlay, empty overlay preservation, appended collections. PermissionGate: allow/deny/ask rules, wildcards, fnmatch patterns, last-rule-wins, session priority, add_allow, ask callback. ToolRegistry gate integration |
 
 All tests use `/tmp` for scratch files and clean up after themselves.
 
@@ -76,7 +82,7 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 
 **Permission gate** (`lib/src/permission/permission.cpp`): `PermissionGate::check()` tests action+resource against fnmatch rules (session rules take priority over config rules). On "Ask", it blocks the engine thread on `std::future<PermissionEffect>` until the UI resolves a `std::promise`. `ToolRegistry::execute()` sets `result.denied = true` when the gate returns `Deny`.
 
-**Config** (`lib/src/config/config.cpp`): Global config at `B_USER_SETTINGS_DIRECTORY/haicode/config.json`; project config at `<project_dir>/.haicode/config.json`. Project values overlay globals. The global config also stores `last_directory` (the most recently used project directory). Notable project-only fields: `build_command` (shell command run after every successful `write`/`edit` — see Build hook below).
+**Config** (`lib/src/config/config.cpp`): Global config at `B_USER_SETTINGS_DIRECTORY/haicode/config.json`; project config at `<project_dir>/.haicode/config.json`. Project values overlay globals. The global config also stores `last_directory` (the most recently used project directory). Notable project-only fields: `build_command` (shell command run after every successful `write`/`edit` — see Build hook below). `ConfigLoader::merge()` is public so it can be called directly in tests and tooling. `libhaicode` links `-lbe` because `config.cpp` uses `BPath` and `find_directory`; executables that link `libhaicode` get this transitively.
 
 **Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Eighteen built-in tools — see Tool Details below.
 
