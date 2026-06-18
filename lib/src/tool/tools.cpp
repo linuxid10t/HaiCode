@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
+#include <regex>
+#include <set>
 #include <unistd.h>
 #include <glob.h>
 #include <fnmatch.h>
@@ -72,6 +74,158 @@ static std::string missing_field(const std::string& tool, const std::string& fie
     else
         err += " Received input: " + input.dump();
     return err;
+}
+
+// ---- symbols tool helpers ----
+
+static const std::set<std::string> g_source_exts = {
+    ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp", ".hxx", ".hh"
+};
+
+static bool has_source_ext(const std::string& path) {
+    size_t dot = path.rfind('.');
+    if (dot == std::string::npos) return false;
+    std::string ext = path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    return g_source_exts.count(ext) != 0;
+}
+
+// Recursively collect source files under `root`. If `include_glob` is non-empty
+// it overrides the extension filter via fnmatch. Skips paths containing /build/
+// or /.git/. Uses opendir/readdir (same primitive as the rest of the file).
+static void walk_source_files(const std::string& root,
+                              const std::string& include_glob,
+                              std::vector<std::string>& out) {
+    struct stat rst{};
+    if (stat(root.c_str(), &rst) != 0) return;
+    // Single-file root: accept it directly (extension/glob filtered).
+    if (S_ISREG(rst.st_mode)) {
+        std::string base = root;
+        size_t slash = base.rfind('/');
+        std::string name = (slash == std::string::npos) ? base : base.substr(slash + 1);
+        if (!include_glob.empty()) {
+            if (fnmatch(include_glob.c_str(), name.c_str(), 0) != 0) return;
+        } else if (!has_source_ext(name)) {
+            return;
+        }
+        out.push_back(root);
+        return;
+    }
+    DIR* dir = opendir(root.c_str());
+    if (!dir) return;
+    struct dirent* ent;
+    std::vector<std::string> entries;
+    while ((ent = readdir(dir)) != nullptr) {
+        std::string n = ent->d_name;
+        if (n == "." || n == "..") continue;
+        entries.push_back(n);
+    }
+    closedir(dir);
+    std::sort(entries.begin(), entries.end());
+    for (const std::string& n : entries) {
+        std::string full = root;
+        if (full.back() != '/') full += '/';
+        full += n;
+        struct stat st{};
+        if (stat(full.c_str(), &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            // Skip build dirs and version control
+            if (n == "build" || n == ".git") continue;
+            if (full.find("/build/") != std::string::npos) continue;
+            if (full.find("/.git/") != std::string::npos) continue;
+            walk_source_files(full, include_glob, out);
+        } else if (S_ISREG(st.st_mode)) {
+            if (!include_glob.empty()) {
+                if (fnmatch(include_glob.c_str(), n.c_str(), 0) != 0) continue;
+            } else if (!has_source_ext(n)) {
+                continue;
+            }
+            out.push_back(full);
+        }
+    }
+}
+
+// Tokenizer state that persists across lines (block comments / strings can
+// span multiple lines).
+struct TokenizerState {
+    bool in_block_comment = false;
+    bool in_string = false;
+};
+
+// Return the CODE-only substring of `line` — comments and string/char literals
+// are blanked out (replaced with spaces so column offsets are preserved). The
+// `state` struct carries block-comment / string state across lines.
+static std::string strip_non_code(const std::string& line, TokenizerState& state) {
+    std::string out = line;
+    for (size_t i = 0; i < out.size(); i++) {
+        if (state.in_block_comment) {
+            if (i + 1 < out.size() && out[i] == '*' && out[i + 1] == '/') {
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                state.in_block_comment = false;
+                i++;  // skip the '/'
+            } else {
+                out[i] = ' ';
+            }
+            continue;
+        }
+        if (state.in_string) {
+            if (out[i] == '\\' && i + 1 < out.size()) {
+                // escape: blank both chars
+                out[i] = ' ';
+                out[i + 1] = ' ';
+                i++;
+                continue;
+            }
+            if (out[i] == '"') {
+                out[i] = ' ';
+                state.in_string = false;
+            } else {
+                out[i] = ' ';
+            }
+            continue;
+        }
+        // Not in block comment or string.
+        if (out[i] == '/' && i + 1 < out.size() && out[i + 1] == '/') {
+            // line comment — blank to EOL
+            for (size_t j = i; j < out.size(); j++) out[j] = ' ';
+            return out;
+        }
+        if (out[i] == '/' && i + 1 < out.size() && out[i + 1] == '*') {
+            out[i] = ' ';
+            out[i + 1] = ' ';
+            state.in_block_comment = true;
+            i++;
+            continue;
+        }
+        if (out[i] == '"') {
+            out[i] = ' ';
+            state.in_string = true;
+            continue;
+        }
+        if (out[i] == '\'') {
+            // char literal — blank until closing unescaped quote
+            out[i] = ' ';
+            size_t j = i + 1;
+            while (j < out.size()) {
+                if (out[j] == '\\' && j + 1 < out.size()) {
+                    out[j] = ' ';
+                    out[j + 1] = ' ';
+                    j += 2;
+                    continue;
+                }
+                if (out[j] == '\'') {
+                    out[j] = ' ';
+                    break;
+                }
+                out[j] = ' ';
+                j++;
+            }
+            i = j;
+            continue;
+        }
+    }
+    return out;
 }
 
 // ---- BashTool ----
@@ -1239,6 +1393,376 @@ public:
     }
 };
 
+// ---- SymbolsTool ----
+
+namespace {
+
+struct SymbolHit {
+    enum class Kind { Definition, Call, MemberAccess, Declaration, Mention };
+    Kind kind;
+    std::string file;
+    int line;
+    std::string text;      // trimmed CODE-only line
+    std::string cls;       // enclosing class, or "<global>"
+};
+
+const char* kind_str(SymbolHit::Kind k) {
+    switch (k) {
+        case SymbolHit::Kind::Definition:     return "definition";
+        case SymbolHit::Kind::Call:           return "call";
+        case SymbolHit::Kind::MemberAccess:   return "member_access";
+        case SymbolHit::Kind::Declaration:    return "declaration";
+        case SymbolHit::Kind::Mention:        return "mention";
+    }
+    return "mention";
+}
+
+// Trim leading/trailing whitespace.
+std::string trim(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t\r\n");
+    if (a == std::string::npos) return "";
+    size_t b = s.find_last_not_of(" \t\r\n");
+    return s.substr(a, b - a + 1);
+}
+
+// Does a CODE-only line declare/define `name` as a class/struct?
+bool is_class_def(const std::string& code, const std::string& name) {
+    static const std::regex re(R"(^(class|struct)\s+)" + name + R"(\b)");
+    return std::regex_search(code, re);
+}
+
+// Does a CODE-only line define `name` as a method on `cls`?
+bool is_method_def(const std::string& code, const std::string& name, const std::string& cls) {
+    if (cls == "<global>") return false;
+    std::string esc = std::regex_replace(name + "::" + name, std::regex(R"(::)"), "::");
+    (void)esc;
+    // Match  ClassName::name(  possibly with whitespace.
+    static const std::regex id_re(R"([\w:&*<>,\s]+)");
+    std::string pat = R"(^\w[\w:&*<>,\s]*\s+)" + cls + "::" + name + R"(\s*\()" ;
+    try {
+        std::regex re(pat);
+        return std::regex_search(code, re);
+    } catch (...) { return false; }
+}
+
+// Does a CODE-only line define `name` as a free function (depth 0, no class)?
+// Requires a real return type (an identifier char before whitespace+name) and
+// rejects qualified names (`::name`) — those are calls, not definitions.
+bool is_free_func_def(const std::string& code, const std::string& name) {
+    // Must start with an identifier char (return type), not whitespace/punct.
+    std::string pat = R"(^\w[\w:&*<>,\s]*\s+)" + name + R"(\s*\()" ;
+    try {
+        std::regex re(pat);
+        if (!std::regex_search(code, re)) return false;
+    } catch (...) { return false; }
+    // Reject if the name is qualified (Class::name) — that's a call/def handled
+    // by is_method_def, not a free function.
+    std::string qual = "::" + name + R"(\s*\()" ;
+    try {
+        std::regex qre(qual);
+        if (std::regex_search(code, qre)) return false;
+    } catch (...) {}
+    return true;
+}
+
+// Does a CODE-only line declare `name` as a member field of a class?
+bool is_member_field(const std::string& code, const std::string& name) {
+    std::string pat = R"(^\s+[\w:&*<>\[\]]+\s+)" + name + R"(\s*[;=])" ;
+    try {
+        std::regex re(pat);
+        return std::regex_search(code, re);
+    } catch (...) { return false; }
+}
+
+// Does a CODE-only line declare `name` as a typedef/using?
+bool is_typedef_def(const std::string& code, const std::string& name) {
+    static const std::regex re(R"(^\s*(typedef|using)\s+)" + name + R"(\b)");
+    return std::regex_search(code, re);
+}
+
+// Does a CODE-only line define `name` as a method (ClassName::name) at any
+// scope? Detects structurally by the qualified-name pattern.
+bool is_qualified_method_def(const std::string& code, const std::string& name) {
+    // ^ <return-type> ClassName::name(  — return type optional but if present
+    // must start with a word char (not pure whitespace, which would be a call).
+    std::string pat = std::string(R"(^\w[\w:&*<>,\s]*\s+)") + R"(\w+::)" + name + R"(\s*\()" ;
+    try {
+        std::regex re(pat);
+        if (std::regex_search(code, re)) return true;
+    } catch (...) {}
+    // also: ClassName::name( with no return type (ctor/dtor/operator) at col 0
+    pat = R"(^\w+::)" + name + R"(\s*\()" ;
+    try {
+        std::regex re(pat);
+        return std::regex_search(code, re);
+    } catch (...) { return false; }
+}
+
+// Does a CODE-only line declare `name` as a method prototype inside a class
+// body? Pattern: indented RetType name( ... ) ;  (no ::, no { body).
+bool is_method_decl(const std::string& code, const std::string& name) {
+    std::string pat = R"(^\s+\w[\w:&*<>,\s]*\s+)" + name + R"(\s*\()" ;
+    try {
+        std::regex re(pat);
+        if (!std::regex_search(code, re)) return false;
+    } catch (...) { return false; }
+    // Must end with ';' (prototype), not '{' (inline def, which is a def).
+    std::string trimmed = code;
+    while (!trimmed.empty() && isspace(trimmed.back())) trimmed.pop_back();
+    if (trimmed.empty() || trimmed.back() != ';') return false;
+    // Reject qualified names — those are out-of-class definitions.
+    try {
+        std::regex qre("::" + name + R"(\s*\()");
+        if (std::regex_search(code, qre)) return false;
+    } catch (...) {}
+    return true;
+}
+
+// Determine the kind of a hit on `name` in a CODE-only line.
+SymbolHit::Kind classify(const std::string& code,
+                          const std::string& name,
+                          const std::string& cls) {
+    if (is_class_def(code, name))          return SymbolHit::Kind::Definition;
+    if (is_qualified_method_def(code, name)) return SymbolHit::Kind::Definition;
+    if (is_method_def(code, name, cls))    return SymbolHit::Kind::Definition;
+    if (cls == "<global>" && is_free_func_def(code, name))
+                                            return SymbolHit::Kind::Definition;
+    if (is_typedef_def(code, name))        return SymbolHit::Kind::Definition;
+    if (cls != "<global>" && is_member_field(code, name))
+                                            return SymbolHit::Kind::Declaration;
+    if (cls != "<global>" && is_method_decl(code, name))
+                                            return SymbolHit::Kind::Declaration;
+    // usage detection
+    // call: name( possibly preceded by :: . -> or start/space
+    static const std::regex call_re(R"((::|\.|->|^|[\s(,.]))" + name + R"(\s*\()");
+    if (std::regex_search(code, call_re))  return SymbolHit::Kind::Call;
+    // member access via explicit operator: .name ->name ::name
+    static const std::regex mem_re(R"((\.|->|::))" + name + R"(\b)");
+    if (std::regex_search(code, mem_re))   return SymbolHit::Kind::MemberAccess;
+    // name used as an object: name. or name-> (accessing a sub-member)
+    try {
+        std::regex obj_re("\\b" + name + R"(\s*(\.|->))");
+        if (std::regex_search(code, obj_re)) return SymbolHit::Kind::MemberAccess;
+    } catch (...) {}
+    return SymbolHit::Kind::Mention;
+}
+
+// Find the enclosing method name for the (in Foo::bar) annotation by scanning
+// backward for a method-definition header that opens the scope containing idx.
+// Conservative: only returns qualified method names (Class::method), since free
+// function headers are too easily confused with calls/control flow. Returns ""
+// when no confident enclosing method is found.
+std::string enclosing_method(const std::vector<std::string>& lines, int idx) {
+    int depth = 0;  // net unclosed '{' between idx and the current scan line
+    for (int i = idx; i >= 0; i--) {
+        const std::string& l = lines[i];
+        int opens = 0, closes = 0;
+        for (char c : l) {
+            if (c == '{') opens++;
+            else if (c == '}') closes++;
+        }
+        // A method definition header that opens a scope covering idx: it has
+        // more '{' than '}' and, scanning back from idx, we haven't closed it.
+        static const std::regex method_hdr(
+            R"(^\w[\w:&*<>,\s]*\s+(\w+)::(\w+)\s*\([^)]*\)\s*(const)?\s*\{?)");
+        std::smatch m;
+        if (std::regex_search(l, m, method_hdr) && opens > closes &&
+            depth - (opens - closes) < 0) {
+            return std::string(m[1]) + "::" + std::string(m[2]);
+        }
+        depth += opens - closes;
+    }
+    return "";
+}
+
+} // namespace
+
+class SymbolsTool : public Tool {
+public:
+    std::string name() const override { return "symbols"; }
+    std::string description() const override {
+        return "Find C/C++ symbol definitions and references. Skips comments/strings "
+               "and classifies hits. Faster than grep for tracing fields and functions. "
+               "query: \"definition\", \"references\", or \"callers\".";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"name",    {{"type", "string"}, {"description", "Symbol name to search for."}}},
+                {"query",   {{"type", "string"}, {"enum", {"definition", "references", "callers"}},
+                             {"description", "\"definition\": find where name is defined. \"references\": every occurrence with classification. \"callers\": usage sites only (call + member_access)."}}},
+                {"path",    {{"type", "string"}, {"description", "File or directory to scope the search. Absolute, or relative to the project directory. Default: project directory."}}},
+                {"include", {{"type", "string"}, {"description", "Filename glob filter overriding the default source-extension set, e.g. '*.cpp'."}}}
+            }},
+            {"required", nlohmann::json::array({"name", "query"})}
+        };
+    }
+    std::string required_permission() const override { return "read"; }
+    std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
+        if (input.contains("path") && input["path"].is_string()) {
+            std::string p = input["path"].get<std::string>();
+            if (!p.empty()) return resolve_path(p, ctx.working_dir);
+        }
+        return ctx.working_dir.empty() ? "." : ctx.working_dir;
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+        std::string sym = input.value("name", "");
+        if (sym.empty())
+            return {false, "", missing_field("symbols", "name", input)};
+        std::string query = input.value("query", "");
+        if (query != "definition" && query != "references" && query != "callers")
+            return {false, "", missing_field("symbols", "query", input)};
+
+        std::string root;
+        if (input.contains("path") && input["path"].is_string()) {
+            std::string p = input["path"].get<std::string>();
+            root = p.empty() ? ctx.working_dir : resolve_path(p, ctx.working_dir);
+        } else {
+            root = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        }
+        std::string include_glob = input.value("include", "");
+
+        std::vector<std::string> files;
+        walk_source_files(root, include_glob, files);
+
+        const size_t MAX_HITS = 200;
+        std::vector<SymbolHit> hits;
+        std::regex name_re("\\b" + sym + "\\b");
+
+        for (const std::string& file : files) {
+            std::ifstream f(file);
+            if (!f.is_open()) continue;
+            std::vector<std::string> lines;
+            std::string l;
+            while (std::getline(f, l)) lines.push_back(l);
+
+            TokenizerState tstate;
+            int brace_depth = 0;
+            std::vector<std::pair<int, std::string>> class_stack;  // (depth, name)
+
+            for (size_t i = 0; i < lines.size(); i++) {
+                std::string code = strip_non_code(lines[i], tstate);
+                std::string cls = class_stack.empty() ? "<global>" : class_stack.back().second;
+
+                // Track class/struct scope entry.
+                std::smatch cm;
+                static const std::regex class_open(R"(^(class|struct)\s+(\w+))");
+                if (std::regex_search(code, cm, class_open)) {
+                    std::string cname = cm[2];
+                    if (cm[1] == "sym" && cm[2] == sym) {
+                        // handled below as a hit
+                    }
+                    class_stack.push_back({brace_depth, cname});
+                }
+
+                // Count braces in CODE-only text for scope tracking.
+                if (!std::regex_search(code, name_re)) {
+                    for (char c : code) {
+                        if (c == '{') brace_depth++;
+                        else if (c == '}') {
+                            brace_depth--;
+                            while (!class_stack.empty() && class_stack.back().first >= brace_depth)
+                                class_stack.pop_back();
+                        }
+                    }
+                    continue;
+                }
+
+                // We have a hit — classify it.
+                SymbolHit::Kind k = classify(code, sym, cls);
+
+                // For definition queries keep definitions + declarations; for
+                // callers keep only call + member_access.
+                if (query == "definition" &&
+                    k != SymbolHit::Kind::Definition &&
+                    k != SymbolHit::Kind::Declaration)
+                    k = SymbolHit::Kind::Mention;  // dropped below
+                if (query == "callers" &&
+                    k != SymbolHit::Kind::Call &&
+                    k != SymbolHit::Kind::MemberAccess) {
+                    // still need brace tracking; skip recording
+                    for (char c : code) {
+                        if (c == '{') brace_depth++;
+                        else if (c == '}') {
+                            brace_depth--;
+                            while (!class_stack.empty() && class_stack.back().first >= brace_depth)
+                                class_stack.pop_back();
+                        }
+                    }
+                    continue;
+                }
+                if (query == "definition" && k == SymbolHit::Kind::Mention) {
+                    for (char c : code) {
+                        if (c == '{') brace_depth++;
+                        else if (c == '}') {
+                            brace_depth--;
+                            while (!class_stack.empty() && class_stack.back().first >= brace_depth)
+                                class_stack.pop_back();
+                        }
+                    }
+                    continue;
+                }
+
+                SymbolHit h;
+                h.kind = k;
+                h.file = file;
+                h.line = static_cast<int>(i + 1);
+                h.text = trim(code);
+                h.cls  = cls;
+                if (k == SymbolHit::Kind::Call || k == SymbolHit::Kind::MemberAccess) {
+                    std::string m = enclosing_method(lines, static_cast<int>(i));
+                    if (!m.empty()) h.cls = m;  // render as (in method)
+                }
+                hits.push_back(h);
+                if (hits.size() >= MAX_HITS) break;
+
+                for (char c : code) {
+                    if (c == '{') brace_depth++;
+                    else if (c == '}') {
+                        brace_depth--;
+                        while (!class_stack.empty() && class_stack.back().first >= brace_depth)
+                            class_stack.pop_back();
+                    }
+                }
+            }
+            if (hits.size() >= MAX_HITS) break;
+        }
+
+        // Sort by (file, line).
+        std::sort(hits.begin(), hits.end(), [](const SymbolHit& a, const SymbolHit& b) {
+            if (a.file != b.file) return a.file < b.file;
+            return a.line < b.line;
+        });
+
+        std::set<std::string> files_hit;
+        std::string out;
+        for (const auto& h : hits) {
+            files_hit.insert(h.file);
+            out += h.file + ":" + std::to_string(h.line);
+            // pad kind column
+            std::string k = kind_str(h.kind);
+            while (k.size() < 12) k += ' ';
+            out += "   " + k;
+            if (h.kind == SymbolHit::Kind::Definition) {
+                out += "   " + h.text;
+            } else if (h.kind == SymbolHit::Kind::Call || h.kind == SymbolHit::Kind::MemberAccess) {
+                if (!h.cls.empty() && h.cls != "<global>") out += "   (in " + h.cls + ")";
+            }
+            out += "\n";
+        }
+        if (hits.size() >= MAX_HITS)
+            out += "[truncated]\n";
+        out += std::to_string(hits.size()) + " hits in " +
+               std::to_string(files_hit.size()) + " files";
+
+        if (hits.empty())
+            return {true, "No symbols found for '" + sym + "' (" + query + ")", ""};
+        return {true, out, ""};
+    }
+};
+
 // ---- ProcessTool ----
 
 class ProcessTool : public Tool {
@@ -1373,6 +1897,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<DiffTool>());
     registry.register_tool(std::make_shared<GitTool>());
     registry.register_tool(std::make_shared<FindTool>());
+    registry.register_tool(std::make_shared<SymbolsTool>());
     registry.register_tool(std::make_shared<ProcessTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know

@@ -157,7 +157,7 @@ ToolResult ToolRegistry::execute(const std::string& name,
     if (!ctx.working_dir.empty()) {
         // read, ls, grep, diff, find: resource() returns a resolved absolute path.
         if (name == "read" || name == "ls" || name == "grep" ||
-            name == "diff" || name == "find") {
+            name == "diff" || name == "find" || name == "symbols") {
             if (is_path_within(tool->resource(input, ctx), ctx.working_dir))
                 return tool->execute(input, ctx);
         }

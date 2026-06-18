@@ -90,7 +90,7 @@ In the GUI, the provider dropdown is built dynamically via `MainWindow::RebuildP
 
 **Config** (`lib/src/config/config.cpp`): Global config at `B_USER_SETTINGS_DIRECTORY/haicode/config.json`; project config at `<project_dir>/.haicode/config.json`. Project values overlay globals. The global config also stores `last_directory` (the most recently used project directory). Notable project-only fields: `build_command` (shell command run after every successful `write`/`edit` — see Build hook below). `ConfigLoader::merge()` is public so it can be called directly in tests and tooling. `libhaicode` links `-lbe` because `config.cpp` uses `BPath` and `find_directory`; executables that link `libhaicode` get this transitively.
 
-**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Eighteen built-in tools — see Tool Details below.
+**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Nineteen built-in tools — see Tool Details below.
 
 ### `tui/` — ncurses frontend
 
@@ -131,7 +131,7 @@ Tool call bodies (`╔ … ╚` block) are hidden by default. `x` expands all bl
 - **BeAPI `BScrollView` constructor**: use the 6-arg layout-aware form (no `resizingMode` parameter) when building layout-managed views. The 7-arg old-style form breaks layout and grays out child views.
 - **SQLite schema**: `session`, `session_message` (types: `user_prompted`, `assistant_text`, `tool_called`, `tool_result`), `permission`. WAL mode + FK constraints (`ON DELETE CASCADE`) enabled.
 - **Tool context messages**: assistant messages that include tool calls must be stored and reassembled with Anthropic `tool_use` content blocks (not plain text). Missing these causes orphaned `tool_result` blocks in the next request, making the model repeat work it already completed.
-- **Non-destructive tools are always allowed within the project directory** (`ToolRegistry::execute()` in `lib/src/permission/permission.cpp`): `read`, `ls`, `grep`, `diff`, `find` bypass the gate when their resolved path is inside `ctx.working_dir`; `glob` bypasses for relative patterns or absolute patterns rooted inside the project; read-only `git` subcommands (`status`, `diff`, `log`, `show`, `branch`, `blame`, `ls-files`, `shortlog`, `describe`, `rev-parse`) always bypass; `process list` and `process check_port` always bypass; `web_search`, `web_extract`, `propose_plan`, `todo_write` always bypass regardless of directory.
+- **Non-destructive tools are always allowed within the project directory** (`ToolRegistry::execute()` in `lib/src/permission/permission.cpp`): `read`, `ls`, `grep`, `diff`, `find`, `symbols` bypass the gate when their resolved path is inside `ctx.working_dir`; `glob` bypasses for relative patterns or absolute patterns rooted inside the project; read-only `git` subcommands (`status`, `diff`, `log`, `show`, `branch`, `blame`, `ls-files`, `shortlog`, `describe`, `rev-parse`) always bypass; `process list` and `process check_port` always bypass; `web_search`, `web_extract`, `propose_plan`, `todo_write` always bypass regardless of directory.
 - **SSE parser state must persist across `write_cb` invocations** (`lib/src/util/util.cpp`). `event_type` and `event_data` live on `HttpClient::State`, not as locals — libcurl invokes the write callback once per network chunk and a single SSE event (event:/data:/blank line) frequently straddles those chunks for large tool inputs (e.g. `propose_plan` markdown). Locals silently dropped half-parsed events, truncating tool input JSON and causing `parse_failed` drops in the engine. Clear both fields at the start of every new `post_sse()`.
 - **`ToolResult` struct field order**: `{bool success, string output, string error, bool denied}`. The `denied` field is last — do not insert fields before it or existing brace-initializers break.
 - Tool output is truncated to 100 KB (`MAX_OUTPUT` in `tools.cpp`).
@@ -234,6 +234,15 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Relative `path` resolved against `ctx.working_dir`; defaults to `ctx.working_dir` if omitted
 - Always allowed within the project directory; paths outside go through the gate (`read` permission)
 - Fills the gap left by GlobTool, which does not support `**` recursive matching
+
+### SymbolsTool (`symbols`)
+- Heuristic C/C++ symbol search: finds definitions and classifies references, faster than grep for tracing fields and functions across files
+- Three queries: `definition` (where a name is defined), `references` (every occurrence, classified), `callers` (usage sites only — `call` + `member_access`)
+- **Tokenizer (`strip_non_code`)**: a state machine blanks out line/block comments, string literals, and char literals before matching, eliminating grep's false positives on identifiers mentioned in comments or strings; comment/string state persists across lines
+- **Scope tracking**: a brace-depth counter plus a stack of enclosing class/struct names lets each hit be classified (`definition` / `call` / `member_access` / `declaration` / `mention`) and annotated with `(in ClassName::method)` for usage sites
+- No `clangd` / `libclang` / index — pure `<regex>` over CODE-only substrings; unresolvable queries (templates, macros) degrade to candidate sets. C/C++ only at launch
+- Always allowed within the project directory (read-only, `resource()` returns a resolved path like `find`); paths outside go through the gate (`read` permission)
+- Cap: 200 hits with a `[truncated]` marker; output sorted by file then line, with a trailing `N hits in M files` summary
 
 ### ProcessTool (`process`)
 - Three actions selected via the `action` field: `list`, `kill`, `check_port`

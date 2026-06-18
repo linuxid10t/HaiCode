@@ -8,7 +8,7 @@ A native coding-agent app for **Haiku R1** — TUI (ncurses) and GUI (BeAPI) fro
 
 - **Agentic loop** — up to 20 tool-use steps per turn, with atomic interruption between steps.
 - **Two frontends** — `haicode-tui` (ncurses, pure POSIX) and `haicode-gui` (Haiku native BeAPI).
-- **Eleven built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `ls`, `external_terminal`, `propose_plan`, plus `web_search` and `web_extract` — each with safe argument handling and a 100 KB output cap.
+- **Nineteen built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `ls`, `find`, `symbols`, `diff`, `git`, `process`, `external_terminal`, `todo_write`, `propose_plan`, `discard_plan`, `write_agents_md`, plus `web_search` and `web_extract` — each with safe argument handling and a 100 KB output cap. The `symbols` tool does heuristic C/C++ symbol search (definitions + classified references), skipping comments and string literals for less noise than `grep`.
 - **Multi-provider** — any number of Anthropic and OpenAI-compatible endpoints (proxies, Ollama, LM Studio, …) in `config.json`, with message-format translation between them.
 - **Permissions** — fnmatch rules per session, with an interactive Ask → Allow / Deny / Allow-Always flow.
 - **SQLite session history** — every user prompt, assistant message, tool call, and tool result is stored and reloadable. WAL mode + cascading deletes.

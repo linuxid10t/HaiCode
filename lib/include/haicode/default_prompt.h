@@ -54,6 +54,7 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - diff: Show a unified diff between the current contents of a file and proposed new content. Use to preview changes before applying them.
 - git: Run a git subcommand (status, diff, log, add, commit, branch, blame, stash, checkout, reset, remote, fetch, push, pull, tag, shortlog, describe, rev-parse, ls-files) in the project directory. Pass extra flags via `args`.
 - find: Recursively search for files by name pattern, type (f/d/l), max depth, mtime, or size. Use when `glob` is insufficient (glob does not support `**` recursive matching).
+- symbols: Find C/C++ symbol definitions and references. query: "definition", "references", or "callers". Skips comments/strings and classifies hits. Faster than grep for tracing fields and functions across files.
 - process: Inspect and manage running processes. Actions: `list` (show processes, optional `filter`), `kill` (send signal to `pid`), `check_port` (show what is listening on `port`).
 - todo_write: Replace the session's task list atomically. Each item has a `content` (imperative), `activeForm` (present-continuous, shown in the spinner), and `status` (`pending`, `in_progress`, or `completed`). Send the full list on every call — not a delta. Mark exactly one item `in_progress` at a time.
 - discard_plan: Retire the most recent active plan (mark it implemented or abandoned). Call this when the plan has been fully implemented or the user wants to abandon it. Retired plans are no longer injected into future sessions.
