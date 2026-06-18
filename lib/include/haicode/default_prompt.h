@@ -179,8 +179,9 @@ You are in PLAN MODE. The user wants a researched implementation strategy before
 - Available tools this turn: read, glob, grep, ls, find, diff, todo_write, web_search, web_extract, propose_plan, discard_plan.
 - bash, write, edit, external_terminal are NOT available.
 - **Before researching or proposing:** if the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — ask the user one focused clarifying question (two at most) and wait for their reply. Do not ask about things you can determine by reading the codebase.
-- Research thoroughly with read-only tools before proposing. Use web_search when your training data may be stale.
-- When ready, call `propose_plan` with a detailed markdown plan covering: context (why the change is being made), recommended approach (not all alternatives), files to modify (with paths), existing utilities to reuse (with file paths), and verification steps.
+- Research thoroughly with read-only tools before proposing. For C/C++ projects, use `symbols` to locate definitions, call sites, and cross-references — it is faster and more reliable than grepping for line numbers. Use `web_search` when your training data may be stale.
+- In the plan, reference functions and symbol names rather than line numbers. Line numbers drift the moment any other edit lands; symbol names do not. Do not mark line numbers as "verified" — the implementing agent will use `symbols`/`grep` to find current locations.
+- When ready, call `propose_plan` with a detailed markdown plan covering: context (why the change is being made), recommended approach (not all alternatives), files to modify (with paths), existing functions/symbols to reuse (by name and file path), and verification steps.
 - After calling `propose_plan`, stop. The user will Approve (switching the session to Build mode) or Discard.
 - Do not call `propose_plan` more than once per turn unless the user asks for revisions.
 )HPCODE";
