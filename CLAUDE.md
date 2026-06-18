@@ -265,6 +265,8 @@ Set `build_command` in `<project_dir>/.haicode/config.json` to automatically run
 
 If the command exits non-zero, its output is appended to the tool result with a `[build_hook]` prefix and `result.success` is set to `false`, so the model sees compile errors immediately and can fix them in the same turn rather than discovering them steps later.
 
+After every run (success or failure) the engine publishes a `BuildHookResult` event (`lib/include/haicode/events.h`). Both frontends display a brief system line — `build ✓` or `build ✗ (exit N)` — so the user can see at a glance whether the hook ran and passed, even when it succeeded silently.
+
 The hook runs synchronously in the engine thread. Avoid commands that take more than ~30 seconds, as the engine is blocked for the duration. The agent detects the build system and sets this field automatically when starting work on a new project (CMake → `make -C build 2>&1`, plain Makefile → `make 2>&1`, npm → `npm run build 2>&1`, Cargo → `cargo build 2>&1`).
 
 ## Plan mode
@@ -276,4 +278,17 @@ When a session is in Plan mode, the engine:
 
 Plan mode instructions tell the model to ask up to two clarifying questions before researching or proposing if the request is ambiguous. Questions that can be answered by reading the codebase should not be asked.
 
-`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, calls `engine_->set_mode(sid, Build)` then `engine_->continue_session(sid)` unconditionally — the UI refresh (mode button, status strip) is gated on `sid == active_session_id_` but the session always resumes regardless of which session is currently visible. On denial, the session stays in Plan mode; a "Plan discarded" system message is appended to the active chat but no mode change or `continue_session` is called.
+`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, reads the plan file stored in `pending_plan_path_` (set when `PlanProposed` fired), calls `haicode::parse_plan_tasks()` to extract the `## Tasks` checklist, and calls `engine_->seed_todos(sid, todos)` to write the list to the DB and publish `TodoUpdated` — so the todo panel is populated immediately before the engine resumes. Then calls `engine_->set_mode(sid, Build)` and `engine_->continue_session(sid)` unconditionally — the UI refresh is gated on `sid == active_session_id_` but the session always resumes. On denial, the session stays in Plan mode; a "Plan discarded" system message is appended to the active chat but no mode change or `continue_session` is called.
+
+**Plan task format**: `propose_plan` should include a `## Tasks` section with a markdown checklist for seeding to work:
+
+```markdown
+## Tasks
+- [ ] Add BuildHookResult event to events.h
+- [ ] Publish event in engine.cpp
+- [ ] Handle event in GUI relay
+```
+
+`parse_plan_tasks()` (`lib/src/engine/engine.cpp`) reads lines from the `## Tasks` section until the next `##` heading or EOF. It accepts `- [ ]`, `- [x]`, `- [X]`, and plain `- ` prefixes. `activeForm` is derived by converting the leading verb to gerund (e.g. "Add" → "Adding") via a lookup table; unknown verbs fall back to the content string unchanged.
+
+`engine_->seed_todos()` (`lib/include/haicode/engine.h`) calls `store_.replace_todos()` then publishes `TodoUpdated` — it is also callable from the TUI plan approval path and anywhere else a todo list needs to be set programmatically.
