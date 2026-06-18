@@ -19,6 +19,26 @@ CMake uses `GLOB_RECURSE`; new source files require a re-configure.
 
 Build hook for this project: `make -C build 2>&1`.
 
+# Plan mode
+
+When proposing a plan, always include a `## Tasks` section with a markdown
+checklist as the **last** section. Each item is one atomic step in imperative
+form. The harness parses this section on approval and seeds the todo panel
+automatically — no need to call `todo_write` at the start of the build turn.
+
+```markdown
+## Tasks
+- [ ] Add BuildHookResult event to events.h
+- [ ] Publish event in engine.cpp
+- [ ] Handle event in GUI relay and TUI
+```
+
+Rules:
+- Use `- [ ] verb + object` phrasing (imperative, e.g. "Add", "Fix", "Update").
+- One item per file or logical unit — not one item per line changed.
+- Do not pre-check items (`- [x]`); the harness sets all items to `pending`.
+- Sections after `## Tasks` terminate the list, so keep it last.
+
 # Conventions
 
 - **Provider registration is generic.** `AppConfig::providers` is a
