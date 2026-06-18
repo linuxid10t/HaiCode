@@ -51,6 +51,13 @@ make -C build test_config_permission
 
 All tests use `/tmp` for scratch files and clean up after themselves.
 
+To add a test for a new tool, create `lib/tests/test_<name>.cpp` and add two lines to `lib/CMakeLists.txt`:
+```cmake
+add_executable(test_<name> tests/test_<name>.cpp)
+target_link_libraries(test_<name> haicode)
+```
+Then re-run `cmake -B build -S .` and add the binary to the table above. All transitive deps (sqlite3, curl, be, root) are inherited from the `haicode` target — no manual `-l` flags needed.
+
 ## Architecture
 
 The project has three layers:
@@ -131,7 +138,7 @@ Tool call bodies (`╔ … ╚` block) are hidden by default. `x` expands all bl
 - **BeAPI `BScrollView` constructor**: use the 6-arg layout-aware form (no `resizingMode` parameter) when building layout-managed views. The 7-arg old-style form breaks layout and grays out child views.
 - **SQLite schema**: `session`, `session_message` (types: `user_prompted`, `assistant_text`, `tool_called`, `tool_result`), `permission`. WAL mode + FK constraints (`ON DELETE CASCADE`) enabled.
 - **Tool context messages**: assistant messages that include tool calls must be stored and reassembled with Anthropic `tool_use` content blocks (not plain text). Missing these causes orphaned `tool_result` blocks in the next request, making the model repeat work it already completed.
-- **Non-destructive tools are always allowed within the project directory** (`ToolRegistry::execute()` in `lib/src/permission/permission.cpp`): `read`, `ls`, `grep`, `diff`, `find`, `symbols` bypass the gate when their resolved path is inside `ctx.working_dir`; `glob` bypasses for relative patterns or absolute patterns rooted inside the project; read-only `git` subcommands (`status`, `diff`, `log`, `show`, `branch`, `blame`, `ls-files`, `shortlog`, `describe`, `rev-parse`) always bypass; `process list` and `process check_port` always bypass; `web_search`, `web_extract`, `propose_plan`, `todo_write` always bypass regardless of directory.
+- **Non-destructive tools are always allowed within the project directory** (`ToolRegistry::execute()` in `lib/src/permission/permission.cpp`): `read`, `ls`, `grep`, `diff`, `find`, `symbols` bypass the gate when their resolved path is inside `ctx.working_dir`; `glob` bypasses for relative patterns or absolute patterns rooted inside the project; read-only `git` subcommands (`status`, `diff`, `log`, `show`, `branch`, `blame`, `ls-files`, `shortlog`, `describe`, `rev-parse`) always bypass; `process list` and `process check_port` always bypass; `web_search`, `web_extract`, `propose_plan`, `todo_write` always bypass regardless of directory. **When adding a new read-only tool that should always bypass the gate inside the project directory, add it to the `if (name == "read" || ...)` chain in `lib/src/permission/permission.cpp` (search `name == "read"` to find the block) and update this list.**
 - **SSE parser state must persist across `write_cb` invocations** (`lib/src/util/util.cpp`). `event_type` and `event_data` live on `HttpClient::State`, not as locals — libcurl invokes the write callback once per network chunk and a single SSE event (event:/data:/blank line) frequently straddles those chunks for large tool inputs (e.g. `propose_plan` markdown). Locals silently dropped half-parsed events, truncating tool input JSON and causing `parse_failed` drops in the engine. Clear both fields at the start of every new `post_sse()`.
 - **`ToolResult` struct field order**: `{bool success, string output, string error, bool denied}`. The `denied` field is last — do not insert fields before it or existing brace-initializers break.
 - Tool output is truncated to 100 KB (`MAX_OUTPUT` in `tools.cpp`).

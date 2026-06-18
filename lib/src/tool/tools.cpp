@@ -531,7 +531,7 @@ public:
         return {
             {"type", "object"},
             {"properties", {
-                {"pattern",      {{"type", "string"}, {"description", "Regular expression (basic grep syntax) to search for. Passed to /bin/grep -e."}}},
+                {"pattern",      {{"type", "string"}, {"description", "Regular expression (ERE/extended syntax) to search for. Passed to /bin/grep -E -e. Supports alternation (A|B), +, ?, {n,m}."}}},
                 {"path",         {{"type", "string"}, {"description", "File or directory to search. Absolute, or relative to the project directory. Default: project directory."}}},
                 {"include",      {{"type", "string"}, {"description", "Filename glob filter, e.g. '*.cpp' or '*.{h,cpp}'. Restricts which files are scanned."}}},
                 {"line_numbers", {{"type", "boolean"}, {"description", "Prefix each match with `lineno:` (default true)."}}}
@@ -571,7 +571,7 @@ public:
         std::string include = input.value("include", "");
 
         // Build command with all arguments properly single-quoted
-        std::string cmd = "/bin/grep -r --color=never";
+        std::string cmd = "/bin/grep -r -E --color=never";
         if (line_numbers) cmd += " -n";
         if (!include.empty()) cmd += " --include=" + sq(include);
         cmd += " -e " + sq(pattern);
@@ -1402,8 +1402,9 @@ struct SymbolHit {
     Kind kind;
     std::string file;
     int line;
-    std::string text;      // trimmed CODE-only line
-    std::string cls;       // enclosing class, or "<global>"
+    std::string text;            // trimmed CODE-only line
+    std::string cls;             // enclosing class, or "<global>"
+    const char* matched_pattern; // which branch in classify() fired
 };
 
 const char* kind_str(SymbolHit::Kind k) {
@@ -1519,32 +1520,33 @@ bool is_method_decl(const std::string& code, const std::string& name) {
 }
 
 // Determine the kind of a hit on `name` in a CODE-only line.
-SymbolHit::Kind classify(const std::string& code,
-                          const std::string& name,
-                          const std::string& cls) {
-    if (is_class_def(code, name))          return SymbolHit::Kind::Definition;
-    if (is_qualified_method_def(code, name)) return SymbolHit::Kind::Definition;
-    if (is_method_def(code, name, cls))    return SymbolHit::Kind::Definition;
+// Returns {kind, pattern_name} where pattern_name identifies which branch fired.
+std::pair<SymbolHit::Kind, const char*> classify(const std::string& code,
+                                                   const std::string& name,
+                                                   const std::string& cls) {
+    if (is_class_def(code, name))            return {SymbolHit::Kind::Definition, "class_def"};
+    if (is_qualified_method_def(code, name)) return {SymbolHit::Kind::Definition, "qualified_method_def"};
+    if (is_method_def(code, name, cls))      return {SymbolHit::Kind::Definition, "method_def"};
     if (cls == "<global>" && is_free_func_def(code, name))
-                                            return SymbolHit::Kind::Definition;
-    if (is_typedef_def(code, name))        return SymbolHit::Kind::Definition;
+                                             return {SymbolHit::Kind::Definition, "free_func_def"};
+    if (is_typedef_def(code, name))          return {SymbolHit::Kind::Definition, "typedef_def"};
     if (cls != "<global>" && is_member_field(code, name))
-                                            return SymbolHit::Kind::Declaration;
+                                             return {SymbolHit::Kind::Declaration, "member_field"};
     if (cls != "<global>" && is_method_decl(code, name))
-                                            return SymbolHit::Kind::Declaration;
+                                             return {SymbolHit::Kind::Declaration, "method_decl"};
     // usage detection
     // call: name( possibly preceded by :: . -> or start/space
     static const std::regex call_re(R"((::|\.|->|^|[\s(,.]))" + name + R"(\s*\()");
-    if (std::regex_search(code, call_re))  return SymbolHit::Kind::Call;
+    if (std::regex_search(code, call_re))    return {SymbolHit::Kind::Call, "call_re"};
     // member access via explicit operator: .name ->name ::name
     static const std::regex mem_re(R"((\.|->|::))" + name + R"(\b)");
-    if (std::regex_search(code, mem_re))   return SymbolHit::Kind::MemberAccess;
+    if (std::regex_search(code, mem_re))     return {SymbolHit::Kind::MemberAccess, "mem_re"};
     // name used as an object: name. or name-> (accessing a sub-member)
     try {
         std::regex obj_re("\\b" + name + R"(\s*(\.|->))");
-        if (std::regex_search(code, obj_re)) return SymbolHit::Kind::MemberAccess;
+        if (std::regex_search(code, obj_re)) return {SymbolHit::Kind::MemberAccess, "obj_re"};
     } catch (...) {}
-    return SymbolHit::Kind::Mention;
+    return {SymbolHit::Kind::Mention, "mention_fallthrough"};
 }
 
 // Find the enclosing method name for the (in Foo::bar) annotation by scanning
@@ -1593,7 +1595,8 @@ public:
                 {"query",   {{"type", "string"}, {"enum", {"definition", "references", "callers"}},
                              {"description", "\"definition\": find where name is defined. \"references\": every occurrence with classification. \"callers\": usage sites only (call + member_access)."}}},
                 {"path",    {{"type", "string"}, {"description", "File or directory to scope the search. Absolute, or relative to the project directory. Default: project directory."}}},
-                {"include", {{"type", "string"}, {"description", "Filename glob filter overriding the default source-extension set, e.g. '*.cpp'."}}}
+                {"include", {{"type", "string"}, {"description", "Filename glob filter overriding the default source-extension set, e.g. '*.cpp'."}}},
+                {"verbose", {{"type", "boolean"}, {"description", "When true, appends [matched: <pattern>] to each hit line showing which regex branch produced the classification. Useful for debugging misclassifications."}}}
             }},
             {"required", nlohmann::json::array({"name", "query"})}
         };
@@ -1614,6 +1617,7 @@ public:
         std::string query = input.value("query", "");
         if (query != "definition" && query != "references" && query != "callers")
             return {false, "", missing_field("symbols", "query", input)};
+        bool verbose = input.value("verbose", false);
 
         std::string root;
         if (input.contains("path") && input["path"].is_string()) {
@@ -1671,7 +1675,7 @@ public:
                 }
 
                 // We have a hit — classify it.
-                SymbolHit::Kind k = classify(code, sym, cls);
+                auto [k, kpat] = classify(code, sym, cls);
 
                 // For definition queries keep definitions + declarations; for
                 // callers keep only call + member_access.
@@ -1707,6 +1711,7 @@ public:
 
                 SymbolHit h;
                 h.kind = k;
+                h.matched_pattern = kpat;
                 h.file = file;
                 h.line = static_cast<int>(i + 1);
                 h.text = trim(code);
@@ -1750,6 +1755,7 @@ public:
             } else if (h.kind == SymbolHit::Kind::Call || h.kind == SymbolHit::Kind::MemberAccess) {
                 if (!h.cls.empty() && h.cls != "<global>") out += "   (in " + h.cls + ")";
             }
+            if (verbose) out += "   [matched: " + std::string(h.matched_pattern) + "]";
             out += "\n";
         }
         if (hits.size() >= MAX_HITS)
