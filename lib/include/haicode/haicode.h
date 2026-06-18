@@ -9,11 +9,14 @@
 #include "util.h"
 
 namespace haicode {
-// Provider factories
+// Provider factories. `id` overrides the provider's reported id; if empty,
+// the factory uses the canonical "anthropic"/"openai" id.
 std::shared_ptr<Provider> make_anthropic_provider(const std::string& api_key,
-                                                   const std::string& base_url = "");
+                                                   const std::string& base_url = "",
+                                                   const std::string& id = "");
 std::shared_ptr<Provider> make_openai_provider(const std::string& api_key,
-                                                const std::string& base_url = "");
+                                                const std::string& base_url = "",
+                                                const std::string& id = "");
 // Register all built-in tools into a registry
 void register_builtin_tools(ToolRegistry& registry);
 // Register web_search and web_extract tools. Called by register_builtin_tools.

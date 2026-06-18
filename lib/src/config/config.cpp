@@ -101,6 +101,11 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             for (auto& [k, v] : j["providers"].items()) {
                 ProviderConfig p;
                 p.id = k;
+                if (v.contains("type") && v["type"].is_string())
+                    p.type = v["type"].get<std::string>();
+                // Default type: "anthropic" id → anthropic, else openai.
+                if (p.type.empty())
+                    p.type = (k == "anthropic") ? "anthropic" : "openai";
                 if (v.contains("api_key") && v["api_key"].is_string())
                     p.api_key = v["api_key"].get<std::string>();
                 if (v.contains("base_url") && v["base_url"].is_string())

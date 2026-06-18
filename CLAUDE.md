@@ -76,6 +76,12 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 
 **Providers** (`lib/src/provider/`): `AnthropicProvider` and `OpenAIProvider` each implement `stream()` (SSE) and `list_models()` (HTTP GET). OpenAI's message format differs from Anthropic's; `translate_messages()` in `openai.cpp` converts between them, including converting Anthropic content arrays with `tool_use` blocks into OpenAI `tool_calls`. Register providers via `ProviderRegistry::register_provider()`.
 
+The app supports **any number** of providers. Each `ProviderConfig` in `AppConfig::providers` (a `map<id, ProviderConfig>`) has a `type` of `"anthropic"` or `"openai"`; when empty it is inferred from the id (`"anthropic"` → anthropic, anything else → openai). Both frontends iterate the map to register providers. The factory functions `make_anthropic_provider()` / `make_openai_provider()` take an optional `id` so each instance reports a distinct id to the registry. Env-var fallback (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only to providers whose ids are literally `"anthropic"` / `"openai"`; an OpenAI-compatible entry with no key but a `base_url` (e.g. local Ollama) registers keyless.
+
+In the GUI, the provider dropdown is built dynamically via `MainWindow::RebuildProviderMenu()`. Each menu item carries its real `provider_id` in its `BMessage`; the `MSG_FETCH_MODELS` handler reads it from the message (never from the label). `SelectProvider()` matches by exact id and stores it verbatim — it must not coerce to two values, or restored sessions using a custom id would be silently remapped. `SettingsWindow` presents an add/edit/remove list editor; on save it serializes the full providers map and `HaiCodeApp` re-runs the registration loop, recreates the engine, and calls `RebuildProviderMenu()`.
+
+**Pricing caveat:** `lookup_pricing()` keys on `"provider_id:model_id"`. A custom-id Anthropic provider (e.g. `"my-proxy"`) does not match the built-in `"anthropic:claude-..."` entries, so cost tracking returns null for it. The per-model `pricing` config override (keyed `"<provider_id>:<model>"`) remains the escape hatch.
+
 **Pricing** (`lib/src/pricing/`): Handles model costs, token usage calculations, and pricing lookups for various providers.
 
 **Session** (`lib/src/session/`): Manages session-specific events and state.

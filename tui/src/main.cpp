@@ -71,15 +71,6 @@ static std::string resolve_db_path() {
 // Helper: pick Anthropic API key (config > env var)
 // ---------------------------------------------------------------------------
 
-static std::string pick_api_key(const AppConfig& config) {
-    auto it = config.providers.find("anthropic");
-    if (it != config.providers.end() && !it->second.api_key.empty()) {
-        return it->second.api_key;
-    }
-    const char* env = std::getenv("ANTHROPIC_API_KEY");
-    return (env && *env) ? std::string(env) : std::string{};
-}
-
 // ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
@@ -170,39 +161,24 @@ int main(int argc, char* argv[]) {
     SessionEventBus  bus;
 
     // ------------------------------------------------------------------
-    // 4. Providers
+    // 4. Providers (generic: supports any number of Anthropic and
+    //    OpenAI-compatible endpoints, distinguished by config `type`).
     // ------------------------------------------------------------------
-    bool any_provider = false;
-
-    // Anthropic
-    {
-        std::string api_key = pick_api_key(config);
-        if (!api_key.empty()) {
-            std::string base_url;
-            auto it = config.providers.find("anthropic");
-            if (it != config.providers.end()) base_url = it->second.base_url;
-            providers.register_provider(make_anthropic_provider(api_key, base_url));
-            any_provider = true;
+    for (auto& [id, pcfg] : config.providers) {
+        std::string key = pcfg.api_key;
+        std::string type = pcfg.type.empty()
+            ? (id == "anthropic" ? "anthropic" : "openai") : pcfg.type;
+        if (key.empty() && id == "anthropic") {
+            if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
         }
-    }
-
-    // OpenAI (or any OpenAI-compatible endpoint: Ollama, LM Studio, etc.)
-    {
-        std::string api_key;
-        auto it = config.providers.find("openai");
-        if (it != config.providers.end() && !it->second.api_key.empty())
-            api_key = it->second.api_key;
-        if (api_key.empty()) {
-            const char* env = std::getenv("OPENAI_API_KEY");
-            if (env && *env) api_key = env;
+        if (key.empty() && id == "openai") {
+            if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
         }
-        if (!api_key.empty()) {
-            std::string base_url;
-            auto it2 = config.providers.find("openai");
-            if (it2 != config.providers.end()) base_url = it2->second.base_url;
-            providers.register_provider(make_openai_provider(api_key, base_url));
-            any_provider = true;
-        }
+        if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
+        if (type == "anthropic")
+            providers.register_provider(make_anthropic_provider(key, pcfg.base_url, id));
+        else
+            providers.register_provider(make_openai_provider(key, pcfg.base_url, id));
     }
 
     // Default model unconditionally — providers may be added later via config

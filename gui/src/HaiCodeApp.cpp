@@ -112,47 +112,27 @@ HaiCodeApp::ReadyToRun()
     perm_gate_ = std::make_unique<haicode::PermissionGate>();
     bus_       = std::make_unique<haicode::SessionEventBus>();
 
-    // --- 5. Register providers ---
-    bool any_provider = false;
-
-    // Anthropic
-    {
-        std::string api_key;
-        auto it = config_.providers.find("anthropic");
-        if (it != config_.providers.end() && !it->second.api_key.empty())
-            api_key = it->second.api_key;
-        if (api_key.empty()) {
-            const char* env = std::getenv("ANTHROPIC_API_KEY");
-            if (env && *env) api_key = env;
+    // --- 5. Register providers (generic: supports any number of Anthropic
+    // and OpenAI-compatible endpoints, distinguished by config `type`). ---
+    for (auto& [id, pcfg] : config_.providers) {
+        std::string key = pcfg.api_key;
+        std::string type = pcfg.type.empty()
+            ? (id == "anthropic" ? "anthropic" : "openai") : pcfg.type;
+        if (key.empty() && id == "anthropic") {
+            if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
         }
-        if (!api_key.empty()) {
-            std::string base_url;
-            auto it2 = config_.providers.find("anthropic");
-            if (it2 != config_.providers.end()) base_url = it2->second.base_url;
+        if (key.empty() && id == "openai") {
+            if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
+        }
+        // Skip Anthropic with neither key nor base_url; OpenAI-compatible can
+        // run keyless against a local endpoint (Ollama, LM Studio).
+        if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
+        if (type == "anthropic")
             providers_->register_provider(
-                haicode::make_anthropic_provider(api_key, base_url));
-            any_provider = true;
-        }
-    }
-
-    // OpenAI (or any OpenAI-compatible endpoint: Ollama, LM Studio, etc.)
-    {
-        std::string api_key;
-        std::string base_url;
-        auto it = config_.providers.find("openai");
-        if (it != config_.providers.end()) {
-            if (!it->second.api_key.empty()) api_key = it->second.api_key;
-            base_url = it->second.base_url;
-        }
-        if (api_key.empty()) {
-            const char* env = std::getenv("OPENAI_API_KEY");
-            if (env && *env) api_key = env;
-        }
-        if (!api_key.empty() || !base_url.empty()) {
+                haicode::make_anthropic_provider(key, pcfg.base_url, id));
+        else
             providers_->register_provider(
-                haicode::make_openai_provider(api_key, base_url));
-            any_provider = true;
-        }
+                haicode::make_openai_provider(key, pcfg.base_url, id));
     }
 
     // Default model unconditionally — providers may be configured later
@@ -204,6 +184,8 @@ HaiCodeApp::ReadyToRun()
     // --- 11. Create MainWindow ---
     main_window_ = new MainWindow(*engine_, *store_, project_dir_, config_.model, config_.provider);
     *window_holder_ = main_window_;
+    // Populate the provider dropdown from config now that MainWindow exists.
+    main_window_->RebuildProviderMenu(config_.providers);
 
     // --- 12. Create GuiEventRelay and attach to bus ---
     relay_ = std::make_unique<GuiEventRelay>(
@@ -357,41 +339,34 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_SHOW_SETTINGS: {
-            std::string ak, au, ok, ou;
-            auto it = config_.providers.find("anthropic");
-            if (it != config_.providers.end()) {
-                ak = it->second.api_key;
-                au = it->second.base_url;
-            }
-            auto it2 = config_.providers.find("openai");
-            if (it2 != config_.providers.end()) {
-                ok = it2->second.api_key;
-                ou = it2->second.base_url;
-            }
-            SettingsWindow* win = new SettingsWindow(ak, au, ok, ou, BMessenger(this));
+            SettingsWindow* win = new SettingsWindow(config_.providers, BMessenger(this));
             win->Show();
             break;
         }
         case MSG_SETTINGS_SAVED: {
-            const char* ak = nullptr; const char* au = nullptr;
-            const char* ok = nullptr; const char* ou = nullptr;
-            msg->FindString("anthropic_key", &ak);
-            msg->FindString("anthropic_url", &au);
-            msg->FindString("openai_key",    &ok);
-            msg->FindString("openai_url",    &ou);
+            // Replace the in-memory providers map wholesale from the JSON
+            // the settings window sent us.
+            const char* providers_json = nullptr;
+            if (msg->FindString("providers", &providers_json) != B_OK || !providers_json)
+                break;
+            try {
+                auto pj = nlohmann::json::parse(providers_json, nullptr, false);
+                if (!pj.is_discarded() && pj.is_object()) {
+                    config_.providers.clear();
+                    for (auto& [k, v] : pj.items()) {
+                        haicode::ProviderConfig p;
+                        p.id = k;
+                        p.type = v.value("type", "");
+                        if (p.type.empty())
+                            p.type = (k == "anthropic") ? "anthropic" : "openai";
+                        p.api_key  = v.value("api_key", "");
+                        p.base_url = v.value("base_url", "");
+                        config_.providers[k] = std::move(p);
+                    }
+                }
+            } catch (...) {}
 
-            // Update in-memory config
-            auto& ap = config_.providers["anthropic"];
-            ap.id      = "anthropic";
-            ap.api_key  = ak ? ak : "";
-            ap.base_url = au ? au : "";
-
-            auto& op = config_.providers["openai"];
-            op.id      = "openai";
-            op.api_key  = ok ? ok : "";
-            op.base_url = ou ? ou : "";
-
-            // Persist to global config file
+            // Persist the full providers map, preserving other top-level keys.
             BPath settings_path;
             if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
                 BPath cfg_path(settings_path);
@@ -400,35 +375,57 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 cfg_path.Append("config.json");
 
                 nlohmann::json j;
-                j["model"] = config_.model;
+                {
+                    std::ifstream f(cfg_path.Path());
+                    if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
+                }
                 if (!config_.provider.empty()) j["provider"] = config_.provider;
-                j["providers"]["anthropic"]["api_key"]  = ap.api_key;
-                j["providers"]["anthropic"]["base_url"] = ap.base_url;
-                j["providers"]["openai"]["api_key"]     = op.api_key;
-                j["providers"]["openai"]["base_url"]    = op.base_url;
+                if (!config_.model.empty())    j["model"]    = config_.model;
+                nlohmann::json providers_j = nlohmann::json::object();
+                for (auto& [id, p] : config_.providers) {
+                    providers_j[id] = {
+                        {"type",     p.type},
+                        {"api_key",  p.api_key},
+                        {"base_url", p.base_url},
+                    };
+                }
+                j["providers"] = providers_j;
 
                 std::ofstream f(cfg_path.Path());
-                if (f.is_open())
-                    f << j.dump(2);
+                if (f.is_open()) f << j.dump(2);
             }
 
-            // Re-register providers
+            // Re-register providers from the updated config (generic loop).
             providers_ = std::make_unique<haicode::ProviderRegistry>();
-            if (!ap.api_key.empty())
-                providers_->register_provider(
-                    haicode::make_anthropic_provider(ap.api_key, ap.base_url));
-            if (!op.api_key.empty() || !op.base_url.empty())
-                providers_->register_provider(
-                    haicode::make_openai_provider(op.api_key, op.base_url));
+            for (auto& [id, pcfg] : config_.providers) {
+                std::string key = pcfg.api_key;
+                std::string type = pcfg.type.empty()
+                    ? (id == "anthropic" ? "anthropic" : "openai") : pcfg.type;
+                if (key.empty() && id == "anthropic") {
+                    if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
+                }
+                if (key.empty() && id == "openai") {
+                    if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
+                }
+                if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
+                if (type == "anthropic")
+                    providers_->register_provider(
+                        haicode::make_anthropic_provider(key, pcfg.base_url, id));
+                else
+                    providers_->register_provider(
+                        haicode::make_openai_provider(key, pcfg.base_url, id));
+            }
 
-            // Recreate engine with updated provider registry and notify MainWindow
+            // Recreate engine with updated provider registry and refresh the UI.
             engine_ = std::make_unique<haicode::SessionEngine>(
                 *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
             main_window_->SetEngine(*engine_);
+            main_window_->RebuildProviderMenu(config_.providers);
 
-            // Re-fetch models for the first available provider
-            std::string refresh_id = !ap.api_key.empty() ? "anthropic"
-                                   : (!op.api_key.empty() || !op.base_url.empty()) ? "openai" : "";
+            // Re-fetch models for the currently selected provider.
+            std::string refresh_id = config_.provider;
+            if (refresh_id.empty() && !config_.providers.empty())
+                refresh_id = config_.providers.begin()->first;
             if (!refresh_id.empty()) {
                 BMessage fetch(MSG_FETCH_MODELS);
                 fetch.AddString("provider_id", refresh_id.c_str());

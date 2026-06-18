@@ -23,7 +23,14 @@ static const uint32 MSG_PLAN_DECISION  = 'PLdc';  // reply from PlanReviewWindow
 
 // Settings
 static const uint32 MSG_SHOW_SETTINGS   = 'SHst';
-static const uint32 MSG_SETTINGS_SAVED  = 'SVst';
+static const uint32 MSG_SETTINGS_SAVED  = 'SVst';  // carries "providers" JSON string
+
+// SettingsWindow internal
+static const uint32 MSG_PROVIDER_ADD    = 'PVad';  // add button
+static const uint32 MSG_PROVIDER_EDIT   = 'PVed';  // edit button
+static const uint32 MSG_PROVIDER_REMOVE = 'PVrm';  // remove button
+static const uint32 MSG_PROVIDER_DIALOG_DONE = 'PVdd'; // add/edit sub-dialog OK
+static const uint32 MSG_LIST_SEL        = 'PVls';  // list selection changed
 
 // Model list
 static const uint32 MSG_FETCH_MODELS    = 'FTmd';  // MainWindow → be_app; "provider_id" string

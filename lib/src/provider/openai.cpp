@@ -166,10 +166,11 @@ translate_messages(const std::string& system,
 class OpenAIProvider : public Provider {
 public:
     explicit OpenAIProvider(const std::string& api_key,
-                             const std::string& base_url = "https://api.openai.com")
-        : api_key_(api_key), base_url_(base_url) {}
+                             const std::string& base_url = "https://api.openai.com",
+                             const std::string& id = "openai")
+        : api_key_(api_key), base_url_(base_url), id_(id.empty() ? "openai" : id) {}
 
-    std::string id() const override { return "openai"; }
+    std::string id() const override { return id_; }
 
     void stream(const LLMRequest& request, StreamCallbacks callbacks) override {
         cancelled_.store(false);
@@ -386,6 +387,7 @@ public:
 private:
     std::string api_key_;
     std::string base_url_;
+    std::string id_;
     HttpClient  http_;
     std::atomic<bool> cancelled_{false};
 };
@@ -395,12 +397,13 @@ private:
 // ---------------------------------------------------------------------------
 
 std::shared_ptr<Provider> make_openai_provider(const std::string& api_key,
-                                                const std::string& base_url) {
+                                                const std::string& base_url,
+                                                const std::string& id) {
     if (base_url.empty())
-        return std::make_shared<OpenAIProvider>(api_key);
+        return std::make_shared<OpenAIProvider>(api_key, "https://api.openai.com", id);
     std::string url = base_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
-    return std::make_shared<OpenAIProvider>(api_key, url);
+    return std::make_shared<OpenAIProvider>(api_key, url, id);
 }
 
 } // namespace haicode

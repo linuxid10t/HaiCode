@@ -158,15 +158,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     std::string dir_label = dir_basename(project_dir_);
     dir_btn_ = new BButton("dir_btn", dir_label.c_str(), new BMessage(MSG_CHOOSE_DIR));
 
-    // Provider selector — user picks endpoint type; model list is fetched dynamically
-    provider_menu_ = new BPopUpMenu("Anthropic");
-    auto* ap_item = new BMenuItem("Anthropic", new BMessage(MSG_FETCH_MODELS));
-    auto* oi_item = new BMenuItem("OpenAI / compatible", new BMessage(MSG_FETCH_MODELS));
-    // Mark the restored provider (default_provider_ was seeded from config
-    // by HaiCodeApp). Falls back to Anthropic when unset.
-    (default_provider_ == "openai" ? oi_item : ap_item)->SetMarked(true);
-    provider_menu_->AddItem(ap_item);
-    provider_menu_->AddItem(oi_item);
+    // Provider selector — populated from config in RebuildProviderMenu().
+    provider_menu_ = new BPopUpMenu("Provider");
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
 
     // Model list — starts empty; populated after MSG_MODELS_LOADED.
@@ -320,14 +313,46 @@ MainWindow::QuitRequested()
 }
 
 void
+MainWindow::RebuildProviderMenu(const std::map<std::string, haicode::ProviderConfig>& providers)
+{
+    // Remember current selection to restore if possible.
+    std::string keep = default_provider_;
+
+    while (provider_menu_->CountItems() > 0)
+        delete provider_menu_->RemoveItem((int32)0);
+
+    for (auto& [id, p] : providers) {
+        std::string label = id;
+        if (!p.base_url.empty()) label += "  (" + p.base_url + ")";
+        auto* msg = new BMessage(MSG_FETCH_MODELS);
+        msg->AddString("provider_id", id.c_str());
+        auto* item = new BMenuItem(label.c_str(), msg);
+        provider_menu_->AddItem(item);
+    }
+
+    provider_menu_->SetRadioMode(true);
+    provider_menu_->SetLabelFromMarked(true);
+
+    // Restore mark: prefer `keep`, else first item.
+    SelectProvider(keep);
+    if (!provider_menu_->FindMarked() && provider_menu_->CountItems() > 0)
+        provider_menu_->ItemAt(0)->SetMarked(true);
+    if (auto* marked = provider_menu_->FindMarked()) {
+        const char* pid = nullptr;
+        if (marked->Message() && marked->Message()->FindString("provider_id", &pid) == B_OK && pid)
+            default_provider_ = pid;
+    }
+}
+
+void
 MainWindow::SelectProvider(const std::string& provider_id)
 {
-    default_provider_ = (provider_id == "openai") ? "openai" : "anthropic";
-    bool want_openai = (default_provider_ == "openai");
+    default_provider_ = provider_id;
     for (int32 i = 0; i < provider_menu_->CountItems(); i++) {
         BMenuItem* item = provider_menu_->ItemAt(i);
-        bool is_openai = std::string(item->Label()) == "OpenAI / compatible";
-        item->SetMarked(want_openai ? is_openai : !is_openai);
+        const char* pid = nullptr;
+        if (item->Message() && item->Message()->FindString("provider_id", &pid) == B_OK && pid)
+            item->SetMarked(std::string(pid) == provider_id);
     }
 }
 
@@ -449,18 +474,17 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_FETCH_MODELS: {
             // Provider changed (or initial fetch from be_app/HaiCodeApp).
-            // Read the marked item from the menu — radio mode moves the mark
-            // on click before this handler runs.
-            BMenuItem* marked = provider_menu_->FindMarked();
-            std::string pid = (marked && std::string(marked->Label()) == "OpenAI / compatible")
-                              ? "openai" : "anthropic";
-            // If the message came from outside the menu (e.g. settings save or
-            // startup), it carries provider_id explicitly — prefer that.
+            // The provider id is carried on the clicked item's message, not
+            // inferred from its label. For messages from outside the menu
+            // (settings save, startup), provider_id may be attached directly.
             const char* pid_str = nullptr;
-            if (msg->FindString("provider_id", &pid_str) == B_OK && pid_str) {
-                pid = pid_str;
+            if (msg->FindString("provider_id", &pid_str) != B_OK || !pid_str) {
+                BMenuItem* marked = provider_menu_->FindMarked();
+                if (marked && marked->Message())
+                    marked->Message()->FindString("provider_id", &pid_str);
             }
-            default_provider_ = (pid == "openai") ? "openai" : "anthropic";
+            std::string pid = pid_str ? pid_str : "anthropic";
+            default_provider_ = pid;
             _ApplyProviderModelToActiveSession();
             _PersistProviderModel();
 

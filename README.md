@@ -9,7 +9,7 @@ A native coding-agent app for **Haiku R1** — TUI (ncurses) and GUI (BeAPI) fro
 - **Agentic loop** — up to 20 tool-use steps per turn, with atomic interruption between steps.
 - **Two frontends** — `haicode-tui` (ncurses, pure POSIX) and `haicode-gui` (Haiku native BeAPI).
 - **Eleven built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `ls`, `external_terminal`, `propose_plan`, plus `web_search` and `web_extract` — each with safe argument handling and a 100 KB output cap.
-- **Multi-provider** — Anthropic and OpenAI-compatible endpoints, with message-format translation between them.
+- **Multi-provider** — any number of Anthropic and OpenAI-compatible endpoints (proxies, Ollama, LM Studio, …) in `config.json`, with message-format translation between them.
 - **Permissions** — fnmatch rules per session, with an interactive Ask → Allow / Deny / Allow-Always flow.
 - **SQLite session history** — every user prompt, assistant message, tool call, and tool result is stored and reloadable. WAL mode + cascading deletes.
 - **Project + global config** — global config in `B_USER_SETTINGS_DIRECTORY/haicode/config.json`, project config in `<project>/.haicode/config.json`.
@@ -24,11 +24,13 @@ pkgman install cmake git sqlite_devel curl_devel ncurses_devel
 
 The Haiku BeAPI headers come with the standard `gcc`/`g++` devel install.
 
-You'll also need API credentials in your environment:
+You'll also need API credentials. The default providers read from the
+environment, but you can also configure any number of Anthropic and
+OpenAI-compatible endpoints (proxies, Ollama, LM Studio, …) in `config.json`:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...     # for the Anthropic provider
-export OPENAI_API_KEY=sk-...        # for OpenAI-compatible providers
+export ANTHROPIC_API_KEY=sk-...     # for the default Anthropic provider
+export OPENAI_API_KEY=sk-...        # for the default OpenAI provider
 ```
 
 ## Build
@@ -74,6 +76,42 @@ Key types live in `lib/include/haicode/` — `engine.h`, `provider.h`, `tool.h`,
 
 - **Global:** `B_USER_SETTINGS_DIRECTORY/haicode/config.json` — provider keys, default model, `last_directory`.
 - **Project:** `<project_dir>/.haicode/config.json` — overlays globals when that project is open.
+
+### Providers
+
+The `"providers"` object maps arbitrary ids to provider configs. Each entry has
+a `type` (`"anthropic"` or `"openai"`), an optional `api_key`, and an optional
+`base_url`. When `type` is omitted it is inferred from the id: `"anthropic"`
+defaults to the Anthropic type, anything else to OpenAI-compatible.
+
+```json
+{
+  "providers": {
+    "anthropic": {
+      "type": "anthropic",
+      "api_key": "sk-..."
+    },
+    "anthropic-proxy": {
+      "type": "anthropic",
+      "api_key": "sk-...",
+      "base_url": "https://my-proxy.example.com"
+    },
+    "ollama": {
+      "type": "openai",
+      "base_url": "http://localhost:11434"
+    }
+  }
+}
+```
+
+Env-var fallback applies only to the providers whose ids are literally
+`"anthropic"` and `"openai"`: `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`
+respectively. An OpenAI-compatible entry with no key but a `base_url` (e.g. a
+local Ollama instance) is registered keyless.
+
+In the GUI, **Settings → Preferences** opens a list-based editor where you can
+add, edit, and remove providers; changes persist to the global config file.
+The provider dropdown in the toolbar is rebuilt dynamically from the config.
 
 ## License
 

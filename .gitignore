@@ -4,6 +4,9 @@ build/
 # Claude Code per-user local state
 .claude/settings.local.json
 
+# HaiCode per-project state (plans, config)
+.haicode/
+
 # Editor / OS cruft
 *.swp
 *.swo

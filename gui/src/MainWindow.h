@@ -55,8 +55,12 @@ public:
     // Called by HaiCodeApp after recreating the engine (e.g. settings change)
     void SetEngine(haicode::SessionEngine& engine) { engine_ = &engine; }
 
-    // Mark the provider dropdown to match the given provider id ("anthropic" or "openai")
+    // Mark the provider dropdown to match the given provider id.
     void SelectProvider(const std::string& provider_id);
+
+    // Rebuild the provider dropdown from a config providers map. Preserves the
+    // current selection if its id is still present; otherwise marks the first.
+    void RebuildProviderMenu(const std::map<std::string, haicode::ProviderConfig>& providers);
 
 private:
     void _NewSession();

@@ -10,6 +10,7 @@ namespace haicode {
 
 struct ProviderConfig {
     std::string id;
+    std::string type;  // "anthropic" or "openai"; inferred from id if empty
     std::string api_key;
     std::string base_url;
     std::map<std::string, std::string> env;
