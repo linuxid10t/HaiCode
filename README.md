@@ -16,13 +16,38 @@ A native coding-agent app for **Haiku R1** — TUI (ncurses) and GUI (BeAPI) fro
 
 ## Prerequisites
 
-On Haiku:
+### Required Haiku packages
+
+Install these via `pkgman`:
+
+| Package | What it provides | Used by |
+|---------|------------------|---------|
+| `haiku_devel` | BeAPI headers (`os/`, incl. `Tracker`), `libbe`, `libroot`, `libtracker` | `lib`, `tui`, `gui` |
+| `nlohmann_json` | `nlohmann/json.hpp` (header-only) | `lib`, `gui` (config, provider payloads, events) |
+| `sqlite_devel` | `sqlite3.h` + `libsqlite3` | `lib` (session persistence) |
+| `curl_devel` | `curl/curl.h` + `libcurl` | `lib` (LLM HTTP) |
+| `ncurses_devel` | `ncurses.h` + `libncursesw` | `tui` |
+| `cmake` | build configuration | all |
+| `make` | build runner | all |
+
+The compiler itself (`gcc`/`g++`, gcc13) ships with the base Haiku install, so
+no separate package is needed for it. `haiku_devel` is the single source of the
+BeAPI headers and the `be`, `root`, and `tracker` libraries — there is no
+separate `tracker_devel`.
+
+Install everything in one line:
 
 ```bash
-pkgman install cmake git sqlite_devel curl_devel ncurses_devel
+pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel ncurses_devel cmake make
 ```
 
-The Haiku BeAPI headers come with the standard `gcc`/`g++` devel install.
+### Optional
+
+| Package | Why |
+|---------|-----|
+| `git` | the built-in `git` tool wraps it; only needed if you want in-app git operations |
+
+### API credentials
 
 You'll also need API credentials. The default providers read from the
 environment, but you can also configure any number of Anthropic and
