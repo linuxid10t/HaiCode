@@ -79,6 +79,24 @@ static std::string render_prompt(const std::string& tmpl,
     return out;
 }
 
+std::string render_dynamic_prompt(const std::string& model,
+                                  const std::string& os_info,
+                                  const std::string& project_dir,
+                                  int steps_left) {
+    std::string base = render_prompt(kDynamicSystemPromptNeutral, model,
+                                     os_info, project_dir, steps_left);
+    if (steps_left <= 4) {
+        base += "\nCRITICAL: only " + std::to_string(steps_left)
+              + " step(s) left. Stop exploring. Produce your final answer now, "
+                "or summarize what is done and what remains.";
+    } else if (steps_left <= 14) {
+        base += "\nBudget is getting tight (" + std::to_string(steps_left)
+              + " steps left). Wrap up the current sub-task and avoid starting "
+                "new exploratory reads.";
+    }
+    return base;
+}
+
 LLMRequest ContextBuilder::build(
     const std::vector<SessionMessage>& messages,
     const std::string& system_prompt,
@@ -267,6 +285,19 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     }
 }
 
+void SessionEngine::inject_message(const std::string& session_id,
+                                   const std::string& text) {
+    nlohmann::json data;
+    data["role"] = "user";
+    data["text"] = text;
+    store_.append_message(session_id, "user_prompted", data.dump());
+
+    nlohmann::json ev;
+    ev["session_id"] = session_id;
+    ev["text"] = text;
+    bus_.publish(events::EventType::Prompted, ev);
+}
+
 void SessionEngine::continue_session(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mu_);
     bool running = session_running_.count(session_id) && session_running_[session_id];
@@ -442,9 +473,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // Dynamic per-step content ({{STEPS_LEFT}}). Emitted as a separate
     // system text block by the Anthropic provider so the stable body
     // above stays byte-identical across turns and hits the prefix cache.
-    std::string system_dynamic = render_prompt(kDynamicSystemPrompt, model_id,
-                                                os_info, session.directory,
-                                                max_steps);
+    std::string system_dynamic = render_dynamic_prompt(model_id, os_info,
+                                                       session.directory,
+                                                       max_steps);
 
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
@@ -475,8 +506,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                max_steps - step) + agents_md_block + latest_plan_block
                               + instructions_block + plan_mode_block;
         // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
-        system_dynamic = render_prompt(kDynamicSystemPrompt, model_id, os_info,
-                                        session.directory, max_steps - step);
+        system_dynamic = render_dynamic_prompt(model_id, os_info,
+                                                session.directory,
+                                                max_steps - step);
 
         auto messages = store_.load_messages(session_id);
 

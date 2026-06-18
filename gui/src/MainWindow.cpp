@@ -32,6 +32,7 @@
 
 #include <haicode/engine.h>
 #include <haicode/db.h>
+#include <haicode/default_prompt.h>
 #include <haicode/model_info.h>
 
 #include <nlohmann/json.hpp>
@@ -1086,6 +1087,7 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
             }
 
             engine_->set_mode(sid, haicode::SessionMode::Build);
+            engine_->inject_message(sid, haicode::kPlanApprovedMessage);
             if (sid == active_session_id_) {
                 _RefreshModeButton();
                 _UpdateStatusStrip();

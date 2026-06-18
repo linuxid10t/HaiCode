@@ -43,6 +43,10 @@ public:
     void submit_prompt(const std::string& session_id, const std::string& text);
     // Resume the agentic loop without adding a new user message (used after plan approval).
     void continue_session(const std::string& session_id);
+    // Append a user_prompted message + publish Prompted event without starting
+    // the agentic loop. Used by approval handlers between set_mode and
+    // continue_session to inject the plan-approved directive.
+    void inject_message(const std::string& session_id, const std::string& text);
     void interrupt(const std::string& session_id);
 
     // Per-session Plan/Build mode. Persisted into model_json so it survives
@@ -87,5 +91,13 @@ private:
 // Parse a "## Tasks" checklist from plan markdown into seed-ready Todo items.
 // Returns an empty vector if no "## Tasks" section is found.
 std::vector<Todo> parse_plan_tasks(const std::string& markdown);
+
+// Tiered dynamic system block: wording escalates as the step budget depletes
+// so the model reprioritizes before running out. The stable cached body is
+// untouched — only this tail changes per step.
+std::string render_dynamic_prompt(const std::string& model,
+                                  const std::string& os_info,
+                                  const std::string& project_dir,
+                                  int steps_left);
 
 } // namespace haicode

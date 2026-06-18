@@ -7,6 +7,7 @@
 
 #include "TuiApp.h"
 #include <haicode/events.h>
+#include <haicode/default_prompt.h>
 #include <haicode/model_info.h>
 
 #include <ncurses.h>
@@ -660,6 +661,7 @@ void TuiApp::handle_key(int key) {
                     }
                 }
                 engine_.set_mode(plan_session_id_, SessionMode::Build);
+                engine_.inject_message(plan_session_id_, kPlanApprovedMessage);
                 engine_.continue_session(plan_session_id_);
             }
             plan_visible_ = false;

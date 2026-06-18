@@ -44,3 +44,6 @@ target_link_libraries(test_file_tools haicode)
 
 add_executable(test_config_permission tests/test_config_permission.cpp)
 target_link_libraries(test_config_permission haicode)
+
+add_executable(test_step_budget tests/test_step_budget.cpp)
+target_link_libraries(test_step_budget haicode)

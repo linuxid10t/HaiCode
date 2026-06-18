@@ -186,4 +186,12 @@ You are in PLAN MODE. The user wants a researched implementation strategy before
 - Do not call `propose_plan` more than once per turn unless the user asks for revisions.
 )HPCODE";
 
+// Injected as a user_prompted message when the user approves a plan, before
+// continue_session resumes the agentic loop. Tells the model the plan was
+// accepted and that it is now in Build mode, so it begins implementing
+// instead of re-planning or waiting.
+constexpr const char* kPlanApprovedMessage = R"HPCODE(
+The plan has been approved. You are now in Build mode. Begin implementing the plan. If tasks were seeded from the plan's ## Tasks section, call `todo_write` first to confirm them, then work through each task marking it in_progress/completed as you go.
+)HPCODE";
+
 }  // namespace haicode
