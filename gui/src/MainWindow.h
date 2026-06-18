@@ -81,6 +81,7 @@ private:
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);
     void _HandleTodosUpdated(BMessage* msg);
+    void _HandleBuildHookResult(BMessage* msg);
     void _RefreshTodosFromEngine();
 
     void _ToggleMode();
@@ -97,6 +98,7 @@ private:
     std::string             default_model_;
     std::string             default_provider_ = "anthropic";
     std::string             active_session_id_;
+    std::string             pending_plan_path_;
 
     // Session list (parallel to UI list)
     std::vector<std::string> session_ids_;  // indexed to match BListView

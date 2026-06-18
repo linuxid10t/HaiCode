@@ -659,6 +659,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                         build_out += buf.data();
                     int brc = pclose(bp);
                     int bec = WIFEXITED(brc) ? WEXITSTATUS(brc) : -1;
+
+                    {
+                        nlohmann::json bev;
+                        bev["session_id"] = session_id;
+                        bev["success"]    = (bec == 0);
+                        bev["exit_code"]  = bec;
+                        bus_.publish(events::EventType::BuildHookResult, bev);
+                    }
+
                     if (bec != 0) {
                         result.output += "\n\n[build_hook] Build failed (exit "
                                        + std::to_string(bec) + "):\n" + build_out;
@@ -810,6 +819,77 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                      + "). Send another message to continue.";
         bus_.publish(events::EventType::StepFailed, ev);
     }
+}
+
+void SessionEngine::seed_todos(const std::string& session_id,
+                               const std::vector<Todo>& todos)
+{
+    store_.replace_todos(session_id, todos);
+
+    nlohmann::json ev;
+    ev["session_id"] = session_id;
+    ev["todos"] = nlohmann::json::array();
+    for (auto& t : todos) {
+        nlohmann::json item;
+        item["content"]    = t.content;
+        item["activeForm"] = t.active_form;
+        item["status"]     = t.status;
+        ev["todos"].push_back(item);
+    }
+    bus_.publish(events::EventType::TodoUpdated, ev);
+}
+
+static std::string to_active_form(const std::string& content) {
+    auto sp = content.find(' ');
+    if (sp == std::string::npos) return content;
+    std::string verb = content.substr(0, sp);
+    std::string rest = content.substr(sp);
+    static const std::map<std::string, std::string> g = {
+        {"Add","Adding"}, {"Write","Writing"}, {"Fix","Fixing"},
+        {"Update","Updating"}, {"Remove","Removing"}, {"Delete","Deleting"},
+        {"Create","Creating"}, {"Implement","Implementing"}, {"Refactor","Refactoring"},
+        {"Test","Testing"}, {"Move","Moving"}, {"Rename","Renaming"},
+        {"Check","Checking"}, {"Run","Running"}, {"Build","Building"},
+        {"Install","Installing"}, {"Parse","Parsing"}, {"Handle","Handling"},
+        {"Set","Setting"}, {"Make","Making"}, {"Enable","Enabling"},
+        {"Disable","Disabling"}, {"Read","Reading"}, {"Load","Loading"},
+        {"Save","Saving"}, {"Edit","Editing"}, {"Patch","Patching"},
+        {"Clean","Cleaning"}, {"Migrate","Migrating"}, {"Deploy","Deploying"},
+        {"Configure","Configuring"}, {"Register","Registering"},
+        {"Subscribe","Subscribing"}, {"Publish","Publishing"},
+        {"Emit","Emitting"}, {"Send","Sending"}, {"Fetch","Fetching"},
+        {"Wire","Wiring"}, {"Connect","Connecting"}, {"Expose","Exposing"},
+        {"Extend","Extending"}, {"Declare","Declaring"},
+    };
+    auto it = g.find(verb);
+    return it != g.end() ? it->second + rest : content;
+}
+
+std::vector<Todo> parse_plan_tasks(const std::string& markdown) {
+    std::vector<Todo> todos;
+    bool in_tasks = false;
+    std::istringstream ss(markdown);
+    std::string line;
+    while (std::getline(ss, line)) {
+        if (line.rfind("## Task", 0) == 0) { in_tasks = true; continue; }
+        if (in_tasks && line.size() >= 2 && line[0] == '#' && line[1] == '#') break;
+        if (!in_tasks) continue;
+        std::string content;
+        if      (line.rfind("- [ ] ", 0) == 0) content = line.substr(6);
+        else if (line.rfind("- [x] ", 0) == 0) content = line.substr(6);
+        else if (line.rfind("- [X] ", 0) == 0) content = line.substr(6);
+        else if (line.rfind("- ", 0) == 0)     content = line.substr(2);
+        else continue;
+        while (!content.empty() && (content.back() == ' ' || content.back() == '\r'))
+            content.pop_back();
+        if (content.empty()) continue;
+        Todo t;
+        t.content     = content;
+        t.active_form = to_active_form(content);
+        t.status      = "pending";
+        todos.push_back(t);
+    }
+    return todos;
 }
 
 } // namespace haicode

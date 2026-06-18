@@ -45,6 +45,8 @@
 #include <climits>
 #include <cstdio>
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 
 using json = nlohmann::json;
 
@@ -458,6 +460,9 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_TODOS_UPDATED:
             _HandleTodosUpdated(msg);
+            break;
+        case MSG_BUILD_HOOK:
+            _HandleBuildHookResult(msg);
             break;
         case MSG_PLAN_DECISION:
             _HandlePlanDecision(msg);
@@ -1032,6 +1037,8 @@ MainWindow::_HandlePlanProposed(BMessage* msg)
     msg->FindString("plan", &plan);
     msg->FindString("path", &path);
 
+    pending_plan_path_ = path ? path : "";
+
     PlanReviewWindow* w = new PlanReviewWindow(
         plan ? plan : "",
         path ? path : "",
@@ -1052,6 +1059,19 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
 
     if (!sid.empty() && engine_) {
         if (approved) {
+            // Seed todos from the plan's ## Tasks section before resuming.
+            if (!pending_plan_path_.empty()) {
+                std::ifstream pf(pending_plan_path_);
+                if (pf) {
+                    std::ostringstream buf;
+                    buf << pf.rdbuf();
+                    auto todos = haicode::parse_plan_tasks(buf.str());
+                    if (!todos.empty())
+                        engine_->seed_todos(sid, todos);
+                }
+                pending_plan_path_.clear();
+            }
+
             engine_->set_mode(sid, haicode::SessionMode::Build);
             if (sid == active_session_id_) {
                 _RefreshModeButton();
@@ -1116,6 +1136,23 @@ MainWindow::_HandleTodosUpdated(BMessage* msg)
     if (todos_group_) {
         if (total == 0 && !todos_group_->IsHidden()) todos_group_->Hide();
         else if (total > 0 && todos_group_->IsHidden())  todos_group_->Show();
+    }
+}
+
+void
+MainWindow::_HandleBuildHookResult(BMessage* msg)
+{
+    bool success = false;
+    int32 exit_code = -1;
+    msg->FindBool("success", &success);
+    msg->FindInt32("exit_code", &exit_code);
+
+    if (success) {
+        chat_view_->AppendSystem("build \xe2\x9c\x93");
+    } else {
+        char buf[48];
+        snprintf(buf, sizeof(buf), "build \xe2\x9c\x97 (exit %d)", (int)exit_code);
+        chat_view_->AppendSystem(buf);
     }
 }
 

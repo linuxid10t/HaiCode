@@ -60,6 +60,11 @@ public:
     // session switch). Delegates to SessionStore::load_todos.
     std::vector<Todo> get_todos(const std::string& session_id);
 
+    // Seed todos directly (e.g. from plan approval). Replaces the session's
+    // todo list and publishes TodoUpdated so the UI refreshes immediately.
+    void seed_todos(const std::string& session_id,
+                    const std::vector<Todo>& todos);
+
     const AppConfig& config() const { return config_; }
 
 private:
@@ -78,5 +83,9 @@ private:
     std::map<std::string, SessionMode> session_modes_;
     std::mutex mu_;
 };
+
+// Parse a "## Tasks" checklist from plan markdown into seed-ready Todo items.
+// Returns an empty vector if no "## Tasks" section is found.
+std::vector<Todo> parse_plan_tasks(const std::string& markdown);
 
 } // namespace haicode

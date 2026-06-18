@@ -51,7 +51,8 @@ enum class EngineEventKind {
     SessionsChanged,
     PermissionReq,
     PlanProposed,
-    TodoUpdated
+    TodoUpdated,
+    BuildHookResult
 };
 
 struct EngineEvent {

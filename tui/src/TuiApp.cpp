@@ -19,6 +19,7 @@
 #include <cassert>
 #include <algorithm>
 #include <sstream>
+#include <fstream>
 #include <cstdio>
 #include <nlohmann/json.hpp>
 
@@ -222,6 +223,15 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::BuildHookResult, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::BuildHookResult;
+        ev.session_id = j.value("session_id", "");
+        ev.bool1      = j.value("success", false);
+        ev.int1       = j.value("exit_code", -1);
+        push_engine_event(std::move(ev));
+    });
+
     // Note: PermissionRequested events are delivered directly from main.cpp's
     // PermissionGate ask-callback via push_engine_event() (not via the bus),
     // because the callback has a direct pointer to TuiApp and because using
@@ -334,6 +344,16 @@ void TuiApp::process_engine_events() {
         case EngineEventKind::TodoUpdated:
             current_todos_  = ev.todos;
             todos_scroll_   = 0;
+            break;
+
+        case EngineEventKind::BuildHookResult:
+            if (ev.bool1) {
+                append_line({ LineType::System, "build \xe2\x9c\x93" });
+            } else {
+                char buf[48];
+                snprintf(buf, sizeof(buf), "build \xe2\x9c\x97 (exit %d)", ev.int1);
+                append_line({ LineType::System, buf });
+            }
             break;
         }
     }
@@ -629,7 +649,18 @@ void TuiApp::handle_key(int key) {
         case '\n':
         case KEY_ENTER:
             if (!plan_session_id_.empty()) {
+                if (!plan_path_.empty()) {
+                    std::ifstream pf(plan_path_);
+                    if (pf) {
+                        std::ostringstream buf;
+                        buf << pf.rdbuf();
+                        auto todos = haicode::parse_plan_tasks(buf.str());
+                        if (!todos.empty())
+                            engine_.seed_todos(plan_session_id_, todos);
+                    }
+                }
                 engine_.set_mode(plan_session_id_, SessionMode::Build);
+                engine_.continue_session(plan_session_id_);
             }
             plan_visible_ = false;
             break;

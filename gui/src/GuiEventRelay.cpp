@@ -168,6 +168,17 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    // BuildHookResult → MSG_BUILD_HOOK
+    bus_.subscribe(EventType::BuildHookResult, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_BUILD_HOOK);
+        msg.AddBool("success",   data.value("success", false));
+        msg.AddInt32("exit_code", data.value("exit_code", -1));
+        main_window_.SendMessage(&msg);
+    });
+
     // PermissionRequested → MSG_PERMISSION_REQ
     // Note: The promise_ptr is passed directly (engine thread blocks on future.get())
     // The promise is created in HaiCodeApp's permission callback and packed into the message
