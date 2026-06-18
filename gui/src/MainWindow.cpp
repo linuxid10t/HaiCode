@@ -815,6 +815,19 @@ MainWindow::_SubmitPrompt()
     current_tool_name_.clear();
     _UpdateStatusStrip();
 
+    // Close todo panel if all todos are done
+    if (todos_group_ && todos_list_ && !todos_group_->IsHidden()) {
+        int32 n = todos_list_->CountItems();
+        if (n > 0) {
+            bool all_done = true;
+            for (int32 i = 0; i < n; ++i) {
+                auto* item = dynamic_cast<BStringItem*>(todos_list_->ItemAt(i));
+                if (!item || strncmp(item->Text(), "[x]", 3) != 0) { all_done = false; break; }
+            }
+            if (all_done) todos_group_->Hide();
+        }
+    }
+
     // Submit to engine (runs on engine thread)
     engine_->submit_prompt(active_session_id_, text);
 }

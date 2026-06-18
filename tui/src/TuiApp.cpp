@@ -831,6 +831,14 @@ void TuiApp::handle_key(int key) {
         input_cursor_ = 0;
         input_scroll_ = 0;
 
+        // Close todo overlay if all todos are done
+        if (todos_visible_ && !current_todos_.empty()) {
+            bool all_done = true;
+            for (const auto& t : current_todos_)
+                if (t.status != "completed") { all_done = false; break; }
+            if (all_done) todos_visible_ = false;
+        }
+
         // Show user message immediately
         append_line({ LineType::UserText, "User: " + text });
         append_line({ LineType::Separator, "" });
