@@ -8,7 +8,7 @@ namespace haicode {
 //   {{MODEL}}       - the active model identifier (e.g. "claude-sonnet-4-6")
 //   {{OS}}          - uname() sysname/release/machine
 //   {{PROJECT_DIR}} - absolute path of the active project directory
-//   {{STEPS_LEFT}}  - remaining steps in the 20-step budget (re-rendered each step)
+//   {{STEPS_LEFT}}  - remaining steps in the 50-step budget (re-rendered each step)
 //
 // SPLIT: kDefaultSystemPrompt is byte-stable across turns so Anthropic's
 // prefix cache can hit on it. The {{STEPS_LEFT}} sentence lives in
@@ -135,7 +135,12 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 // separate system text block AFTER the stable body. Kept short so the
 // per-step byte delta is minimal. Splitting this out is what lets the
 // stable body hit Anthropic's prefix cache.
-constexpr const char* kDynamicSystemPrompt = R"HPCODE(
+//
+// This is the neutral tier (steps_left >= 15). render_dynamic_prompt()
+// in engine.cpp appends escalating urgency lines at two thresholds:
+//   steps_left 5–14  → "Budget is getting tight"
+//   steps_left 1–4   → "CRITICAL"
+constexpr const char* kDynamicSystemPromptNeutral = R"HPCODE(
 You have a per-session step budget (default 50, configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each tool call counts as one step; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration.
 )HPCODE";
 
