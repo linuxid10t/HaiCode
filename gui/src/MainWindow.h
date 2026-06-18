@@ -68,6 +68,7 @@ private:
     void _SwitchToSession(int idx); // loads content + updates list selection (suppressed)
     void _SubmitPrompt();
     void _LoadHistory(const std::string& session_id);
+    void _RestoreSessionTotals(const std::string& session_id);
     void _RefreshSessionList();
 
     void _HandleTextDelta(BMessage* msg);

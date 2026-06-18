@@ -674,12 +674,7 @@ MainWindow::_NewSession()
     chat_view_->Clear();
     chat_view_->AppendSystem("New session started.");
     interrupt_btn_->SetEnabled(false);
-    last_prompt_input_ = 0;
-    last_prompt_output_ = 0;
-    session_input_total_ = 0;
-    session_output_total_ = 0;
-    current_context_tokens_ = 0;
-    session_cost_ = 0.0;
+    _RestoreSessionTotals(active_session_id_);
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
@@ -767,12 +762,7 @@ MainWindow::_SelectSession(int idx)
     chat_view_->Clear();
     _LoadHistory(active_session_id_);
     interrupt_btn_->SetEnabled(false);
-    last_prompt_input_ = 0;
-    last_prompt_output_ = 0;
-    session_input_total_ = 0;
-    session_output_total_ = 0;
-    current_context_tokens_ = 0;
-    session_cost_ = 0.0;
+    _RestoreSessionTotals(active_session_id_);
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
@@ -865,6 +855,30 @@ MainWindow::_LoadHistory(const std::string& session_id)
         } catch (const std::exception&) {
             // Skip malformed messages
         }
+    }
+}
+
+void
+MainWindow::_RestoreSessionTotals(const std::string& session_id)
+{
+    // Repopulate token/cost/context fields from the persisted SessionInfo so
+    // the status strip reflects reality immediately on session create/switch,
+    // before the next live StepEnded arrives. Cumulative input is the best
+    // available estimate of current context size; a live StepEnded with
+    // in_tok > 0 will overwrite current_context_tokens_ with a fresher value.
+    last_prompt_input_  = 0;
+    last_prompt_output_ = 0;
+    auto si = store_.get(session_id);
+    if (si) {
+        session_input_total_      = si->tokens.input;
+        session_output_total_     = si->tokens.output;
+        session_cost_             = si->cost;
+        current_context_tokens_   = si->tokens.input;
+    } else {
+        session_input_total_      = 0;
+        session_output_total_     = 0;
+        session_cost_             = 0.0;
+        current_context_tokens_   = 0;
     }
 }
 
@@ -1235,6 +1249,10 @@ MainWindow::_UpdateStatusStrip()
             snprintf(pctbuf, sizeof(pctbuf), "%d%%", pct);
             s += " / " + format_tokens(max_context_) + " (" + pctbuf + ")";
         }
+    } else if (max_context_ > 0) {
+        // No live usage yet — still show the window size so the indicator
+        // isn't blank before the first turn / on providers that omit usage.
+        s += "   context: \xe2\x80\x94 / " + format_tokens(max_context_);
     }
 
     status_strip_->SetText(s.c_str());
