@@ -25,6 +25,8 @@ make -C build test_config_permission
 
 **Adding new `.cpp` files:** CMake uses `GLOB_RECURSE` to collect sources at configure time. After adding a new file, re-run `cmake -B build -S .` before `make`.
 
+**Hybrid (x86_gcc2) systems:** HaiCode requires a C++20 compiler, so on a hybrid image it must be built under the secondary-arch toolchain (GCC 13), not the default gcc2. The root `CMakeLists.txt` enforces this: a `cxx_std_20` feature check aborts configure with an actionable message if the compiler can't do C++20, and a secondary-arch detection block reads the compiler's target macros (`__x86_64__` → `x86_64`, `__i386__` → `x86`) to prepend `/lib/<arch>` to the `find_library` HINTS (`HAIKU_DEVELOP_LIB_DIRS` / `HAIKU_LIB_DIRS`). On a pure single-arch system the `<arch>` subdirs don't exist and `find_library` falls through to the flat path. When adding a new `find_library`, use `HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS}` rather than hardcoding the flat paths. Headers are single-location on hybrid builds, so `include_directories` is unaffected.
+
 ## Run
 
 ```bash

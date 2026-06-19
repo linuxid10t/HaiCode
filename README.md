@@ -75,6 +75,32 @@ make -C build test_db
 
 CMake uses `GLOB_RECURSE` to collect sources at configure time. After adding a new `.cpp` file, re-run `cmake -B build -S .` before `make`.
 
+### Hybrid (x86_gcc2) systems
+
+On a hybrid Haiku image (gcc2 primary + GCC4+ secondary), HaiCode must be
+built with the **secondary-arch** toolchain — it requires C++20, which gcc2
+(GCC 2.95.3) cannot provide. The configure step detects this and aborts with a
+clear message if you invoke it under the wrong compiler:
+
+```
+CMake Error: This compiler does not support C++20. ...
+```
+
+Activate the secondary arch first:
+
+```bash
+setarch x86         # 32-bit (subdir: /boot/system/lib/x86)
+# or, for x86_64: ensure /boot/system/bin/x86_64 is on PATH
+cmake -B build -S .
+make -C build -j4
+```
+
+CMake reads the compiler's target macros to derive the arch and prepends the
+matching `/lib/<arch>` subdirectory to the library search path, so the
+correct-ABI `libsqlite3.so`, `libcurl.so`, etc. are linked automatically.
+On a pure single-arch system (no `<arch>` subdirs) the flat paths are used —
+no special action is needed.
+
 ## Run
 
 ```bash

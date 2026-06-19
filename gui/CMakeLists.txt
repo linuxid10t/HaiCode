@@ -10,7 +10,7 @@ target_include_directories(haicode-gui PRIVATE
 )
 
 # Find tracker library for find_directory support
-find_library(TRACKER_LIB tracker HINTS ${HAIKU_DEVELOP}/lib /boot/system/lib)
+find_library(TRACKER_LIB tracker HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 
 target_link_libraries(haicode-gui PRIVATE
     haicode
