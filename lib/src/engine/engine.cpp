@@ -216,10 +216,19 @@ SessionEngine::~SessionEngine() {
     for (auto& [id, flag] : interrupt_flags_)
         if (flag) flag->store(true);
     auto threads = std::move(runner_threads_);
+    // Cancel all providers so in-flight HTTP requests abort immediately.
+    for (auto& [id, provider] : session_providers_) {
+        lock.unlock();
+        provider->cancel();
+        lock.lock();
+    }
     lock.unlock();
-    // Detach threads — they will finish on their own once the interrupt flag fires.
-    // We cannot safely join here as threads may be blocked in network I/O; the caller
-    // (HaiCodeApp::QuitRequested) calls exit() immediately after, so the OS cleans up.
+    // Detach threads — they will finish on their own once the interrupt flag
+    // fires and cancel() unblocks the HTTP request. We cannot safely join
+    // here because a thread may be blocked on a permission future (waiting
+    // for user input that will never come during shutdown). In practice the
+    // caller (HaiCodeApp::QuitRequested) calls exit() immediately after,
+    // so the OS cleans up.
     for (auto& [id, t] : threads)
         if (t.joinable()) t.detach();
     for (auto& [id, flag] : interrupt_flags_)
@@ -318,14 +327,38 @@ void SessionEngine::continue_session(const std::string& session_id) {
 }
 
 void SessionEngine::interrupt(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(mu_);
-    auto it = interrupt_flags_.find(session_id);
-    if (it != interrupt_flags_.end() && it->second)
-        it->second->store(true);
+    // 1. Set interrupt flag and get provider pointer (under lock).
+    Provider* active_provider = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
 
+        auto it = interrupt_flags_.find(session_id);
+        if (it != interrupt_flags_.end() && it->second)
+            it->second->store(true);
+
+        // Get the active provider so we can cancel its HTTP request.
+        auto prov_it = session_providers_.find(session_id);
+        if (prov_it != session_providers_.end()) {
+            active_provider = prov_it->second.get();
+        }
+    }
+
+    // 2. Cancel in-flight HTTP request — this sets cancelled_ on both the
+    // provider and HttpClient, causing libcurl to abort the transfer
+    // immediately so the agentic loop can break out.
+    // We do NOT join the runner thread here: interrupt() is called from the
+    // UI thread, and the runner may be blocked on a permission future (which
+    // would deadlock the join). The thread will be joined lazily on the next
+    // submit_prompt()/continue_session() call, and the Interrupted event
+    // below gives the UI immediate feedback.
+    if (active_provider) {
+        active_provider->cancel();
+    }
+
+    // 3. Publish Interrupted event so UIs know the interrupt was processed.
     nlohmann::json ev;
     ev["session_id"] = session_id;
-    bus_.publish(events::EventType::InterruptRequested, ev);
+    bus_.publish(events::EventType::Interrupted, ev);
 }
 
 void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
@@ -395,6 +428,12 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         ev["error"] = "No provider available for: " + provider_id;
         bus_.publish(events::EventType::StepFailed, ev);
         return;
+    }
+
+    // Store active provider so interrupt() can cancel in-flight HTTP requests.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        session_providers_[session_id] = provider;
     }
 
     auto* interrupt_flag = interrupt_flags_[session_id];
@@ -850,6 +889,12 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         ev["error"] = "Step limit reached (" + std::to_string(max_steps)
                      + "). Send another message to continue.";
         bus_.publish(events::EventType::StepFailed, ev);
+    }
+
+    // Clear the active provider entry now that the loop has exited.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        session_providers_.erase(session_id);
     }
 }
 

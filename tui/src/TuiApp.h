@@ -52,7 +52,8 @@ enum class EngineEventKind {
     PermissionReq,
     PlanProposed,
     TodoUpdated,
-    BuildHookResult
+    BuildHookResult,
+    Interrupted
 };
 
 struct EngineEvent {

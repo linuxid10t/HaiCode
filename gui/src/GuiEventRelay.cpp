@@ -179,6 +179,15 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    // Interrupted → MSG_INTERRUPTED (engine confirms the runner thread stopped)
+    bus_.subscribe(EventType::Interrupted, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_INTERRUPTED);
+        main_window_.SendMessage(&msg);
+    });
+
     // PermissionRequested → MSG_PERMISSION_REQ
     // Note: The promise_ptr is passed directly (engine thread blocks on future.get())
     // The promise is created in HaiCodeApp's permission callback and packed into the message

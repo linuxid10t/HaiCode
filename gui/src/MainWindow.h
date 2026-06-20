@@ -77,6 +77,7 @@ private:
     void _HandleStepStarted();
     void _HandleStepEnded(BMessage* msg);
     void _HandleStepFailed(BMessage* msg);
+    void _HandleInterrupted();
     void _HandlePermissionReq(BMessage* msg);
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);

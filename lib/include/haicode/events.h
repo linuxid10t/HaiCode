@@ -31,6 +31,7 @@ enum class EventType {
     CompactionStarted,
     CompactionEnded,
     InterruptRequested,
+    Interrupted,
     PermissionRequested,
     PermissionGranted,
     PlanProposed,

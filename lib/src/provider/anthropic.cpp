@@ -18,6 +18,8 @@ public:
     std::string id() const override { return id_; }
 
     void stream(const LLMRequest& request, StreamCallbacks callbacks) override {
+        cancelled_.store(false);
+
         nlohmann::json body;
         body["model"] = request.model_id;
         body["max_tokens"] = request.max_tokens;

@@ -233,6 +233,13 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::Interrupted, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::Interrupted;
+        ev.session_id = j.value("session_id", "");
+        push_engine_event(std::move(ev));
+    });
+
     // Note: PermissionRequested events are delivered directly from main.cpp's
     // PermissionGate ask-callback via push_engine_event() (not via the bus),
     // because the callback has a direct pointer to TuiApp and because using
@@ -355,6 +362,13 @@ void TuiApp::process_engine_events() {
                 snprintf(buf, sizeof(buf), "build \xe2\x9c\x97 (exit %d)", ev.int1);
                 append_line({ LineType::System, buf });
             }
+            break;
+
+        case EngineEventKind::Interrupted:
+            engine_running_ = false;
+            thinking_ = false;
+            end_streaming();
+            append_line({ LineType::System, "[interrupted]" });
             break;
         }
     }
@@ -1102,9 +1116,9 @@ void TuiApp::render_input() {
     // Running indicator on the right of the input line
     if (engine_running_) {
         std::string indicator;
-        if (thinking_)        indicator = "[* thinking]";
-        else if (streaming_)  indicator = "[~ streaming]";
-        else                  indicator = "[* running]";
+        if (thinking_)        indicator = "[* thinking] \xe2\x80\xa2 ^C stop";
+        else if (streaming_)  indicator = "[~ streaming] \xe2\x80\xa2 ^C stop";
+        else                  indicator = "[* running] \xe2\x80\xa2 ^C stop";
         mvwaddstr(win_input_, 1, w - (int)indicator.size() - 1, indicator.c_str());
     }
 

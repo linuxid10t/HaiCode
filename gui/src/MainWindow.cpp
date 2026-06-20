@@ -453,6 +453,9 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_STEP_FAILED:
             _HandleStepFailed(msg);
             break;
+        case MSG_INTERRUPTED:
+            _HandleInterrupted();
+            break;
         case MSG_PERMISSION_REQ:
             _HandlePermissionReq(msg);
             break;
@@ -1003,6 +1006,20 @@ MainWindow::_HandleStepFailed(BMessage* msg)
     msg->FindString("error", &error);
     std::string err_text = error ? error : "Unknown error";
     chat_view_->AppendSystem("Error: " + err_text);
+    _UpdateStatusStrip();
+}
+
+void
+MainWindow::_HandleInterrupted()
+{
+    // Engine confirmed the runner thread has stopped after an interrupt.
+    // Clear all running state and surface feedback to the user.
+    chat_view_->EndStreaming();
+    interrupt_btn_->SetEnabled(false);
+    engine_running_ = false;
+    streaming_state_ = "idle";
+    current_tool_name_.clear();
+    chat_view_->AppendSystem("Interrupted.");
     _UpdateStatusStrip();
 }
 

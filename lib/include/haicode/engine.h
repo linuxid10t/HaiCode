@@ -85,6 +85,7 @@ private:
     std::map<std::string, std::atomic<bool>*> interrupt_flags_;
     std::map<std::string, bool> session_running_;  // true while agentic_loop is executing
     std::map<std::string, SessionMode> session_modes_;
+    std::map<std::string, std::shared_ptr<Provider>> session_providers_;
     std::mutex mu_;
 };
 
