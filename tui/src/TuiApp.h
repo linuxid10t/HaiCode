@@ -20,7 +20,9 @@ enum class LineType {
     ToolBody,
     ToolResult,
     System,
-    Separator
+    Separator,
+    ThinkingHeader,
+    ThinkingText
 };
 
 struct ChatLine {
@@ -43,6 +45,7 @@ struct PendingPermission {
 
 enum class EngineEventKind {
     TextDelta,
+    ReasoningDelta,
     StepStarted,
     StepEnded,
     StepFailed,
@@ -135,7 +138,9 @@ private:
     // Chat helpers
     void append_line(const ChatLine& line);
     void append_text_delta(const std::string& delta);
+    void append_reasoning_delta(const std::string& delta);
     void end_streaming();
+    void end_reasoning_streaming();
     void append_tool_called(const std::string& tool_name, const std::string& input_json);
     void append_tool_result(const std::string& call_id, const std::string& output, bool success);
 
@@ -176,6 +181,7 @@ private:
     std::vector<ChatLine> chat_lines_;
     int  chat_scroll_ = 0;                  // lines from bottom (0 = pinned to bottom)
     bool streaming_   = false;
+    bool reasoning_streaming_ = false;
 
     // --- Input state ---
     std::string input_buf_;
@@ -196,6 +202,7 @@ private:
 
     // --- Tool block collapse state ---
     bool tools_expanded_ = false;   // x key toggles; collapsed by default
+    bool thinking_expanded_ = false;  // mirrors tools_expanded_; collapsed by default
 
     // --- TodoWrite state ---
     std::vector<haicode::Todo> current_todos_;

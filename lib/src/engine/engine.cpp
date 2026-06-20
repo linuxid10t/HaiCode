@@ -607,6 +607,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         }
 
         std::string full_text;
+        std::string full_reasoning;
         std::string text_id = haicode::util::make_id("txt");
         std::vector<ToolCall> tool_calls;
         FinishReason finish_reason = FinishReason::EndTurn;
@@ -622,6 +623,20 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ev["text_id"] = text_id;
             ev["delta"] = delta;
             bus_.publish(events::EventType::TextDelta, ev);
+        };
+        cbs.on_reasoning_delta = [&](const std::string& delta) {
+            if (full_reasoning.empty()) {
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["assistant_message_id"] = assistant_msg_id;
+                bus_.publish(events::EventType::ReasoningStarted, ev);
+            }
+            full_reasoning += delta;
+            nlohmann::json ev;
+            ev["session_id"] = session_id;
+            ev["assistant_message_id"] = assistant_msg_id;
+            ev["delta"] = delta;
+            bus_.publish(events::EventType::ReasoningDelta, ev);
         };
         cbs.on_tool_input_delta = [&](const std::string& call_id,
                                        const std::string& name,
@@ -647,6 +662,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         if (step_failed) break;
 
+        if (!full_reasoning.empty()) {
+            nlohmann::json ev;
+            ev["session_id"] = session_id;
+            ev["assistant_message_id"] = assistant_msg_id;
+            ev["full_text"] = full_reasoning;
+            bus_.publish(events::EventType::ReasoningEnded, ev);
+        }
         // Split off tool calls whose streamed input failed to parse. We don't
         // execute them, and crucially we don't persist them — otherwise the
         // next iteration would send the model its own phantom empty tool_use
@@ -674,12 +696,19 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             }
         }
 
-        // Persist assistant turn (text and/or valid tool calls only)
-        if (!full_text.empty() || !tool_calls.empty()) {
+        // Persist assistant turn (text and/or valid tool calls only).
+        // On interrupt, omit tool_calls: they won't be executed, so recording
+        // them would leave an assistant(tool_calls) with no following
+        // tool_result — the model's chat template rejects that as a
+        // role-alternation violation on the next request.
+        const bool interrupted = interrupt_flag && interrupt_flag->load();
+        if (!full_text.empty() || (!tool_calls.empty() && !interrupted)) {
             nlohmann::json data;
             data["role"] = "assistant";
             data["text"] = full_text;
-            if (!tool_calls.empty()) {
+            if (!full_reasoning.empty())
+                data["reasoning"] = full_reasoning;
+            if (!tool_calls.empty() && !interrupted) {
                 auto calls_arr = nlohmann::json::array();
                 for (auto& tc : tool_calls)
                     calls_arr.push_back({{"id",tc.id},{"name",tc.name},{"input",tc.input}});

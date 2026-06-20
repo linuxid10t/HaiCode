@@ -86,7 +86,11 @@ translate_messages(const std::string& system,
                 }
                 nlohmann::json asst;
                 asst["role"]    = "assistant";
-                asst["content"] = text_acc.empty() ? nullptr
+                // Use "" not null: many OpenAI-compatible chat templates (LM
+                // Studio / llama.cpp) iterate content and raise a template
+                // error on null, surfacing as a confusing "conversation roles
+                // must alternate" failure. An empty string is universally safe.
+                asst["content"] = text_acc.empty() ? nlohmann::json(std::string(""))
                                                     : nlohmann::json(text_acc);
                 if (!tc_arr.empty())
                     asst["tool_calls"] = tc_arr;
@@ -188,6 +192,15 @@ public:
         // models and OpenAI-compatible endpoints that don't recognize it.
         if (!request.reasoning_effort.empty())
             body["reasoning_effort"] = request.reasoning_effort;
+
+        // "off" for OpenAI-compatible servers (vLLM/SGLang running Qwen3,
+        // DeepSeek-V3, etc.): these don't use reasoning_effort. The standard
+        // way to suppress their thinking mode is chat_template_kwargs under
+        // extra_body. True OpenAI ignores unknown extra fields, so this is
+        // safe to always send alongside reasoning_effort: "off".
+        if (request.reasoning_effort == "off") {
+            body["chat_template_kwargs"] = {{"enable_thinking", false}};
+        }
 
         // Include usage in stream_options (supported by OpenAI and most compat endpoints)
         body["stream_options"] = { {"include_usage", true} };
@@ -291,6 +304,15 @@ public:
                         std::string text = delta["content"].get<std::string>();
                         if (!text.empty() && callbacks.on_text_delta)
                             callbacks.on_text_delta(text_id, text);
+                    }
+
+                    // Reasoning delta (o-series models). Streamed separately
+                    // from content; OpenAI-compatible endpoints use the same
+                    // field name when reasoning_effort is set.
+                    if (delta.contains("reasoning_content") && delta["reasoning_content"].is_string()) {
+                        std::string text = delta["reasoning_content"].get<std::string>();
+                        if (!text.empty() && callbacks.on_reasoning_delta)
+                            callbacks.on_reasoning_delta(text);
                     }
 
                     // Tool call deltas

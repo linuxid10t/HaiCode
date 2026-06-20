@@ -486,6 +486,9 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_TEXT_DELTA:
             _HandleTextDelta(msg);
             break;
+        case MSG_REASONING_DELTA:
+            _HandleReasoningDelta(msg);
+            break;
         case MSG_TOOL_CALLED:
             _HandleToolCalled(msg);
             break;
@@ -908,6 +911,13 @@ MainWindow::_LoadHistory(const std::string& session_id)
                 std::string text = data.value("text", "");
                 if (!text.empty()) chat_view_->AppendUserText(text);
             } else if (sm.type == "assistant_text") {
+                if (data.contains("reasoning") && data["reasoning"].is_string()) {
+                    std::string reasoning = data.value("reasoning", "");
+                    if (!reasoning.empty()) {
+                        chat_view_->AppendReasoningDelta(reasoning);
+                        chat_view_->EndReasoningStreaming();
+                    }
+                }
                 std::string text = data.value("text", "");
                 if (!text.empty()) {
                     chat_view_->AppendTextDelta(text);
@@ -975,6 +985,15 @@ MainWindow::_HandleTextDelta(BMessage* msg)
             streaming_state_ = "streaming";
             _UpdateStatusStrip();
         }
+    }
+}
+
+void
+MainWindow::_HandleReasoningDelta(BMessage* msg)
+{
+    const char* delta = nullptr;
+    if (msg->FindString("delta", &delta) == B_OK && delta) {
+        chat_view_->AppendReasoningDelta(delta);
     }
 }
 

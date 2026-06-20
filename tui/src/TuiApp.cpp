@@ -142,6 +142,14 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::ReasoningDelta, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::ReasoningDelta;
+        ev.session_id = j.value("session_id", "");
+        ev.str1       = j.value("delta", "");
+        push_engine_event(std::move(ev));
+    });
+
     bus_.subscribe(events::EventType::StepStarted, [this](const json& j) {
         EngineEvent ev;
         ev.kind       = EngineEventKind::StepStarted;
@@ -292,6 +300,11 @@ void TuiApp::process_engine_events() {
             append_text_delta(ev.str1);
             break;
 
+        case EngineEventKind::ReasoningDelta:
+            engine_running_ = true;
+            append_reasoning_delta(ev.str1);
+            break;
+
         case EngineEventKind::StepStarted:
             engine_running_ = true;
             thinking_ = true;
@@ -400,6 +413,7 @@ void TuiApp::select_session(int idx) {
     chat_lines_.clear();
     chat_scroll_ = 0;
     streaming_   = false;
+    reasoning_streaming_ = false;
     engine_running_ = false;
     thinking_       = false;
     total_tokens_   = sessions_[idx].tokens.input + sessions_[idx].tokens.output;
@@ -436,6 +450,14 @@ void TuiApp::load_history(const std::string& session_id) {
                 append_line({ LineType::UserText, "User: " + text });
                 append_line({ LineType::Separator, "" });
             } else if (msg.type == "assistant") {
+                // Reasoning (thinking) — show collapsed by default
+                if (j.contains("reasoning") && j["reasoning"].is_string()) {
+                    std::string reasoning = j.value("reasoning", "");
+                    if (!reasoning.empty()) {
+                        append_line({ LineType::ThinkingHeader, "Thinking" });
+                        append_line({ LineType::ThinkingText, reasoning });
+                    }
+                }
                 // May have text blocks and tool_use blocks
                 if (j.contains("content") && j["content"].is_array()) {
                     for (auto& block : j["content"]) {
@@ -483,6 +505,7 @@ void TuiApp::append_line(const ChatLine& line) {
 }
 
 void TuiApp::append_text_delta(const std::string& delta) {
+    end_reasoning_streaming();
     if (!streaming_) {
         // Start a new streaming assistant line
         append_line({ LineType::AssistantText, "Assistant: ", true });
@@ -503,8 +526,28 @@ void TuiApp::end_streaming() {
     }
 }
 
+void TuiApp::append_reasoning_delta(const std::string& delta) {
+    if (!reasoning_streaming_) {
+        append_line({ LineType::ThinkingHeader, "Thinking" });
+        append_line({ LineType::ThinkingText, "", true });
+        reasoning_streaming_ = true;
+    }
+    ChatLine& last = chat_lines_.back();
+    last.text += delta;
+}
+
+void TuiApp::end_reasoning_streaming() {
+    if (reasoning_streaming_) {
+        if (!chat_lines_.empty()) {
+            chat_lines_.back().streaming = false;
+        }
+        reasoning_streaming_ = false;
+    }
+}
+
 void TuiApp::append_tool_called(const std::string& tool_name,
                                  const std::string& input_json) {
+    end_reasoning_streaming();
     // Store just the tool name; render_chat formats with ▶/▼ based on tools_expanded_
     append_line({ LineType::ToolHeader, tool_name });
 
@@ -766,9 +809,10 @@ void TuiApp::handle_key(int key) {
         render_all();
         return;
 
-    case 'x': // Toggle tool body expand/collapse
+    case 'x': // Toggle detail (tool body + thinking) expand/collapse
     case 'X':
         tools_expanded_ = !tools_expanded_;
+        thinking_expanded_ = !thinking_expanded_;
         render_all();
         return;
 
@@ -1016,11 +1060,18 @@ void TuiApp::render_chat() {
         if (cl.type == LineType::ToolBody && !tools_expanded_) {
             continue;
         }
+        // When collapsed, hide thinking body lines
+        if (cl.type == LineType::ThinkingText && !thinking_expanded_) {
+            continue;
+        }
         std::string display_text = cl.text;
         if (cl.type == LineType::ToolHeader) {
             // Format: ╔ <name> ▶/▼
             std::string indicator = tools_expanded_ ? " ▼" : " ▶";
             display_text = "╔ " + cl.text + indicator;
+        } else if (cl.type == LineType::ThinkingHeader) {
+            std::string indicator = thinking_expanded_ ? " \xe2\x96\xbc" : " \xe2\x96\xb6";
+            display_text = ">> " + cl.text + indicator;
         }
         auto wrapped = wrap(display_text, w - 1);
         for (int k = 0; k < (int)wrapped.size(); ++k) {
@@ -1064,6 +1115,21 @@ void TuiApp::render_chat() {
         case LineType::ToolBody:
             ::wattron(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
             mvwprintw(win_chat_, row, 0, "%s", dl.text.c_str());
+            ::wattroff(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
+            break;
+
+        case LineType::ThinkingHeader:
+            ::wattron(win_chat_, COLOR_PAIR(CP_TOOL_HEADER) | A_BOLD);
+            mvwprintw(win_chat_, row, 0, "%s", dl.text.c_str());
+            ::wattroff(win_chat_, COLOR_PAIR(CP_TOOL_HEADER) | A_BOLD);
+            break;
+
+        case LineType::ThinkingText:
+            ::wattron(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
+            mvwprintw(win_chat_, row, 0, "%s", dl.text.c_str());
+            if (dl.streaming) {
+                ::waddch(win_chat_, ACS_BLOCK);
+            }
             ::wattroff(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
             break;
 

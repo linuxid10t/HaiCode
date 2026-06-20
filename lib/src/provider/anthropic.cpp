@@ -29,10 +29,13 @@ public:
         if (request.top_p)
             body["top_p"] = *request.top_p;
 
-        // Reasoning effort → output_config.effort (Claude 4.6+). Only levels
-        // Anthropic supports are emitted; off/minimal/none fall back to the
-        // model default (high), which is what omitting the param does.
-        if (request.reasoning_effort == "low"
+        // Reasoning effort → output_config.effort (adaptive thinking, Claude
+        // 4.6+). "off" must be sent explicitly — omitting the param falls back
+        // to the model default (thinking enabled), so "off" would not actually
+        // disable thinking. "minimal" is not an Anthropic effort level; we let
+        // it fall through (unset) to the model default like empty.
+        if (request.reasoning_effort == "off"
+            || request.reasoning_effort == "low"
             || request.reasoning_effort == "medium"
             || request.reasoning_effort == "high"
             || request.reasoning_effort == "xhigh"
@@ -173,6 +176,10 @@ public:
                                     state.current_tool_call_id,
                                     state.current_tool_name,
                                     partial);
+                        } else if (dtype == "thinking_delta") {
+                            std::string text = delta.value("thinking", "");
+                            if (!text.empty() && callbacks.on_reasoning_delta)
+                                callbacks.on_reasoning_delta(text);
                         }
                     } else if (etype == "content_block_stop") {
                         if (state.current_block_type == "tool_use") {

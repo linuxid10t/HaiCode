@@ -51,6 +51,17 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    // ReasoningDelta → MSG_REASONING_DELTA (thinking bubble)
+    bus_.subscribe(EventType::ReasoningDelta, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        std::string delta = data.value("delta", "");
+        BMessage msg(MSG_REASONING_DELTA);
+        msg.AddString("delta", delta.c_str());
+        main_window_.SendMessage(&msg);
+    });
+
     // TextEnded → MSG_TEXT_DELTA with empty string signals end (use MSG_STEP_ENDED handling)
     // We use a separate EndStreaming signal via MSG_STEP_ENDED
 

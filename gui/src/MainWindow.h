@@ -74,6 +74,7 @@ private:
     void _RefreshSessionList();
 
     void _HandleTextDelta(BMessage* msg);
+    void _HandleReasoningDelta(BMessage* msg);
     void _HandleToolCalled(BMessage* msg);
     void _HandleToolResult(BMessage* msg);
     void _HandleStepStarted();

@@ -3,6 +3,7 @@
 
 // Engine → UI
 static const uint32 MSG_TEXT_DELTA     = 'TXdl';
+static const uint32 MSG_REASONING_DELTA= 'RSdl';  // reasoning delta for the thinking bubble
 static const uint32 MSG_TOOL_CALLED    = 'TLcl';
 static const uint32 MSG_TOOL_RESULT    = 'TLrs';
 static const uint32 MSG_STEP_STARTED   = 'STst';

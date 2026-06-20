@@ -7,13 +7,15 @@
 #include <string>
 
 // Color palette
-static const rgb_color kColorUser       = {  30, 100, 220, 255 };
-static const rgb_color kColorAssistant  = {  20, 140,  60, 255 };
-static const rgb_color kColorToolHeader = { 180, 140,   0, 255 };
-static const rgb_color kColorToolBody   = { 120, 120, 120, 255 };
-static const rgb_color kColorToolOk     = {  30, 160,  50, 255 };
-static const rgb_color kColorToolErr    = { 200,  30,  30, 255 };
-static const rgb_color kColorSystem     = { 200, 120,   0, 255 };
+static const rgb_color kColorUser           = {  30, 100, 220, 255 };
+static const rgb_color kColorAssistant      = {  20, 140,  60, 255 };
+static const rgb_color kColorToolHeader     = { 180, 140,   0, 255 };
+static const rgb_color kColorToolBody       = { 120, 120, 120, 255 };
+static const rgb_color kColorToolOk         = {  30, 160,  50, 255 };
+static const rgb_color kColorToolErr        = { 200,  30,  30, 255 };
+static const rgb_color kColorSystem         = { 200, 120,   0, 255 };
+static const rgb_color kColorThinkingHeader = { 110,  90, 180, 255 };
+static const rgb_color kColorThinkingBody   = { 140, 140, 140, 255 };
 
 // ---------------------------------------------------------------------------
 // ClickableTextView
@@ -155,6 +157,19 @@ ChatView::_Rebuild()
             break;
         }
 
+        case ChatEntry::Reasoning: {
+            std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
+            std::string header = "\n[Thinking]" + indicator + "\n";
+            int32 hstart = text_view_->TextLength();
+            AppendStyled(header, kColorThinkingHeader, true);
+            int32 hend = text_view_->TextLength();
+            header_ranges_.push_back({hstart, hend, i});
+            if (!e.collapsed && !e.text.empty()) {
+                AppendStyled(e.text + "\n", kColorThinkingBody, false);
+            }
+            break;
+        }
+
         case ChatEntry::System:
             AppendStyled("\n[System] " + e.text + "\n", kColorSystem, false);
             break;
@@ -168,6 +183,7 @@ ChatView::_Rebuild()
 void
 ChatView::AppendUserText(const std::string& text)
 {
+    EndReasoningStreaming();
     streaming_ = false;
     model_.push_back({ChatEntry::UserText, text, "", true, false});
     AppendStyled("\nYou: ", kColorUser, true);
@@ -177,6 +193,7 @@ ChatView::AppendUserText(const std::string& text)
 void
 ChatView::AppendTextDelta(const std::string& delta)
 {
+    EndReasoningStreaming();
     if (!streaming_) {
         model_.push_back({ChatEntry::AssistantText, "", "", true, false});
         AppendStyled("\nAssistant: ", kColorAssistant, true);
@@ -189,6 +206,7 @@ ChatView::AppendTextDelta(const std::string& delta)
 void
 ChatView::EndStreaming()
 {
+    EndReasoningStreaming();
     if (streaming_) {
         AppendStyled("\n", kColorAssistant, false);
         streaming_ = false;
@@ -196,8 +214,34 @@ ChatView::EndStreaming()
 }
 
 void
+ChatView::AppendReasoningDelta(const std::string& delta)
+{
+    if (!reasoning_streaming_) {
+        model_.push_back({ChatEntry::Reasoning, "", "", true, false});
+        AppendStyled("\n[Thinking] \xe2\x96\xbc\n", kColorThinkingHeader, true);
+        reasoning_streaming_ = true;
+    }
+    model_.back().text += delta;
+    AppendStyled(delta, kColorThinkingBody, false);
+}
+
+void
+ChatView::EndReasoningStreaming()
+{
+    if (reasoning_streaming_) {
+        reasoning_streaming_ = false;
+        if (!model_.empty() && model_.back().kind == ChatEntry::Reasoning) {
+            model_.back().collapsed = true;
+            AppendStyled("\n", kColorThinkingBody, false);
+            _Rebuild();
+        }
+    }
+}
+
+void
 ChatView::AppendToolCalled(const std::string& tool_name, const std::string& input_json)
 {
+    EndReasoningStreaming();
     streaming_ = false;
     pending_tool_idx_ = (int)model_.size();
     model_.push_back({ChatEntry::ToolCalled, input_json, tool_name, true, false});
@@ -217,6 +261,7 @@ ChatView::AppendToolCalled(const std::string& tool_name, const std::string& inpu
 void
 ChatView::AppendToolResult(const std::string& output, bool success)
 {
+    EndReasoningStreaming();
     // Collapse the tool call that just finished.
     if (pending_tool_idx_ >= 0 && pending_tool_idx_ < (int)model_.size()) {
         model_[pending_tool_idx_].collapsed = true;
@@ -230,6 +275,7 @@ ChatView::AppendToolResult(const std::string& output, bool success)
 void
 ChatView::AppendSystem(const std::string& text)
 {
+    EndReasoningStreaming();
     streaming_ = false;
     model_.push_back({ChatEntry::System, text, "", true, false});
     AppendStyled("\n[System] " + text + "\n", kColorSystem, false);
@@ -238,8 +284,9 @@ ChatView::AppendSystem(const std::string& text)
 void
 ChatView::Clear()
 {
-    streaming_        = false;
-    pending_tool_idx_ = -1;
+    streaming_            = false;
+    reasoning_streaming_  = false;
+    pending_tool_idx_     = -1;
     model_.clear();
     header_ranges_.clear();
     text_view_->SetText("");
@@ -259,7 +306,8 @@ void
 ChatView::ToggleBlock(int model_idx)
 {
     if (model_idx < 0 || model_idx >= (int)model_.size()) return;
-    if (model_[model_idx].kind != ChatEntry::ToolCalled) return;
+    if (model_[model_idx].kind != ChatEntry::ToolCalled
+        && model_[model_idx].kind != ChatEntry::Reasoning) return;
     model_[model_idx].collapsed = !model_[model_idx].collapsed;
     _Rebuild();
 }

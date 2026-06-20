@@ -20,12 +20,12 @@ private:
 };
 
 struct ChatEntry {
-    enum Kind { UserText, AssistantText, ToolCalled, ToolResult, System };
+    enum Kind { UserText, AssistantText, ToolCalled, ToolResult, System, Reasoning };
     Kind        kind;
     std::string text;       // content, input_json for ToolCalled
     std::string name;       // tool name for ToolCalled
     bool        success   = true;
-    bool        collapsed = false;  // only meaningful for ToolCalled
+    bool        collapsed = false;  // meaningful for ToolCalled and Reasoning
 };
 
 struct ToolHeaderRange {
@@ -40,6 +40,8 @@ public:
     // Called from MainWindow::MessageReceived (BLooper thread only)
     void AppendUserText(const std::string& text);
     void AppendTextDelta(const std::string& delta);
+    void AppendReasoningDelta(const std::string& delta);
+    void EndReasoningStreaming();
     void EndStreaming();
     void AppendToolCalled(const std::string& tool_name, const std::string& input_json);
     void AppendToolResult(const std::string& output, bool success);
@@ -60,6 +62,7 @@ private:
     ClickableTextView* text_view_       = nullptr;
     BScrollView*       scroll_          = nullptr;
     bool               streaming_       = false;
+    bool               reasoning_streaming_ = false;
     bool               inhibit_scroll_  = false;
 
     std::vector<ChatEntry>       model_;
