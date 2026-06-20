@@ -51,6 +51,10 @@ static const uint32 MSG_YOLO             = 'YOLO'; // checkbox → be_app; "be:v
 // Provider/model persistence — MainWindow → be_app; "provider"+"model" strings
 static const uint32 MSG_PERSIST_PM      = 'PMps';
 
+// Inference settings — Inference tab Apply button → MainWindow
+static const uint32 MSG_APPLY_INFERENCE = 'APin';
+static const uint32 MSG_TOGGLE_THINKING = 'TGth';  // checkbox toggled
+
 // Session tracking
 static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string
 static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32

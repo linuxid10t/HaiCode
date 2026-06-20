@@ -182,6 +182,12 @@ public:
         body["max_tokens"]  = request.max_tokens;
         if (request.temperature)
             body["temperature"] = *request.temperature;
+        if (request.top_p)
+            body["top_p"] = *request.top_p;
+        // OpenAI o-series reasoning depth. Silently ignored by non-reasoning
+        // models and OpenAI-compatible endpoints that don't recognize it.
+        if (!request.reasoning_effort.empty())
+            body["reasoning_effort"] = request.reasoning_effort;
 
         // Include usage in stream_options (supported by OpenAI and most compat endpoints)
         body["stream_options"] = { {"include_usage", true} };
@@ -347,7 +353,7 @@ public:
         }
 
         if (callbacks.on_finish)
-            callbacks.on_finish(finish_reason, usage, tool_calls);
+            callbacks.on_finish(finish_reason, usage, tool_calls, {});
     }
 
     void cancel() override {

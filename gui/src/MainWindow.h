@@ -13,6 +13,8 @@
 #include <Messenger.h>
 #include <FilePanel.h>
 #include <CheckBox.h>
+#include <TabView.h>
+#include <TextControl.h>
 
 #include "ChatView.h"
 
@@ -91,6 +93,10 @@ private:
     void _RefreshModeButton();
     void _ApplyProviderModelToActiveSession();
     void _PersistProviderModel();
+    void _ApplyInference();       // Inference tab Apply button
+    void _RestoreInference();     // read model_json → fill inference fields
+    void _RestoreInferenceFrom(const haicode::InferenceParams& p);
+    void _ToggleThinking();       // enable/disable thinking budget field
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change
@@ -126,10 +132,23 @@ private:
     BStringView*   status_strip_    = nullptr;
 
     // Todos side panel
-    BGroupView*    todos_group_     = nullptr;
     BStringView*   todos_header_    = nullptr;
     BListView*     todos_list_      = nullptr;
     BScrollView*   todos_scroll_    = nullptr;
+
+    // Left-hand tabbed panel (Sessions / Inference / Todos)
+    BTabView*      side_tabs_       = nullptr;
+
+    // Inference tab controls
+    BTextControl*  inf_max_tokens_   = nullptr;
+    BTextControl*  inf_temperature_  = nullptr;
+    BTextControl*  inf_top_p_        = nullptr;
+    BTextControl*  inf_max_steps_    = nullptr;
+    BMenuField*    inf_effort_field_ = nullptr;
+    BPopUpMenu*    inf_effort_menu_  = nullptr;
+    BCheckBox*     inf_thinking_chk_ = nullptr;
+    BTextControl*  inf_thinking_     = nullptr;
+    BButton*       inf_apply_btn_    = nullptr;
 
     // Engine state mirror for UI
     bool           engine_running_        = false;

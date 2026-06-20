@@ -19,6 +19,8 @@
 #include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <SplitView.h>
+#include <TabView.h>
+#include <TextControl.h>
 #include <Message.h>
 #include <Messenger.h>
 #include <String.h>
@@ -44,6 +46,7 @@
 #include <ctime>
 #include <cstdint>
 #include <climits>
+#include <cctype>
 #include <cstdio>
 #include <algorithm>
 #include <fstream>
@@ -231,37 +234,99 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(send_btn_)
     .End();
 
-    auto* sessions_label   = new BStringView("sessions_label",   "Sessions");
     auto* transcript_label = new BStringView("transcript_label", "Conversation");
     auto* prompt_label     = new BStringView("prompt_label",     "Prompt");
-    sessions_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     transcript_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     prompt_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 
-    // Sessions pane — built separately so we can enforce a minimum width.
-    auto* sessions_group = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
-    BLayoutBuilder::Group<>(sessions_group)
-        .Add(sessions_label)
-        .Add(session_scroll_)
-    .End();
-    sessions_group->SetExplicitMinSize(BSize(200, B_SIZE_UNSET));
-    sessions_group->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
-
-    // Todos pane — third split child, mirrors the sessions pane pattern.
-    // Filled lazily from MSG_TODOS_UPDATED; header shows done/total count.
-    // Hidden initially; shown when the first todo is added.
+    // Todos list widgets (populated into the Todos tab below).
     todos_header_ = new BStringView("todos_header", "Todos");
     todos_header_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     todos_list_   = new BListView("todos_list", B_SINGLE_SELECTION_LIST);
     todos_scroll_ = new BScrollView("todos_scroll", todos_list_,
                                     0, false, true, B_FANCY_BORDER);
-    todos_group_ = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
-    BLayoutBuilder::Group<>(todos_group_)
+
+    // ---- Left-hand tabbed panel: Sessions / Inference / Todos ----
+    side_tabs_ = new BTabView("side_tabs", B_WIDTH_FROM_WIDEST);
+
+    // Sessions tab
+    auto* sessions_tab_view = new BView("sessions_tab", B_SUPPORTS_LAYOUT);
+    BLayoutBuilder::Group<>(sessions_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
+        .SetInsets(B_USE_SMALL_INSETS)
+        .Add(session_scroll_)
+    .End();
+
+    // Inference tab — per-session model/agentic controls.
+    inf_max_tokens_  = new BTextControl("max_tokens", "Max tokens:", "8192", nullptr);
+    inf_temperature_ = new BTextControl("temperature", "Temperature:", "", nullptr);
+    inf_top_p_       = new BTextControl("top_p", "Top p:", "", nullptr);
+    inf_max_steps_   = new BTextControl("max_steps", "Max steps:", "", nullptr);
+    inf_thinking_    = new BTextControl("thinking", "Thinking budget:", "", nullptr);
+
+    inf_thinking_chk_ = new BCheckBox("thinking_chk", "Extended thinking:",
+                                      new BMessage(MSG_TOGGLE_THINKING));
+
+    // Reasoning effort dropdown (OpenAI o-series): Default/Low/Medium/High.
+    inf_effort_menu_ = new BPopUpMenu("effort");
+    inf_effort_menu_->SetRadioMode(true);
+    inf_effort_menu_->SetLabelFromMarked(true);
+    for (const char* lbl : {"Default", "Low", "Medium", "High"}) {
+        auto* it = new BMenuItem(lbl, nullptr);
+        inf_effort_menu_->AddItem(it);
+        if (lbl[0] == 'D') it->SetMarked(true);  // "Default" selected initially
+    }
+    inf_effort_field_ = new BMenuField("effort_field", "Reasoning:", inf_effort_menu_);
+
+    inf_apply_btn_ = new BButton("inf_apply", "Apply",
+                                 new BMessage(MSG_APPLY_INFERENCE));
+
+    // Extended thinking row: checkbox + budget field side by side. The budget
+    // field starts disabled; it's enabled only when the checkbox is on, so the
+    // "thinking off" intent is unambiguous regardless of any leftover text.
+    auto* thinking_row = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(thinking_row)
+        .Add(inf_thinking_chk_)
+        .Add(inf_thinking_)
+        .AddGlue()
+    .End();
+    inf_thinking_->SetEnabled(false);
+
+    auto* inf_tab_view = new BView("inference_tab", B_SUPPORTS_LAYOUT);
+    BLayoutBuilder::Group<>(inf_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
+        .SetInsets(B_USE_SMALL_INSETS)
+        .Add(inf_max_tokens_)
+        .Add(inf_temperature_)
+        .Add(inf_top_p_)
+        .Add(inf_max_steps_)
+        .Add(inf_effort_field_)
+        .Add(thinking_row)
+        .Add(inf_apply_btn_)
+        .AddGlue()
+    .End();
+
+    // Todos tab
+    auto* todos_tab_view = new BView("todos_tab", B_SUPPORTS_LAYOUT);
+    BLayoutBuilder::Group<>(todos_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
+        .SetInsets(B_USE_SMALL_INSETS)
         .Add(todos_header_)
         .Add(todos_scroll_)
     .End();
-    todos_group_->SetExplicitMinSize(BSize(180, B_SIZE_UNSET));
-    todos_group_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+
+    side_tabs_->AddTab(sessions_tab_view, new BTab());
+    side_tabs_->AddTab(inf_tab_view, new BTab());
+    side_tabs_->AddTab(todos_tab_view, new BTab());
+    side_tabs_->TabAt(0)->SetLabel("Sessions");
+    side_tabs_->TabAt(1)->SetLabel("Inference");
+    side_tabs_->TabAt(2)->SetLabel("Todos");
+
+    // Group wrapping the tab view so we can enforce a minimum width on the
+    // left column (replacing the old sessions_group split child).
+    auto* side_panel = new BGroupView(B_VERTICAL, 0);
+    BLayoutBuilder::Group<>(side_panel)
+        .Add(side_tabs_)
+    .End();
+    side_panel->SetExplicitMinSize(BSize(220, B_SIZE_UNSET));
+    side_panel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
     // Menu bar sits at the top; content area below with window insets.
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -269,7 +334,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .AddGroup(B_HORIZONTAL, 0)
             .SetInsets(B_USE_WINDOW_INSETS)
             .AddSplit(B_HORIZONTAL, B_USE_HALF_ITEM_SPACING)
-                .Add(sessions_group, 0.20f)
+                .Add(side_panel, 0.20f)
                 .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.60f)
                     .Add(toolbar_group)
                     .Add(status_strip_)
@@ -283,15 +348,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                     .End()
                     .Add(input_group)
                 .End()
-                .Add(todos_group_, 0.20f)
-                .SetCollapsible(0, true)
-                .SetCollapsible(2, true)
             .End()
         .End()
     .End();
 
-    // Todos pane starts hidden — shown only when todos exist.
-    todos_group_->Hide();
+    // Todos tab hidden (no badge) until todos arrive; selected on demand.
 
 
     // Populate session list and open/create initial session
@@ -473,6 +534,12 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_TOGGLE_MODE:
             _ToggleMode();
+            break;
+        case MSG_APPLY_INFERENCE:
+            _ApplyInference();
+            break;
+        case MSG_TOGGLE_THINKING:
+            _ToggleThinking();
             break;
         case MSG_SHOW_SETTINGS:
             be_app->PostMessage(msg);
@@ -698,6 +765,7 @@ MainWindow::_NewSession()
     _UpdateMaxContext();
     _RefreshModeButton();
     _RefreshTodosFromEngine();
+    _RestoreInference();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 
@@ -786,6 +854,7 @@ MainWindow::_SelectSession(int idx)
     _UpdateMaxContext();
     _RefreshModeButton();
     _RefreshTodosFromEngine();
+    _RestoreInference();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 }
@@ -827,8 +896,8 @@ MainWindow::_SubmitPrompt()
     current_tool_name_.clear();
     _UpdateStatusStrip();
 
-    // Close todo panel if all todos are done
-    if (todos_group_ && todos_list_ && !todos_group_->IsHidden()) {
+    // If all todos are done, switch the side panel back to Sessions.
+    if (side_tabs_ && todos_list_ && side_tabs_->Selection() == 2) {
         int32 n = todos_list_->CountItems();
         if (n > 0) {
             bool all_done = true;
@@ -836,7 +905,7 @@ MainWindow::_SubmitPrompt()
                 auto* item = dynamic_cast<BStringItem*>(todos_list_->ItemAt(i));
                 if (!item || strncmp(item->Text(), "[x]", 3) != 0) { all_done = false; break; }
             }
-            if (all_done) todos_group_->Hide();
+            if (all_done) side_tabs_->Select(0);
         }
     }
 
@@ -1173,10 +1242,9 @@ MainWindow::_HandleTodosUpdated(BMessage* msg)
     snprintf(hdr, sizeof(hdr), "Todos (%d/%d done)", done, total);
     if (todos_header_) todos_header_->SetText(hdr);
 
-    if (todos_group_) {
-        if (total == 0 && !todos_group_->IsHidden()) todos_group_->Hide();
-        else if (total > 0 && todos_group_->IsHidden())  todos_group_->Show();
-    }
+    // Auto-switch to the Todos tab when todos first arrive so the user sees them.
+    if (side_tabs_ && total > 0 && side_tabs_->Selection() != 2)
+        side_tabs_->Select(2);
 }
 
 void
@@ -1221,11 +1289,6 @@ MainWindow::_RefreshTodosFromEngine()
     char hdr[64];
     snprintf(hdr, sizeof(hdr), "Todos (%d/%zu done)", done, todos.size());
     if (todos_header_) todos_header_->SetText(hdr);
-
-    if (todos_group_) {
-        if (todos.empty() && !todos_group_->IsHidden()) todos_group_->Hide();
-        else if (!todos.empty() && todos_group_->IsHidden()) todos_group_->Show();
-    }
 }
 
 void
@@ -1259,6 +1322,189 @@ MainWindow::_RefreshModeButton()
     if (!mode_btn_ || active_session_id_.empty() || !engine_) return;
     auto m = engine_->get_mode(active_session_id_);
     mode_btn_->SetLabel(m == haicode::SessionMode::Plan ? "Mode: Plan" : "Mode: Build");
+}
+
+void
+MainWindow::_ApplyInference()
+{
+    if (active_session_id_.empty() || !engine_) return;
+
+    haicode::InferenceParams p;
+
+    // max_tokens (default 8192 on empty/invalid).
+    if (inf_max_tokens_) {
+        std::string s = inf_max_tokens_->Text();
+        if (!s.empty()) {
+            try { p.max_tokens = std::stoi(s); }
+            catch (...) { p.max_tokens = 8192; }
+        }
+        if (p.max_tokens < 1) p.max_tokens = 1;
+    }
+
+    // Helper: parse an optional double field. Blank → unset.
+    auto parse_opt = [](BTextControl* fld, bool& has, double& val) {
+        has = false; val = 0.0;
+        if (!fld) return;
+        std::string s = fld->Text();
+        while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin());
+        while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
+        if (s.empty()) return;
+        try { double v = std::stod(s); if (v >= 0.0) { has = true; val = v; } }
+        catch (...) {}
+    };
+    parse_opt(inf_temperature_, p.has_temperature, p.temperature);
+    parse_opt(inf_top_p_,       p.has_top_p,       p.top_p);
+
+    // max_steps (0/blank = unset → agent/config default).
+    if (inf_max_steps_) {
+        std::string s = inf_max_steps_->Text();
+        auto trim = [](std::string& str) {
+            while (!str.empty() && std::isspace((unsigned char)str.front())) str.erase(str.begin());
+            while (!str.empty() && std::isspace((unsigned char)str.back())) str.pop_back();
+        };
+        trim(s);
+        if (!s.empty()) {
+            try { p.max_steps = std::stoi(s); }
+            catch (...) { p.max_steps = -1; }
+            if (p.max_steps < 1) p.max_steps = -1;
+        }
+    }
+
+    // reasoning_effort from dropdown (Default = unset).
+    if (inf_effort_menu_) {
+        if (auto* marked = inf_effort_menu_->FindMarked()) {
+            std::string lbl = marked->Label();
+            if (lbl == "Low")        p.reasoning_effort = "low";
+            else if (lbl == "Medium") p.reasoning_effort = "medium";
+            else if (lbl == "High")   p.reasoning_effort = "high";
+        }
+    }
+
+    // thinking_budget — gated by the "Extended thinking" checkbox. When off,
+    // thinking is forced to 0 (disabled) regardless of any leftover field text.
+    bool thinking_on = inf_thinking_chk_
+                       && inf_thinking_chk_->Value() == B_CONTROL_ON;
+    if (thinking_on && inf_thinking_) {
+        std::string s = inf_thinking_->Text();
+        auto trim = [](std::string& str) {
+            while (!str.empty() && std::isspace((unsigned char)str.front())) str.erase(str.begin());
+            while (!str.empty() && std::isspace((unsigned char)str.back())) str.pop_back();
+        };
+        trim(s);
+        if (!s.empty()) {
+            try { p.thinking_budget = std::stoi(s); }
+            catch (...) { p.thinking_budget = 0; }
+            if (p.thinking_budget < 1) p.thinking_budget = 0;
+        }
+    }
+
+    engine_->update_inference(active_session_id_, p);
+
+    // Reflect normalized values back into the fields.
+    _RestoreInferenceFrom(p);
+}
+
+void
+MainWindow::_ToggleThinking()
+{
+    bool on = inf_thinking_chk_ && inf_thinking_chk_->Value() == B_CONTROL_ON;
+    if (inf_thinking_) inf_thinking_->SetEnabled(on);
+    if (on && inf_thinking_ && inf_thinking_->TextView()->TextLength() == 0) {
+        // Sensible default so the user doesn't hit Apply with an empty budget.
+        inf_thinking_->SetText("4096");
+    }
+}
+
+// Fill the Inference tab fields from an InferenceParams (post-Apply normalization).
+void
+MainWindow::_RestoreInferenceFrom(const haicode::InferenceParams& p)
+{
+    char buf[32];
+    if (inf_max_tokens_) {
+        snprintf(buf, sizeof(buf), "%d", p.max_tokens);
+        inf_max_tokens_->SetText(buf);
+    }
+    if (inf_temperature_) {
+        if (p.has_temperature) {
+            snprintf(buf, sizeof(buf), "%.2f", p.temperature);
+            inf_temperature_->SetText(buf);
+        } else {
+            inf_temperature_->SetText("");
+        }
+    }
+    if (inf_top_p_) {
+        if (p.has_top_p) {
+            snprintf(buf, sizeof(buf), "%.2f", p.top_p);
+            inf_top_p_->SetText(buf);
+        } else {
+            inf_top_p_->SetText("");
+        }
+    }
+    if (inf_max_steps_) {
+        if (p.max_steps > 0) {
+            snprintf(buf, sizeof(buf), "%d", p.max_steps);
+            inf_max_steps_->SetText(buf);
+        } else {
+            inf_max_steps_->SetText("");
+        }
+    }
+    if (inf_effort_menu_) {
+        const char* pick = "Default";
+        if (p.reasoning_effort == "low")         pick = "Low";
+        else if (p.reasoning_effort == "medium") pick = "Medium";
+        else if (p.reasoning_effort == "high")   pick = "High";
+        for (int32 i = 0; i < inf_effort_menu_->CountItems(); ++i) {
+            if (auto* it = inf_effort_menu_->ItemAt(i))
+                it->SetMarked(strcmp(it->Label(), pick) == 0);
+        }
+    }
+    if (inf_thinking_chk_) {
+        bool on = p.thinking_budget > 0;
+        inf_thinking_chk_->SetValue(on ? B_CONTROL_ON : B_CONTROL_OFF);
+        if (inf_thinking_) inf_thinking_->SetEnabled(on);
+    }
+    if (inf_thinking_) {
+        if (p.thinking_budget > 0) {
+            snprintf(buf, sizeof(buf), "%d", p.thinking_budget);
+            inf_thinking_->SetText(buf);
+        } else {
+            inf_thinking_->SetText("");
+        }
+    }
+}
+
+void
+MainWindow::_RestoreInference()
+{
+    haicode::InferenceParams p;
+
+    if (!active_session_id_.empty()) {
+        if (auto si = store_.get(active_session_id_)) {
+            try {
+                auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
+                if (mj.is_object()) {
+                    if (mj.contains("max_tokens"))
+                        p.max_tokens = mj.value("max_tokens", 8192);
+                    if (mj.contains("temperature")) {
+                        p.has_temperature = true;
+                        p.temperature = mj.value("temperature", 0.0);
+                    }
+                    if (mj.contains("top_p")) {
+                        p.has_top_p = true;
+                        p.top_p = mj.value("top_p", 0.0);
+                    }
+                    if (mj.contains("max_steps"))
+                        p.max_steps = mj.value("max_steps", -1);
+                    if (mj.contains("reasoning_effort"))
+                        p.reasoning_effort = mj.value("reasoning_effort", "");
+                    if (mj.contains("thinking_budget"))
+                        p.thinking_budget = mj.value("thinking_budget", 0);
+                }
+            } catch (...) {}
+        }
+    }
+
+    _RestoreInferenceFrom(p);
 }
 
 static std::string format_tokens(int n)

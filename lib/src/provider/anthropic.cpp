@@ -24,6 +24,20 @@ public:
         body["model"] = request.model_id;
         body["max_tokens"] = request.max_tokens;
         body["stream"] = true;
+        if (request.temperature)
+            body["temperature"] = *request.temperature;
+        if (request.top_p)
+            body["top_p"] = *request.top_p;
+
+        // Extended thinking. Anthropic requires a token budget and that the
+        // returned thinking blocks (with their signature) be replayed in
+        // assistant message history on subsequent turns — handled in the engine.
+        if (request.thinking_budget > 0) {
+            body["thinking"] = {
+                {"type", "enabled"},
+                {"budget_tokens", request.thinking_budget}
+            };
+        }
 
         // System — split into a stable cached block + an uncached dynamic
         // tail ({{STEPS_LEFT}}). The stable block carries cache_control so
@@ -99,6 +113,9 @@ public:
             std::string current_text_id;
             int current_block_index = -1;
             std::vector<ToolCall> tool_calls;
+            std::vector<ThinkingBlock> thinking_blocks;
+            std::string current_thinking_text;
+            std::string current_thinking_sig;
             FinishReason finish_reason = FinishReason::EndTurn;
             TokenUsage usage;
             std::string finish_str;
@@ -141,6 +158,9 @@ public:
                             state.current_tool_call_id = block.value("id", "");
                             state.current_tool_name = block.value("name", "");
                             state.accumulated_tool_input.clear();
+                        } else if (btype == "thinking") {
+                            state.current_thinking_text.clear();
+                            state.current_thinking_sig.clear();
                         }
                     } else if (etype == "content_block_delta") {
                         auto& delta = d["delta"];
@@ -158,6 +178,13 @@ public:
                                     state.current_tool_call_id,
                                     state.current_tool_name,
                                     partial);
+                        } else if (dtype == "thinking_delta") {
+                            std::string t = delta.value("thinking", "");
+                            state.current_thinking_text += t;
+                            if (callbacks.on_reasoning_delta)
+                                callbacks.on_reasoning_delta(t);
+                        } else if (dtype == "signature_delta") {
+                            state.current_thinking_sig += delta.value("signature", "");
                         }
                     } else if (etype == "content_block_stop") {
                         if (state.current_block_type == "tool_use") {
@@ -189,6 +216,13 @@ public:
                                     state.accumulated_tool_input.c_str());
                             }
                             state.tool_calls.push_back(tc);
+                        } else if (state.current_block_type == "thinking") {
+                            // Preserve the signature so the thinking block can
+                            // be replayed verbatim in the next turn's history.
+                            ThinkingBlock tb;
+                            tb.text = state.current_thinking_text;
+                            tb.signature = state.current_thinking_sig;
+                            state.thinking_blocks.push_back(tb);
                         }
                         state.current_block_type.clear();
                     } else if (etype == "message_delta") {
@@ -214,7 +248,8 @@ public:
             });
 
         if (!error_occurred && callbacks.on_finish)
-            callbacks.on_finish(state.finish_reason, state.usage, state.tool_calls);
+            callbacks.on_finish(state.finish_reason, state.usage,
+                                state.tool_calls, state.thinking_blocks);
     }
 
     void cancel() override {

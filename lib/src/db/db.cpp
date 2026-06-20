@@ -340,6 +340,53 @@ void SessionStore::update_provider_model(const std::string& session_id,
     sqlite3_finalize(upd);
 }
 
+void SessionStore::update_inference(const std::string& session_id,
+                                    const InferenceParams& params) {
+    // Read current model_json, patch the inference fields, write back.
+    sqlite3_stmt* sel = nullptr;
+    sqlite3_prepare_v2(db_.handle(),
+        "SELECT model_json FROM session WHERE id=?", -1, &sel, nullptr);
+    sqlite3_bind_text(sel, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::string model_json;
+    bool found = false;
+    if (sqlite3_step(sel) == SQLITE_ROW) {
+        const unsigned char* txt = sqlite3_column_text(sel, 0);
+        if (txt) model_json = reinterpret_cast<const char*>(txt);
+        found = true;
+    }
+    sqlite3_finalize(sel);
+    if (!found) return;
+
+    try {
+        auto j = nlohmann::json::parse(model_json, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) j = nlohmann::json::object();
+        j["max_tokens"] = params.max_tokens;
+        if (params.has_temperature) j["temperature"] = params.temperature;
+        else                          j.erase("temperature");
+        if (params.has_top_p)        j["top_p"] = params.top_p;
+        else                          j.erase("top_p");
+        if (params.max_steps > 0)    j["max_steps"] = params.max_steps;
+        else                          j.erase("max_steps");
+        if (!params.reasoning_effort.empty()) j["reasoning_effort"] = params.reasoning_effort;
+        else                                  j.erase("reasoning_effort");
+        if (params.thinking_budget > 0) j["thinking_budget"] = params.thinking_budget;
+        else                            j.erase("thinking_budget");
+        model_json = j.dump();
+    } catch (...) {
+        return;
+    }
+
+    sqlite3_stmt* upd = nullptr;
+    sqlite3_prepare_v2(db_.handle(),
+        "UPDATE session SET model_json=?, time_updated=? WHERE id=?", -1, &upd, nullptr);
+    sqlite3_bind_text(upd, 1, model_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upd, 2, util::now_ms());
+    sqlite3_bind_text(upd, 3, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(upd);
+    sqlite3_finalize(upd);
+}
+
 int SessionStore::next_seq(const std::string& session_id) {
     const char* sql =
         "SELECT COALESCE(MAX(seq),0)+1 FROM session_message WHERE session_id=?";

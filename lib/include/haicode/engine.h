@@ -60,6 +60,12 @@ public:
                                const std::string& provider_id,
                                const std::string& model_id);
 
+    // Patch the active session's stored inference params (max_tokens,
+    // temperature, top_p, max_steps, reasoning_effort, thinking_budget).
+    // Persisted into model_json; applied to the LLMRequest on the next step.
+    void update_inference(const std::string& session_id,
+                          const InferenceParams& params);
+
     // Read the current persisted todo list for a session (used by UIs on
     // session switch). Delegates to SessionStore::load_todos.
     std::vector<Todo> get_todos(const std::string& session_id);

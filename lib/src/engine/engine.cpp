@@ -151,10 +151,24 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 bool has_tools = data.contains("tool_calls")
                               && data["tool_calls"].is_array()
                               && !data["tool_calls"].empty();
-                if (has_tools) {
-                    // Build Anthropic-style content array with text + tool_use blocks.
-                    // OpenAI's translate_messages() converts this on the fly.
+                bool has_thinking = data.contains("thinking")
+                                 && data["thinking"].is_array()
+                                 && !data["thinking"].empty();
+                if (has_tools || has_thinking) {
+                    // Build Anthropic-style content array. Thinking blocks
+                    // must come first and carry their original signature so
+                    // Anthropic accepts the multi-turn request. OpenAI's
+                    // translate_messages() drops these on the fly.
                     nlohmann::json content = nlohmann::json::array();
+                    if (has_thinking) {
+                        for (auto& tb : data["thinking"]) {
+                            content.push_back({
+                                {"type", "thinking"},
+                                {"thinking", tb.value("text", "")},
+                                {"signature", tb.value("signature", "")}
+                            });
+                        }
+                    }
                     if (!text.empty())
                         content.push_back({{"type","text"},{"text",text}});
                     for (auto& tc : data["tool_calls"]) {
@@ -375,6 +389,11 @@ void SessionEngine::update_provider_model(const std::string& session_id,
     store_.update_provider_model(session_id, provider_id, model_id);
 }
 
+void SessionEngine::update_inference(const std::string& session_id,
+                                     const InferenceParams& params) {
+    store_.update_inference(session_id, params);
+}
+
 std::vector<Todo> SessionEngine::get_todos(const std::string& session_id) {
     return store_.load_todos(session_id);
 }
@@ -446,6 +465,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             prompt_tmpl = *ait->second.system_prompt;
         if (ait->second.max_steps && *ait->second.max_steps > 0)
             max_steps = *ait->second.max_steps;
+    }
+    // Per-session override (from the Inference tab) wins over agent/config.
+    if (model_json.contains("max_steps") && model_json["max_steps"].is_number()) {
+        int sess_ms = model_json.value("max_steps", 0);
+        if (sess_ms > 0) max_steps = sess_ms;
     }
 
     std::string os_info;
@@ -527,12 +551,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     for (; step < max_steps; ++step) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
-        // Re-read model_id/provider_id from the session each step. The user
-        // can change either via the dropdown mid-loop, and the system prompt
-        // (re-rendered below) plus the outgoing request must reflect the new
-        // values on the very next step.
+        // Re-read model_id/provider_id (and inference params) from the session
+        // each step. The user can change either via the dropdown mid-loop, and
+        // the system prompt (re-rendered below) plus the outgoing request must
+        // reflect the new values on the very next step.
+        nlohmann::json mj_now;
         if (auto s_now = store_.get(session_id)) {
-            auto mj_now = nlohmann::json::parse(s_now->model_json, nullptr, false);
+            mj_now = nlohmann::json::parse(s_now->model_json, nullptr, false);
             if (mj_now.is_object()) {
                 if (auto v = mj_now.value("id", ""); !v.empty())        model_id    = v;
                 if (auto v = mj_now.value("provider_id", ""); !v.empty()) provider_id = v;
@@ -570,6 +595,22 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         auto req = builder.build(messages, system, system_dynamic, tool_defs,
                                   model_id, provider_id);
 
+        // Apply per-session inference params (max_tokens / temperature / top_p /
+        // reasoning_effort / thinking_budget) stored in model_json. Defaults
+        // inside LLMRequest win when not present.
+        if (mj_now.is_object()) {
+            if (mj_now.contains("max_tokens"))
+                req.max_tokens = mj_now.value("max_tokens", req.max_tokens);
+            if (mj_now.contains("temperature"))
+                req.temperature = mj_now.value("temperature", 0.0);
+            if (mj_now.contains("top_p"))
+                req.top_p = mj_now.value("top_p", 0.0);
+            if (mj_now.contains("reasoning_effort"))
+                req.reasoning_effort = mj_now.value("reasoning_effort", "");
+            if (mj_now.contains("thinking_budget"))
+                req.thinking_budget = mj_now.value("thinking_budget", 0);
+        }
+
         std::string assistant_msg_id = haicode::util::make_id("amsg");
 
         // Publish step started
@@ -584,6 +625,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         std::string full_text;
         std::string text_id = haicode::util::make_id("txt");
         std::vector<ToolCall> tool_calls;
+        std::vector<ThinkingBlock> thinking_blocks;
         FinishReason finish_reason = FinishReason::EndTurn;
         TokenUsage usage;
         bool step_failed = false;
@@ -605,10 +647,12 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             (void)call_id; (void)name;
         };
         cbs.on_finish = [&](FinishReason reason, TokenUsage tok,
-                             std::vector<ToolCall> calls) {
+                             std::vector<ToolCall> calls,
+                             std::vector<ThinkingBlock> thinking) {
             finish_reason = reason;
             usage = tok;
             tool_calls = std::move(calls);
+            thinking_blocks = std::move(thinking);
         };
         cbs.on_error = [&](const std::string& error) {
             step_failed = true;
@@ -659,6 +703,14 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 for (auto& tc : tool_calls)
                     calls_arr.push_back({{"id",tc.id},{"name",tc.name},{"input",tc.input}});
                 data["tool_calls"] = calls_arr;
+            }
+            // Preserve thinking blocks (with signatures) so they can be
+            // replayed in assistant history on subsequent Anthropic turns.
+            if (!thinking_blocks.empty()) {
+                auto tarr = nlohmann::json::array();
+                for (auto& tb : thinking_blocks)
+                    tarr.push_back({{"text", tb.text}, {"signature", tb.signature}});
+                data["thinking"] = tarr;
             }
             store_.append_message(session_id, "assistant_text", data.dump());
         }
