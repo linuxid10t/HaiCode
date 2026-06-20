@@ -370,8 +370,6 @@ void SessionStore::update_inference(const std::string& session_id,
         else                          j.erase("max_steps");
         if (!params.reasoning_effort.empty()) j["reasoning_effort"] = params.reasoning_effort;
         else                                  j.erase("reasoning_effort");
-        if (params.thinking_budget > 0) j["thinking_budget"] = params.thinking_budget;
-        else                            j.erase("thinking_budget");
         model_json = j.dump();
     } catch (...) {
         return;

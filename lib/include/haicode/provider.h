@@ -26,10 +26,9 @@ struct LLMRequest {
     int max_tokens = 8192;
     std::optional<double> temperature;
     std::optional<double> top_p;
-    // "" = unset; "low"/"medium"/"high" (OpenAI o-series reasoning_effort).
+    // "" = unset; off/minimal/low/medium/high/xhigh/max. OpenAI maps this to
+    // reasoning_effort; Anthropic maps it to output_config.effort.
     std::string reasoning_effort;
-    // 0 = disabled; >0 enables Anthropic extended thinking with this token budget.
-    int thinking_budget = 0;
 };
 
 struct ToolCall {
@@ -47,7 +46,6 @@ struct LLMResponse {
     std::string assistant_message_id;
     std::string text;
     std::vector<ToolCall> tool_calls;
-    std::vector<ThinkingBlock> thinking;  // Anthropic extended-thinking blocks
     FinishReason finish_reason = FinishReason::EndTurn;
     TokenUsage usage;
 };
@@ -58,8 +56,7 @@ struct StreamCallbacks {
     std::function<void(const std::string& delta)> on_reasoning_delta;
     std::function<void(const std::string& call_id, const std::string& name,
                        const std::string& input_delta)> on_tool_input_delta;
-    std::function<void(FinishReason, TokenUsage, std::vector<ToolCall>,
-                       std::vector<ThinkingBlock>)> on_finish;
+    std::function<void(FinishReason, TokenUsage, std::vector<ToolCall>)> on_finish;
     std::function<void(const std::string& error)> on_error;
 };
 

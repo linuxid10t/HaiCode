@@ -261,16 +261,15 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     inf_temperature_ = new BTextControl("temperature", "Temperature:", "", nullptr);
     inf_top_p_       = new BTextControl("top_p", "Top p:", "", nullptr);
     inf_max_steps_   = new BTextControl("max_steps", "Max steps:", "", nullptr);
-    inf_thinking_    = new BTextControl("thinking", "Thinking budget:", "", nullptr);
 
-    inf_thinking_chk_ = new BCheckBox("thinking_chk", "Extended thinking:",
-                                      new BMessage(MSG_TOGGLE_THINKING));
-
-    // Reasoning effort dropdown (OpenAI o-series): Default/Low/Medium/High.
+    // Reasoning dropdown — maps to reasoning_effort (OpenAI) and
+    // output_config.effort (Anthropic). Each provider uses only the levels it
+    // supports; the rest are ignored. Default = unset (provider default).
     inf_effort_menu_ = new BPopUpMenu("effort");
     inf_effort_menu_->SetRadioMode(true);
     inf_effort_menu_->SetLabelFromMarked(true);
-    for (const char* lbl : {"Default", "Low", "Medium", "High"}) {
+    for (const char* lbl : {"Default", "Off", "Minimal", "Low", "Medium",
+                            "High", "XHigh", "Max"}) {
         auto* it = new BMenuItem(lbl, nullptr);
         inf_effort_menu_->AddItem(it);
         if (lbl[0] == 'D') it->SetMarked(true);  // "Default" selected initially
@@ -280,17 +279,6 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     inf_apply_btn_ = new BButton("inf_apply", "Apply",
                                  new BMessage(MSG_APPLY_INFERENCE));
 
-    // Extended thinking row: checkbox + budget field side by side. The budget
-    // field starts disabled; it's enabled only when the checkbox is on, so the
-    // "thinking off" intent is unambiguous regardless of any leftover text.
-    auto* thinking_row = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
-    BLayoutBuilder::Group<>(thinking_row)
-        .Add(inf_thinking_chk_)
-        .Add(inf_thinking_)
-        .AddGlue()
-    .End();
-    inf_thinking_->SetEnabled(false);
-
     auto* inf_tab_view = new BView("inference_tab", B_SUPPORTS_LAYOUT);
     BLayoutBuilder::Group<>(inf_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
         .SetInsets(B_USE_SMALL_INSETS)
@@ -299,7 +287,6 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(inf_top_p_)
         .Add(inf_max_steps_)
         .Add(inf_effort_field_)
-        .Add(thinking_row)
         .Add(inf_apply_btn_)
         .AddGlue()
     .End();
@@ -537,9 +524,6 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_APPLY_INFERENCE:
             _ApplyInference();
-            break;
-        case MSG_TOGGLE_THINKING:
-            _ToggleThinking();
             break;
         case MSG_SHOW_SETTINGS:
             be_app->PostMessage(msg);
@@ -1370,31 +1354,18 @@ MainWindow::_ApplyInference()
         }
     }
 
-    // reasoning_effort from dropdown (Default = unset).
+    // reasoning_effort from dropdown. The label maps directly to the effort
+    // string; Default = unset (provider/model default applies).
     if (inf_effort_menu_) {
         if (auto* marked = inf_effort_menu_->FindMarked()) {
             std::string lbl = marked->Label();
-            if (lbl == "Low")        p.reasoning_effort = "low";
-            else if (lbl == "Medium") p.reasoning_effort = "medium";
-            else if (lbl == "High")   p.reasoning_effort = "high";
-        }
-    }
-
-    // thinking_budget — gated by the "Extended thinking" checkbox. When off,
-    // thinking is forced to 0 (disabled) regardless of any leftover field text.
-    bool thinking_on = inf_thinking_chk_
-                       && inf_thinking_chk_->Value() == B_CONTROL_ON;
-    if (thinking_on && inf_thinking_) {
-        std::string s = inf_thinking_->Text();
-        auto trim = [](std::string& str) {
-            while (!str.empty() && std::isspace((unsigned char)str.front())) str.erase(str.begin());
-            while (!str.empty() && std::isspace((unsigned char)str.back())) str.pop_back();
-        };
-        trim(s);
-        if (!s.empty()) {
-            try { p.thinking_budget = std::stoi(s); }
-            catch (...) { p.thinking_budget = 0; }
-            if (p.thinking_budget < 1) p.thinking_budget = 0;
+            if      (lbl == "Off")     p.reasoning_effort = "off";
+            else if (lbl == "Minimal") p.reasoning_effort = "minimal";
+            else if (lbl == "Low")     p.reasoning_effort = "low";
+            else if (lbl == "Medium")  p.reasoning_effort = "medium";
+            else if (lbl == "High")    p.reasoning_effort = "high";
+            else if (lbl == "XHigh")   p.reasoning_effort = "xhigh";
+            else if (lbl == "Max")     p.reasoning_effort = "max";
         }
     }
 
@@ -1402,17 +1373,6 @@ MainWindow::_ApplyInference()
 
     // Reflect normalized values back into the fields.
     _RestoreInferenceFrom(p);
-}
-
-void
-MainWindow::_ToggleThinking()
-{
-    bool on = inf_thinking_chk_ && inf_thinking_chk_->Value() == B_CONTROL_ON;
-    if (inf_thinking_) inf_thinking_->SetEnabled(on);
-    if (on && inf_thinking_ && inf_thinking_->TextView()->TextLength() == 0) {
-        // Sensible default so the user doesn't hit Apply with an empty budget.
-        inf_thinking_->SetText("4096");
-    }
 }
 
 // Fill the Inference tab fields from an InferenceParams (post-Apply normalization).
@@ -1450,25 +1410,16 @@ MainWindow::_RestoreInferenceFrom(const haicode::InferenceParams& p)
     }
     if (inf_effort_menu_) {
         const char* pick = "Default";
-        if (p.reasoning_effort == "low")         pick = "Low";
-        else if (p.reasoning_effort == "medium") pick = "Medium";
-        else if (p.reasoning_effort == "high")   pick = "High";
+        if      (p.reasoning_effort == "off")     pick = "Off";
+        else if (p.reasoning_effort == "minimal") pick = "Minimal";
+        else if (p.reasoning_effort == "low")     pick = "Low";
+        else if (p.reasoning_effort == "medium")  pick = "Medium";
+        else if (p.reasoning_effort == "high")    pick = "High";
+        else if (p.reasoning_effort == "xhigh")   pick = "XHigh";
+        else if (p.reasoning_effort == "max")     pick = "Max";
         for (int32 i = 0; i < inf_effort_menu_->CountItems(); ++i) {
             if (auto* it = inf_effort_menu_->ItemAt(i))
                 it->SetMarked(strcmp(it->Label(), pick) == 0);
-        }
-    }
-    if (inf_thinking_chk_) {
-        bool on = p.thinking_budget > 0;
-        inf_thinking_chk_->SetValue(on ? B_CONTROL_ON : B_CONTROL_OFF);
-        if (inf_thinking_) inf_thinking_->SetEnabled(on);
-    }
-    if (inf_thinking_) {
-        if (p.thinking_budget > 0) {
-            snprintf(buf, sizeof(buf), "%d", p.thinking_budget);
-            inf_thinking_->SetText(buf);
-        } else {
-            inf_thinking_->SetText("");
         }
     }
 }
@@ -1497,8 +1448,6 @@ MainWindow::_RestoreInference()
                         p.max_steps = mj.value("max_steps", -1);
                     if (mj.contains("reasoning_effort"))
                         p.reasoning_effort = mj.value("reasoning_effort", "");
-                    if (mj.contains("thinking_budget"))
-                        p.thinking_budget = mj.value("thinking_budget", 0);
                 }
             } catch (...) {}
         }

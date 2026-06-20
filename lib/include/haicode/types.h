@@ -30,14 +30,6 @@ struct ModelRef {
     std::string provider_id; // e.g. "anthropic"
 };
 
-// An Anthropic extended-thinking block. The `signature` must be preserved
-// verbatim and replayed in assistant message history on subsequent turns, or
-// the Anthropic API rejects the request.
-struct ThinkingBlock {
-    std::string text;
-    std::string signature;
-};
-
 // Per-session inference parameters, persisted in the session's model_json.
 // Optional fields use a has_* flag so "unset" (provider/model default) is
 // distinguishable from an explicit zero.
@@ -49,10 +41,10 @@ struct InferenceParams {
     double top_p = 0.0;
     // -1 = unset (agent/config default applies); >0 overrides.
     int  max_steps = -1;
-    // "" = unset; "low"/"medium"/"high" controls reasoning depth.
+    // "" = unset; one of off/minimal/low/medium/high/xhigh/max controls
+    // reasoning depth (mapped per-provider: reasoning_effort for OpenAI,
+    // output_config.effort for Anthropic).
     std::string reasoning_effort;
-    // 0 = disabled; >0 enables Anthropic extended thinking with this budget.
-    int  thinking_budget = 0;
 };
 
 enum class PermissionEffect { Allow, Deny, Ask };

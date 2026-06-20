@@ -353,7 +353,7 @@ public:
         }
 
         if (callbacks.on_finish)
-            callbacks.on_finish(finish_reason, usage, tool_calls, {});
+            callbacks.on_finish(finish_reason, usage, tool_calls);
     }
 
     void cancel() override {

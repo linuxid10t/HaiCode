@@ -53,7 +53,6 @@ static const uint32 MSG_PERSIST_PM      = 'PMps';
 
 // Inference settings — Inference tab Apply button → MainWindow
 static const uint32 MSG_APPLY_INFERENCE = 'APin';
-static const uint32 MSG_TOGGLE_THINKING = 'TGth';  // checkbox toggled
 
 // Session tracking
 static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string

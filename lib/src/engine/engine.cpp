@@ -151,24 +151,10 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 bool has_tools = data.contains("tool_calls")
                               && data["tool_calls"].is_array()
                               && !data["tool_calls"].empty();
-                bool has_thinking = data.contains("thinking")
-                                 && data["thinking"].is_array()
-                                 && !data["thinking"].empty();
-                if (has_tools || has_thinking) {
-                    // Build Anthropic-style content array. Thinking blocks
-                    // must come first and carry their original signature so
-                    // Anthropic accepts the multi-turn request. OpenAI's
-                    // translate_messages() drops these on the fly.
+                if (has_tools) {
+                    // Build Anthropic-style content array: text + tool_use
+                    // blocks. OpenAI's translate_messages() converts on the fly.
                     nlohmann::json content = nlohmann::json::array();
-                    if (has_thinking) {
-                        for (auto& tb : data["thinking"]) {
-                            content.push_back({
-                                {"type", "thinking"},
-                                {"thinking", tb.value("text", "")},
-                                {"signature", tb.value("signature", "")}
-                            });
-                        }
-                    }
                     if (!text.empty())
                         content.push_back({{"type","text"},{"text",text}});
                     for (auto& tc : data["tool_calls"]) {
@@ -596,8 +582,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                   model_id, provider_id);
 
         // Apply per-session inference params (max_tokens / temperature / top_p /
-        // reasoning_effort / thinking_budget) stored in model_json. Defaults
-        // inside LLMRequest win when not present.
+        // reasoning_effort) stored in model_json. Defaults inside LLMRequest
+        // win when not present.
         if (mj_now.is_object()) {
             if (mj_now.contains("max_tokens"))
                 req.max_tokens = mj_now.value("max_tokens", req.max_tokens);
@@ -607,8 +593,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 req.top_p = mj_now.value("top_p", 0.0);
             if (mj_now.contains("reasoning_effort"))
                 req.reasoning_effort = mj_now.value("reasoning_effort", "");
-            if (mj_now.contains("thinking_budget"))
-                req.thinking_budget = mj_now.value("thinking_budget", 0);
         }
 
         std::string assistant_msg_id = haicode::util::make_id("amsg");
@@ -625,7 +609,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         std::string full_text;
         std::string text_id = haicode::util::make_id("txt");
         std::vector<ToolCall> tool_calls;
-        std::vector<ThinkingBlock> thinking_blocks;
         FinishReason finish_reason = FinishReason::EndTurn;
         TokenUsage usage;
         bool step_failed = false;
@@ -647,12 +630,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             (void)call_id; (void)name;
         };
         cbs.on_finish = [&](FinishReason reason, TokenUsage tok,
-                             std::vector<ToolCall> calls,
-                             std::vector<ThinkingBlock> thinking) {
+                             std::vector<ToolCall> calls) {
             finish_reason = reason;
             usage = tok;
             tool_calls = std::move(calls);
-            thinking_blocks = std::move(thinking);
         };
         cbs.on_error = [&](const std::string& error) {
             step_failed = true;
@@ -703,14 +684,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 for (auto& tc : tool_calls)
                     calls_arr.push_back({{"id",tc.id},{"name",tc.name},{"input",tc.input}});
                 data["tool_calls"] = calls_arr;
-            }
-            // Preserve thinking blocks (with signatures) so they can be
-            // replayed in assistant history on subsequent Anthropic turns.
-            if (!thinking_blocks.empty()) {
-                auto tarr = nlohmann::json::array();
-                for (auto& tb : thinking_blocks)
-                    tarr.push_back({{"text", tb.text}, {"signature", tb.signature}});
-                data["thinking"] = tarr;
             }
             store_.append_message(session_id, "assistant_text", data.dump());
         }

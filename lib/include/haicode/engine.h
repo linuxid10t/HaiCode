@@ -61,8 +61,8 @@ public:
                                const std::string& model_id);
 
     // Patch the active session's stored inference params (max_tokens,
-    // temperature, top_p, max_steps, reasoning_effort, thinking_budget).
-    // Persisted into model_json; applied to the LLMRequest on the next step.
+    // temperature, top_p, max_steps, reasoning_effort). Persisted into
+    // model_json; applied to the LLMRequest on the next step.
     void update_inference(const std::string& session_id,
                           const InferenceParams& params);
 

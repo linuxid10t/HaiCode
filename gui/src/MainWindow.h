@@ -96,7 +96,6 @@ private:
     void _ApplyInference();       // Inference tab Apply button
     void _RestoreInference();     // read model_json → fill inference fields
     void _RestoreInferenceFrom(const haicode::InferenceParams& p);
-    void _ToggleThinking();       // enable/disable thinking budget field
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change
@@ -146,8 +145,6 @@ private:
     BTextControl*  inf_max_steps_    = nullptr;
     BMenuField*    inf_effort_field_ = nullptr;
     BPopUpMenu*    inf_effort_menu_  = nullptr;
-    BCheckBox*     inf_thinking_chk_ = nullptr;
-    BTextControl*  inf_thinking_     = nullptr;
     BButton*       inf_apply_btn_    = nullptr;
 
     // Engine state mirror for UI

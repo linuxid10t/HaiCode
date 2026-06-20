@@ -75,9 +75,9 @@ public:
                                const std::string& provider_id,
                                const std::string& model_id);
     // Patch the inference params (max_tokens, temperature, top_p, max_steps,
-    // reasoning_effort, thinking_budget) stored inside the session's model_json
-    // blob. Optional fields (has_temperature/has_top_p) are erased when unset.
-    // No-op if the session does not exist.
+    // reasoning_effort) stored inside the session's model_json blob. Optional
+    // fields (has_temperature/has_top_p) are erased when unset. No-op if the
+    // session does not exist.
     void update_inference(const std::string& session_id,
                           const InferenceParams& params);
     void delete_session(const std::string& session_id);
