@@ -136,7 +136,8 @@ void HttpClient::post_sse(const std::string& url,
 
 std::string HttpClient::get(const std::string& url,
                              const std::map<std::string, std::string>& headers,
-                             long timeout_seconds) {
+                             long timeout_seconds,
+                             long* response_code) {
     CURL* curl = state_->curl;
     state_->cancelled = false;
     std::string result;
@@ -159,7 +160,16 @@ std::string HttpClient::get(const std::string& url,
         hlist = curl_slist_append(hlist, (k + ": " + v).c_str());
     if (hlist) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
 
-    curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(curl);
+    if (response_code) {
+        if (res != CURLE_OK) {
+            *response_code = -1;  // transport-level failure (DNS, conn, timeout)
+        } else {
+            long code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+            *response_code = code;
+        }
+    }
     if (hlist) curl_slist_free_all(hlist);
     return result;
 }

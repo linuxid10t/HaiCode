@@ -329,9 +329,11 @@ HaiCodeApp::MessageReceived(BMessage* msg)
 
             BMessenger win_msgr(main_window_);
             std::thread([provider, provider_id, win_msgr]() {
-                auto models = provider->list_models();
+                std::string err;
+                auto models = provider->list_models(err);
                 BMessage reply(MSG_MODELS_LOADED);
                 reply.AddString("provider_id", provider_id.c_str());
+                reply.AddString("error", err.c_str());
                 for (auto& m : models)
                     reply.AddString("model", m.c_str());
                 win_msgr.SendMessage(&reply);

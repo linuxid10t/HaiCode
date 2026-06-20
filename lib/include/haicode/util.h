@@ -36,9 +36,11 @@ public:
                   SSECallback callback);
 
     // Simple GET. timeout_seconds caps the whole transfer (default 60s).
+    // response_code (out, optional): HTTP status, or -1 on transport failure.
     std::string get(const std::string& url,
                     const std::map<std::string, std::string>& headers,
-                    long timeout_seconds = 60);
+                    long timeout_seconds = 60,
+                    long* response_code = nullptr);
 
     void cancel();
 

@@ -563,7 +563,15 @@ MainWindow::MessageReceived(BMessage* msg)
                 else
                     to_mark = model_menu_->ItemAt(0);
             } else {
-                auto* none_item = new BMenuItem("(none available)", nullptr);
+                // Empty list: prefer an error reason from the fetch (if any)
+                // over the generic "(none available)" so misconfigurations
+                // (bad base_url, missing models endpoint, auth failure) are
+                // debuggable instead of silent.
+                std::string label = "(none available)";
+                const char* err = nullptr;
+                if (msg->FindString("error", &err) == B_OK && err && *err)
+                    label = std::string("(fetch failed: ") + err + ")";
+                auto* none_item = new BMenuItem(label.c_str(), nullptr);
                 none_item->SetEnabled(false);
                 model_menu_->AddItem(none_item);
                 to_mark = none_item;

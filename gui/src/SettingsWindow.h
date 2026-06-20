@@ -28,8 +28,9 @@ public:
 private:
     void _Done();
 
-    BMessenger target_;
-    bool       editing_;
+    BMessenger  target_;
+    bool        editing_;
+    std::string existing_key_;  // real key (when editing); posted back if field left blank
 };
 
 class SettingsWindow : public BWindow {

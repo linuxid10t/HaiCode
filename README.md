@@ -135,6 +135,12 @@ a `type` (`"anthropic"` or `"openai"`), an optional `api_key`, and an optional
 `base_url`. When `type` is omitted it is inferred from the id: `"anthropic"`
 defaults to the Anthropic type, anything else to OpenAI-compatible.
 
+`base_url` is the **complete API root** — scheme, host, path prefix, and
+version segment. The app appends only the resource path (`/messages`,
+`/chat/completions`, `/models`), so the version must be part of `base_url`.
+Defaults are `https://api.anthropic.com/v1` and `https://api.openai.com/v1`
+when omitted.
+
 ```json
 {
   "providers": {
@@ -145,11 +151,11 @@ defaults to the Anthropic type, anything else to OpenAI-compatible.
     "anthropic-proxy": {
       "type": "anthropic",
       "api_key": "sk-...",
-      "base_url": "https://my-proxy.example.com"
+      "base_url": "https://my-proxy.example.com/v1"
     },
     "ollama": {
       "type": "openai",
-      "base_url": "http://localhost:11434"
+      "base_url": "http://localhost:11434/v1"
     }
   }
 }

@@ -62,7 +62,7 @@ public:
     virtual std::string id() const = 0;
     virtual void stream(const LLMRequest& request, StreamCallbacks callbacks) = 0;
     virtual void cancel() = 0;
-    virtual std::vector<std::string> list_models() = 0;
+    virtual std::vector<std::string> list_models(std::string& error) = 0;
 };
 
 class ProviderRegistry {

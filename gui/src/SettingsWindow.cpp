@@ -31,11 +31,15 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
               B_NOT_RESIZABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
     , target_(target)
     , editing_(!editing_id.empty())
+    , existing_key_(api_key)
 {
     auto* id_field = new BTextControl("id", "Provider id:", editing_id.c_str(), nullptr);
     if (editing_) id_field->SetEnabled(false);
 
-    auto* key_field = new BTextControl("api_key", "API key:", api_key.c_str(), nullptr);
+    // Key field starts empty. When editing a provider that already has a key,
+    // show a hint so the user knows an empty field means "keep existing".
+    // Mask typing so the key isn't shown in cleartext.
+    auto* key_field = new BTextControl("api_key", "API key:", "", nullptr);
     key_field->TextView()->HideTyping(true);
 
     auto* url_field = new BTextControl("base_url", "Base URL (optional):", base_url.c_str(), nullptr);
@@ -50,16 +54,24 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
     key_field->SetDivider(label_w);
     url_field->SetDivider(label_w);
 
+    BStringView* key_hint = nullptr;
+    if (editing_ && !existing_key_.empty()) {
+        key_hint = new BStringView("key_hint",
+            "(key already set — leave blank to keep, or enter a new one)");
+    }
+
     auto* ok_btn = new BButton("ok", "OK", new BMessage(MSG_PROVIDER_DIALOG_DONE));
     ok_btn->MakeDefault(true);
     auto* cancel_btn = new BButton("cancel", "Cancel",
                                    new BMessage(B_QUIT_REQUESTED));
 
-    BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
+    auto layout = BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
         .SetInsets(B_USE_WINDOW_INSETS)
         .Add(id_field)
-        .Add(key_field)
-        .Add(url_field)
+        .Add(key_field);
+    if (key_hint)
+        layout.Add(key_hint);
+    layout.Add(url_field)
         .AddGroup(B_HORIZONTAL)
             .Add(ant_radio)
             .Add(oai_radio)
@@ -105,9 +117,15 @@ ProviderEditWindow::_Done()
         return;
     }
 
+    // When editing, an empty key field means "keep the existing key" rather
+    // than "blank it out". This is the safety fix for the disappearing-key bug.
+    std::string key = key_field ? key_field->Text() : "";
+    if (editing_ && key.empty())
+        key = existing_key_;
+
     BMessage done(MSG_PROVIDER_DIALOG_DONE);
     done.AddString("id", id.c_str());
-    done.AddString("api_key", key_field ? key_field->Text() : "");
+    done.AddString("api_key", key.c_str());
     done.AddString("base_url", url_field ? url_field->Text() : "");
     done.AddString("type", (ant_radio && ant_radio->Value() == B_CONTROL_ON)
                             ? "anthropic" : "openai");
@@ -227,10 +245,18 @@ SettingsWindow::_ApplyDialogResult(BMessage* msg)
 
     haicode::ProviderConfig p;
     p.id      = id_s;
-    p.api_key = key_s ? key_s : "";
     p.base_url= url_s ? url_s : "";
     p.type    = (type_s && *type_s) ? type_s
                                     : (p.id == "anthropic" ? "anthropic" : "openai");
+    // Defensive: an empty incoming key must not overwrite an existing key.
+    // (The edit dialog already posts the real key when the field is left blank;
+    // this guards against any caller that forgets to.)
+    std::string incoming_key = key_s ? key_s : "";
+    auto existing = providers_.find(p.id);
+    if (incoming_key.empty() && existing != providers_.end())
+        p.api_key = existing->second.api_key;
+    else
+        p.api_key = incoming_key;
     providers_[p.id] = std::move(p);
     _RepopulateList();
 }

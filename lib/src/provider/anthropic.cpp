@@ -11,7 +11,7 @@ namespace haicode {
 class AnthropicProvider : public Provider {
 public:
     explicit AnthropicProvider(const std::string& api_key,
-                                const std::string& base_url = "https://api.anthropic.com",
+                                const std::string& base_url = "https://api.anthropic.com/v1",
                                 const std::string& id = "anthropic")
         : api_key_(api_key), base_url_(base_url), id_(id.empty() ? "anthropic" : id) {}
 
@@ -108,7 +108,7 @@ public:
         std::string body_str = body.dump();
         bool error_occurred = false;
 
-        http_.post_sse(base_url_ + "/v1/messages", headers, body_str,
+        http_.post_sse(base_url_ + "/messages", headers, body_str,
             [&](const SSEEvent& ev) -> bool {
                 if (cancelled_.load()) return false;
                 if (ev.data == "[DONE]") return true;
@@ -222,22 +222,53 @@ public:
         http_.cancel();
     }
 
-    std::vector<std::string> list_models() override {
+    std::vector<std::string> list_models(std::string& error) override {
+        error.clear();
         std::map<std::string, std::string> headers = {
             {"x-api-key",         api_key_},
             {"anthropic-version", "2023-06-01"},
             {"accept",            "application/json"},
         };
-        std::string body = http_.get(base_url_ + "/v1/models", headers);
+        std::string url = base_url_ + "/models";
+        long code = 0;
+        std::string body = http_.get(url, headers, 60, &code);
         std::vector<std::string> result;
+        if (code == -1) {
+            error = "connection failed (check base_url / network)";
+            return result;
+        }
+        if (code == 401 || code == 403) {
+            error = "authentication failed (check api_key)";
+            return result;
+        }
+        if (code == 404) {
+            error = "models endpoint not found at " + url +
+                    " — check base_url (it must include the API version path, "
+                    "e.g. .../v1); some Anthropic-compatible proxies (e.g. Z.ai "
+                    "devpack) do not expose a models list, so enter the model "
+                    "id manually";
+            return result;
+        }
+        if (code >= 400) {
+            error = "HTTP " + std::to_string(code);
+            return result;
+        }
         try {
             auto j = nlohmann::json::parse(body, nullptr, false);
-            if (j.is_discarded() || !j.contains("data")) return result;
+            if (j.is_discarded() || !j.contains("data")) {
+                if (body.empty())
+                    error = "empty response from server";
+                else
+                    error = "invalid response from server";
+                return result;
+            }
             for (auto& m : j["data"]) {
                 std::string mid = m.value("id", "");
                 if (!mid.empty()) result.push_back(mid);
             }
-        } catch (...) {}
+        } catch (...) {
+            error = "invalid response from server";
+        }
         return result;
     }
 
@@ -254,7 +285,7 @@ std::shared_ptr<Provider> make_anthropic_provider(const std::string& api_key,
                                                    const std::string& base_url,
                                                    const std::string& id) {
     if (base_url.empty())
-        return std::make_shared<AnthropicProvider>(api_key, "https://api.anthropic.com", id);
+        return std::make_shared<AnthropicProvider>(api_key, "https://api.anthropic.com/v1", id);
     std::string url = base_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
     return std::make_shared<AnthropicProvider>(api_key, url, id);
