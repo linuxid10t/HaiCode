@@ -67,6 +67,11 @@ public:
     virtual void stream(const LLMRequest& request, StreamCallbacks callbacks) = 0;
     virtual void cancel() = 0;
     virtual std::vector<std::string> list_models(std::string& error) = 0;
+    // Discovered context window for a model, or 0 if unknown. Used as a
+    // fallback when get_context_window()'s config/prefix table returns 0,
+    // so local servers (Ollama, vLLM, etc.) can populate the context meter
+    // and enable auto-compaction without manual config.
+    virtual int get_model_context(const std::string& model_id) const { return 0; }
 };
 
 class ProviderRegistry {

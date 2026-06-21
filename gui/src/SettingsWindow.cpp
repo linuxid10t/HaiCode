@@ -51,15 +51,39 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
 
     auto* url_field = new BTextControl("base_url", "Base URL (optional):", base_url.c_str(), nullptr);
 
-    bool want_anthropic = (type != "openai");
-    auto* ant_radio = new BRadioButton("type_anthropic", "Anthropic", nullptr);
-    auto* oai_radio = new BRadioButton("type_openai",    "OpenAI-compatible", nullptr);
-    (want_anthropic ? ant_radio : oai_radio)->SetValue(B_CONTROL_ON);
+    // Provider type selector: a dropdown covering all supported server kinds.
+    // Unknown/legacy types fall back to "openai" (the generic OpenAI-compatible
+    // path); the recognized new types map to flavored providers with context
+    // discovery.
+    auto* type_menu = new BPopUpMenu("type_menu");
+    struct TypeEntry { const char* label; const char* value; };
+    static const TypeEntry kTypes[] = {
+        {"Anthropic",          "anthropic"},
+        {"OpenAI-compatible",  "openai"},
+        {"Ollama",             "ollama"},
+        {"vLLM",               "vllm"},
+        {"OpenRouter",         "openrouter"},
+        {"LM Studio",          "lmstudio"},
+        {"llama.cpp",          "llamacpp"},
+    };
+    std::string current_type = type.empty() ? "openai" : type;
+    BMenuItem* mark_item = nullptr;
+    for (auto& t : kTypes) {
+        auto* item = new BMenuItem(t.label, nullptr);
+        type_menu->AddItem(item);
+        if (current_type == t.value)
+            mark_item = item;
+    }
+    if (!mark_item)
+        mark_item = type_menu->ItemAt(1);  // default: OpenAI-compatible
+    mark_item->SetMarked(true);
+    auto* type_field = new BMenuField("type_field", "Type:", type_menu);
 
     float label_w = 130.0f;
     id_field->SetDivider(label_w);
     key_field->SetDivider(label_w);
     url_field->SetDivider(label_w);
+    type_field->SetDivider(label_w);
 
     BStringView* key_hint = nullptr;
     if (editing_ && !existing_key_.empty()) {
@@ -79,11 +103,7 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
     if (key_hint)
         layout.Add(key_hint);
     layout.Add(url_field)
-        .AddGroup(B_HORIZONTAL)
-            .Add(ant_radio)
-            .Add(oai_radio)
-            .AddGlue()
-        .End()
+        .Add(type_field)
         .AddGlue()
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
@@ -116,7 +136,7 @@ ProviderEditWindow::_Done()
     BTextControl* id_field  = dynamic_cast<BTextControl*>(FindView("id"));
     BTextControl* key_field = dynamic_cast<BTextControl*>(FindView("api_key"));
     BTextControl* url_field = dynamic_cast<BTextControl*>(FindView("base_url"));
-    BRadioButton* ant_radio = dynamic_cast<BRadioButton*>(FindView("type_anthropic"));
+    BMenuField* type_field  = dynamic_cast<BMenuField*>(FindView("type_field"));
 
     std::string id = id_field ? id_field->Text() : "";
     if (id.empty()) {
@@ -130,12 +150,32 @@ ProviderEditWindow::_Done()
     if (editing_ && key.empty())
         key = existing_key_;
 
+    // Read the selected type value from the menu's marked item label→value map.
+    std::string selected_type = "openai";
+    if (type_field && type_field->Menu()) {
+        BMenuItem* marked = type_field->Menu()->FindMarked();
+        if (marked) {
+            std::string label = marked->Label();
+            static const std::map<std::string, std::string> kLabelToType = {
+                {"Anthropic",          "anthropic"},
+                {"OpenAI-compatible",  "openai"},
+                {"Ollama",             "ollama"},
+                {"vLLM",               "vllm"},
+                {"OpenRouter",         "openrouter"},
+                {"LM Studio",          "lmstudio"},
+                {"llama.cpp",          "llamacpp"},
+            };
+            auto it = kLabelToType.find(label);
+            if (it != kLabelToType.end())
+                selected_type = it->second;
+        }
+    }
+
     BMessage done(MSG_PROVIDER_DIALOG_DONE);
     done.AddString("id", id.c_str());
     done.AddString("api_key", key.c_str());
     done.AddString("base_url", url_field ? url_field->Text() : "");
-    done.AddString("type", (ant_radio && ant_radio->Value() == B_CONTROL_ON)
-                            ? "anthropic" : "openai");
+    done.AddString("type", selected_type.c_str());
     done.AddBool("editing", editing_);
     target_.SendMessage(&done);
     Quit();

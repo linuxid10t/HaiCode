@@ -69,4 +69,15 @@ int get_context_window(const std::string& /*provider_id*/,
     return best_window;  // 0 if no prefix matched
 }
 
+int get_context_window(const std::string& provider_id,
+                       const std::string& model_id,
+                       const std::map<std::string, int>& config_overrides,
+                       const Provider* provider) {
+    int window = get_context_window(provider_id, model_id, config_overrides);
+    if (window > 0) return window;
+    if (provider)
+        return provider->get_model_context(model_id);
+    return 0;
+}
+
 } // namespace haicode

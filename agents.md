@@ -43,9 +43,14 @@ Rules:
 
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of
-  `"anthropic"` or `"openai"` (inferred from the id when empty). Both frontends
-  iterate this map to register providers. Env-var fallback (`ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`) applies only to ids literally `"anthropic"`/`"openai"`.
+  `"anthropic"`, `"openai"`, or one of the flavored OpenAI-compatible servers
+  (`"ollama"`, `"vllm"`, `"openrouter"`, `"lmstudio"`, `"llamacpp"`; inferred
+  from the id when empty — `"anthropic"` → anthropic, else openai). Both
+  frontends iterate this map to register providers. Env-var fallback
+  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only to ids literally
+  `"anthropic"`/`"openai"`. Flavored types use
+  `make_openai_compat_provider()` with a flavor-specific default `base_url`
+  (e.g. `lmstudio` → `http://localhost:1234/v1`).
 - **Provider menu items carry their id.** Each `BMenuItem` in MainWindow's
   provider dropdown attaches `provider_id` to its `BMessage`; the
   `MSG_FETCH_MODELS` handler reads it from the message, never from the label.

@@ -85,6 +85,10 @@ public:
 
     const AppConfig& config() const { return config_; }
 
+    // Read-only access to the provider registry (used by the UI to look up
+    // discovered context windows for the context meter).
+    ProviderRegistry& providers() { return providers_; }
+
 private:
     void agentic_loop(const std::string& session_id);
 

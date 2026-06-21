@@ -175,10 +175,15 @@ int main(int argc, char* argv[]) {
             if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
         }
         if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-        if (type == "anthropic")
+        if (type == "anthropic") {
             providers.register_provider(make_anthropic_provider(key, pcfg.base_url, id));
-        else
+        } else if (type == "ollama" || type == "vllm" || type == "openrouter"
+                   || type == "lmstudio" || type == "llamacpp") {
+            providers.register_provider(
+                make_openai_compat_provider(key, pcfg.base_url, id, type));
+        } else {
             providers.register_provider(make_openai_provider(key, pcfg.base_url, id));
+        }
     }
 
     // Default model unconditionally — providers may be added later via config

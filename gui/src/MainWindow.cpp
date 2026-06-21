@@ -1658,8 +1658,10 @@ MainWindow::_UpdateMaxContext()
 {
     if (!engine_) { max_context_ = 0; return; }
     // default_model_ / default_provider_ are the sources of truth — see _NewSession.
+    auto provider = engine_->providers().get(default_provider_);
     max_context_ = haicode::get_context_window(default_provider_, default_model_,
-                                               engine_->config().model_contexts);
+                                               engine_->config().model_contexts,
+                                               provider.get());
     _UpdateStatusStrip();
 }
 

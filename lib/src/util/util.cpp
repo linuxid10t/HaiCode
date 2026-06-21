@@ -174,4 +174,48 @@ std::string HttpClient::get(const std::string& url,
     return result;
 }
 
+std::string HttpClient::post_json(const std::string& url,
+                                  const std::map<std::string, std::string>& headers,
+                                  const std::string& body,
+                                  long timeout_seconds,
+                                  long* response_code) {
+    CURL* curl = state_->curl;
+    state_->cancelled = false;
+    std::string result;
+
+    auto write_fn = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+        auto* s = static_cast<std::string*>(userdata);
+        s->append(ptr, size * nmemb);
+        return size * nmemb;
+    };
+
+    curl_easy_reset(curl);
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_fn);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+
+    struct curl_slist* hlist = nullptr;
+    for (auto& [k, v] : headers)
+        hlist = curl_slist_append(hlist, (k + ": " + v).c_str());
+    if (hlist) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
+
+    CURLcode res = curl_easy_perform(curl);
+    if (response_code) {
+        if (res != CURLE_OK) {
+            *response_code = -1;
+        } else {
+            long code = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+            *response_code = code;
+        }
+    }
+    if (hlist) curl_slist_free_all(hlist);
+    return result;
+}
+
 } // namespace haicode

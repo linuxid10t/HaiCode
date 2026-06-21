@@ -467,8 +467,10 @@ void TuiApp::select_session(int idx) {
         model_id    = mj.value("id", model_id);
         provider_id = mj.value("provider_id", provider_id);
     } catch (...) {}
+    auto provider = engine_.providers().get(provider_id);
     max_context_ = haicode::get_context_window(provider_id, model_id,
-                                               config_.model_contexts);
+                                               config_.model_contexts,
+                                               provider.get());
 }
 
 void TuiApp::load_history(const std::string& session_id) {

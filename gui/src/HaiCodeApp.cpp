@@ -127,12 +127,17 @@ HaiCodeApp::ReadyToRun()
         // Skip Anthropic with neither key nor base_url; OpenAI-compatible can
         // run keyless against a local endpoint (Ollama, LM Studio).
         if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-        if (type == "anthropic")
+        if (type == "anthropic") {
             providers_->register_provider(
                 haicode::make_anthropic_provider(key, pcfg.base_url, id));
-        else
+        } else if (type == "ollama" || type == "vllm" || type == "openrouter"
+                   || type == "lmstudio" || type == "llamacpp") {
+            providers_->register_provider(
+                haicode::make_openai_compat_provider(key, pcfg.base_url, id, type));
+        } else {
             providers_->register_provider(
                 haicode::make_openai_provider(key, pcfg.base_url, id));
+        }
     }
 
     // Default model unconditionally — providers may be configured later
@@ -475,12 +480,17 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
                 }
                 if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-                if (type == "anthropic")
+                if (type == "anthropic") {
                     providers_->register_provider(
                         haicode::make_anthropic_provider(key, pcfg.base_url, id));
-                else
+                } else if (type == "ollama" || type == "vllm" || type == "openrouter"
+                           || type == "lmstudio" || type == "llamacpp") {
+                    providers_->register_provider(
+                        haicode::make_openai_compat_provider(key, pcfg.base_url, id, type));
+                } else {
                     providers_->register_provider(
                         haicode::make_openai_provider(key, pcfg.base_url, id));
+                }
             }
 
             // Recreate engine with updated provider registry and refresh the UI.

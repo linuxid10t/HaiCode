@@ -50,3 +50,6 @@ target_link_libraries(test_step_budget haicode)
 
 add_executable(test_compaction tests/test_compaction.cpp)
 target_link_libraries(test_compaction haicode)
+
+add_executable(test_model_context tests/test_model_context.cpp)
+target_link_libraries(test_model_context haicode)

@@ -631,7 +631,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // the very first step of the very first turn, where no usage exists.
         if (config_.auto_compact) {
             int window = haicode::get_context_window(provider_id, model_id,
-                                                     config_.model_contexts);
+                                                     config_.model_contexts,
+                                                     provider.get());
             if (window > 0) {
                 int effective = window - config_.auto_compact_reserve;
                 int threshold = static_cast<int>(effective * config_.auto_compact_threshold);

@@ -1,5 +1,6 @@
 #include <haicode/provider.h>
 #include <haicode/util.h>
+#include <haicode/model_context_parse.h>
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <cstdio>
@@ -164,15 +165,156 @@ translate_messages(const std::string& system,
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI provider
+// Context-window parsing helpers (pure functions, unit-testable)
+// Declared in model_context_parse.h; implemented here.
 // ---------------------------------------------------------------------------
+
+// Parse context window from a single /v1/models `data[]` entry, based on the
+// server flavor. Returns 0 if not present/unparseable.
+int parse_model_context_inline(const nlohmann::json& m, ServerFlavor flavor) {
+    if (!m.is_object()) return 0;
+    switch (flavor) {
+        case ServerFlavor::VLLM:
+            if (m.contains("max_model_len") && m["max_model_len"].is_number_integer())
+                return m["max_model_len"].get<int>();
+            break;
+        case ServerFlavor::OpenRouter:
+            if (m.contains("context_length") && m["context_length"].is_number_integer())
+                return m["context_length"].get<int>();
+            break;
+        case ServerFlavor::LMStudio:
+            // LM Studio's exact field name is unverified from docs; try the
+            // common candidates and pick whichever is present.
+            for (const char* key : {"context_length", "contextLength",
+                                    "max_context_length", "maxContextLength"}) {
+                if (m.contains(key) && m[key].is_number_integer())
+                    return m[key].get<int>();
+            }
+            break;
+        default:
+            break;
+    }
+    return 0;
+}
+
+// Parse Ollama's /api/show response: model_info["llama.context_length"].
+int parse_ollama_show(const nlohmann::json& j) {
+    if (!j.is_object()) return 0;
+    auto it = j.find("model_info");
+    if (it == j.end() || !it->is_object()) return 0;
+    auto cit = it->find("llama.context_length");
+    if (cit == it->end()) return 0;
+    if (cit->is_number_integer()) return cit->get<int>();
+    // Ollama reports this as a number; some forks stringize it.
+    if (cit->is_string()) {
+        try { return std::stoi(cit->get<std::string>()); } catch (...) {}
+    }
+    return 0;
+}
+
+// Parse llama.cpp's /props response: default_generation_settings.n_ctx.
+int parse_llamacpp_props(const nlohmann::json& j) {
+    if (!j.is_object()) return 0;
+    auto it = j.find("default_generation_settings");
+    if (it == j.end() || !it->is_object()) return 0;
+    auto cit = it->find("n_ctx");
+    if (cit == it->end()) return 0;
+    if (cit->is_number_integer()) return cit->get<int>();
+    if (cit->is_number_unsigned()) return static_cast<int>(cit->get<uint64_t>());
+    if (cit->is_string()) {
+        try { return std::stoi(cit->get<std::string>()); } catch (...) {}
+    }
+    return 0;
+}
+
+// Parse LM Studio's native /api/v1/models response.
+//
+// Real shape (verified against a live LM Studio 0.3.x server):
+//   { "models": [
+//       { "key": "qwen3.6-27b-mtp",
+//         "max_context_length": 262144,           // native ceiling
+//         "loaded_instances": [                   // [] when not loaded
+//           { "id": "qwen3.6-27b-mtp",
+//             "config": { "context_length": 80000 },  // runtime window
+//             "remaining_ttl_seconds": 2348 }
+//         ] }
+//   ] }
+//
+// The OpenAI-compatible /v1/models `id` equals the native `key` exactly, so we
+// match model_id against `key`. For the matched model we prefer the runtime
+// window (loaded_instances[].config.context_length) since that is what
+// actually caps requests; if the model isn't loaded we fall back to
+// max_context_length. If no key matches, we prefer the first model that has a
+// loaded instance (LM Studio typically serves one active model behind the
+// OpenAI endpoint), else the first model's max_context_length.
+int parse_lmstudio_native_models(const nlohmann::json& j,
+                                 const std::string& model_id) {
+    const nlohmann::json* arr = nullptr;
+    if (j.is_array()) {
+        arr = &j;
+    } else if (j.is_object()) {
+        auto it = j.find("models");
+        if (it == j.end() || !it->is_array()) return 0;
+        arr = &*it;
+    } else {
+        return 0;
+    }
+
+    auto as_int = [](const nlohmann::json& v) -> int {
+        if (v.is_number_integer()) return v.get<int>();
+        if (v.is_number_unsigned()) return static_cast<int>(v.get<uint64_t>());
+        if (v.is_string()) {
+            try { return std::stoi(v.get<std::string>()); } catch (...) {}
+        }
+        return 0;
+    };
+
+    // First model's loaded runtime window, else its native max (fallbacks).
+    int first_loaded = 0;
+    int first_max = 0;
+
+    for (auto& m : *arr) {
+        if (!m.is_object()) continue;
+
+        int native_max = 0;
+        auto mit = m.find("max_context_length");
+        if (mit != m.end()) native_max = as_int(*mit);
+
+        // Runtime window from the first loaded instance (if any).
+        int runtime = 0;
+        auto lit = m.find("loaded_instances");
+        if (lit != m.end() && lit->is_array() && !lit->empty()) {
+            for (auto& inst : *lit) {
+                if (!inst.is_object()) continue;
+                auto cfg = inst.find("config");
+                if (cfg == inst.end() || !cfg->is_object()) continue;
+                auto cl = cfg->find("context_length");
+                if (cl != cfg->end()) {
+                    runtime = as_int(*cl);
+                    break;
+                }
+            }
+        }
+
+        if (first_max == 0) first_max = native_max;
+        if (first_loaded == 0) first_loaded = runtime;
+
+        auto kit = m.find("key");
+        if (kit == m.end() || !kit->is_string()) continue;
+        if (kit->get<std::string>() == model_id)
+            return runtime > 0 ? runtime : native_max;
+    }
+    return first_loaded > 0 ? first_loaded : first_max;
+}
 
 class OpenAIProvider : public Provider {
 public:
     explicit OpenAIProvider(const std::string& api_key,
                              const std::string& base_url = "https://api.openai.com/v1",
-                             const std::string& id = "openai")
-        : api_key_(api_key), base_url_(base_url), id_(id.empty() ? "openai" : id) {}
+                             const std::string& id = "openai",
+                             ServerFlavor flavor = ServerFlavor::Generic)
+        : api_key_(api_key), base_url_(base_url),
+          id_(id.empty() ? "openai" : id), flavor_(flavor) {}
 
     std::string id() const override { return id_; }
 
@@ -383,6 +525,32 @@ public:
         http_.cancel();
     }
 
+    // Lazily discover the context window for a model. For list-carries-context
+    // flavors this is a cache hit after list_models(). For Ollama/llama.cpp it
+    // fetches a native endpoint on first access for the active model.
+    int get_model_context(const std::string& model_id) const override {
+        auto cached = context_cache_.find(model_id);
+        if (cached != context_cache_.end())
+            return cached->second;
+
+        if (flavor_ == ServerFlavor::Ollama) {
+            int ctx = fetch_ollama_context(model_id);
+            if (ctx > 0) context_cache_[model_id] = ctx;
+            return ctx;
+        }
+        if (flavor_ == ServerFlavor::LlamaCpp) {
+            int ctx = fetch_llamacpp_context();
+            if (ctx > 0) context_cache_[model_id] = ctx;
+            return ctx;
+        }
+        if (flavor_ == ServerFlavor::LMStudio) {
+            int ctx = fetch_lmstudio_context(model_id);
+            if (ctx > 0) context_cache_[model_id] = ctx;
+            return ctx;
+        }
+        return 0;
+    }
+
     std::vector<std::string> list_models(std::string& error) override {
         error.clear();
         std::map<std::string, std::string> headers = {
@@ -433,6 +601,13 @@ public:
                 if (mid.find("moderation")      != std::string::npos) continue;
                 if (mid.find("babbage")         != std::string::npos) continue;
                 if (mid.find("davinci")         != std::string::npos) continue;
+
+                // Parse context window from the model object for flavors whose
+                // /v1/models response carries it inline.
+                int ctx = parse_model_context_inline(m, flavor_);
+                if (ctx > 0)
+                    context_cache_[mid] = ctx;
+
                 result.push_back(mid);
             }
         } catch (...) {
@@ -441,12 +616,75 @@ public:
         return result;
     }
 
+    int fetch_ollama_context(const std::string& model_id) const {
+        // Ollama's native /api/show lives at the server root, not under /v1.
+        // Derive the native root by stripping a trailing /v1 from base_url_.
+        std::string root = base_url_;
+        if (root.size() >= 3 && root.compare(root.size() - 3, 3, "/v1") == 0)
+            root = root.substr(0, root.size() - 3);
+        std::string url = root + "/api/show";
+        std::map<std::string, std::string> headers = {{"accept", "application/json"}};
+        std::string body = nlohmann::json({{"model", model_id}}).dump();
+        long code = 0;
+        std::string resp = http_.post_json(url, headers, body, 30, &code);
+        if (code != 200 || resp.empty()) return 0;
+        try {
+            auto j = nlohmann::json::parse(resp, nullptr, false);
+            if (!j.is_discarded()) return parse_ollama_show(j);
+        } catch (...) {}
+        return 0;
+    }
+
+    int fetch_llamacpp_context() const {
+        // llama-server exposes context size via /props at the server root.
+        std::string root = base_url_;
+        if (root.size() >= 3 && root.compare(root.size() - 3, 3, "/v1") == 0)
+            root = root.substr(0, root.size() - 3);
+        std::string url = root + "/props";
+        std::map<std::string, std::string> headers = {{"accept", "application/json"}};
+        long code = 0;
+        std::string resp = http_.get(url, headers, 30, &code);
+        if (code != 200 || resp.empty()) return 0;
+        try {
+            auto j = nlohmann::json::parse(resp, nullptr, false);
+            if (!j.is_discarded()) return parse_llamacpp_props(j);
+        } catch (...) {}
+        return 0;
+    }
+
+    int fetch_lmstudio_context(const std::string& model_id) const {
+        // LM Studio exposes context length only via its native REST API
+        // (/api/v1/models), not via the OpenAI-compatible /v1/models. Derive
+        // the server root by stripping a trailing /v1 from base_url_.
+        // (The older /api/v0/models is deprecated and not used.)
+        std::string root = base_url_;
+        if (root.size() >= 3 && root.compare(root.size() - 3, 3, "/v1") == 0)
+            root = root.substr(0, root.size() - 3);
+        std::string url = root + "/api/v1/models";
+        std::map<std::string, std::string> headers = {{"accept", "application/json"}};
+        if (!api_key_.empty())
+            headers["Authorization"] = "Bearer " + api_key_;
+        long code = 0;
+        std::string resp = http_.get(url, headers, 30, &code);
+        if (code != 200 || resp.empty()) return 0;
+        try {
+            auto j = nlohmann::json::parse(resp, nullptr, false);
+            if (!j.is_discarded()) return parse_lmstudio_native_models(j, model_id);
+        } catch (...) {}
+        return 0;
+    }
+
 private:
     std::string api_key_;
     std::string base_url_;
     std::string id_;
-    HttpClient  http_;
+    ServerFlavor flavor_ = ServerFlavor::Generic;
+    mutable HttpClient  http_;
     std::atomic<bool> cancelled_{false};
+    // Discovered context windows, keyed by model_id. Populated during
+    // list_models() (for vLLM/OpenRouter/LM Studio) or lazily during
+    // get_model_context() (for Ollama/llama.cpp).
+    mutable std::map<std::string, int> context_cache_;
 };
 
 // ---------------------------------------------------------------------------
@@ -461,6 +699,46 @@ std::shared_ptr<Provider> make_openai_provider(const std::string& api_key,
     std::string url = base_url;
     while (!url.empty() && url.back() == '/') url.pop_back();
     return std::make_shared<OpenAIProvider>(api_key, url, id);
+}
+
+// Factory for flavored OpenAI-compatible providers (vLLM, Ollama, etc.).
+// Applies a flavor-specific default base_url when base_url is empty.
+// `flavor` string maps to the file-local ServerFlavor enum.
+static ServerFlavor flavor_from_string(const std::string& s) {
+    if (s == "vllm")        return ServerFlavor::VLLM;
+    if (s == "openrouter")  return ServerFlavor::OpenRouter;
+    if (s == "lmstudio")    return ServerFlavor::LMStudio;
+    if (s == "llamacpp")    return ServerFlavor::LlamaCpp;
+    if (s == "ollama")      return ServerFlavor::Ollama;
+    return ServerFlavor::Generic;
+}
+
+static std::shared_ptr<Provider>
+make_openai_compat_provider(const std::string& api_key,
+                             const std::string& base_url,
+                             const std::string& id,
+                             ServerFlavor flavor) {
+    std::string url = base_url;
+    if (url.empty()) {
+        switch (flavor) {
+            case ServerFlavor::Ollama:      url = "http://localhost:11434/v1"; break;
+            case ServerFlavor::VLLM:        url = "http://localhost:8000/v1";  break;
+            case ServerFlavor::OpenRouter:  url = "https://openrouter.ai/api/v1"; break;
+            case ServerFlavor::LMStudio:    url = "http://localhost:1234/v1";  break;
+            case ServerFlavor::LlamaCpp:    url = "http://localhost:8080/v1";  break;
+            default:                        url = "https://api.openai.com/v1"; break;
+        }
+    }
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    return std::make_shared<OpenAIProvider>(api_key, url, id, flavor);
+}
+
+std::shared_ptr<Provider> make_openai_compat_provider(const std::string& api_key,
+                                                       const std::string& base_url,
+                                                       const std::string& id,
+                                                       const std::string& flavor) {
+    return make_openai_compat_provider(api_key, base_url, id,
+                                        flavor_from_string(flavor));
 }
 
 } // namespace haicode

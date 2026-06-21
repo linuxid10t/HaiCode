@@ -42,6 +42,14 @@ public:
                     long timeout_seconds = 60,
                     long* response_code = nullptr);
 
+    // Plain JSON POST (not SSE). Used for native endpoints like Ollama's
+    // /api/show. response_code follows the same convention as get().
+    std::string post_json(const std::string& url,
+                          const std::map<std::string, std::string>& headers,
+                          const std::string& body,
+                          long timeout_seconds = 60,
+                          long* response_code = nullptr);
+
     void cancel();
 
 private:
