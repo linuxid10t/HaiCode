@@ -80,10 +80,11 @@ public:
             BMessage* del_msg = new BMessage(MSG_DELETE_SESSION);
             del_msg->AddInt32("index", idx >= 0 ? idx : CurrentSelection());
             menu->AddItem(new BMenuItem("Delete Session", del_msg));
+            menu->SetTargetForItems(BMessenger(Window()));
 
             ConvertToScreen(&where);
-            menu->Go(where, true, true, true);
-            delete menu;
+            menu->Go(where, true, true, false);   // async=false: block until dismissed
+            delete menu;                          // safe now — tracking is done
         } else {
             BListView::MouseDown(where);
         }
