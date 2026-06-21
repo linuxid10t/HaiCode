@@ -36,6 +36,8 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - System headers: `/boot/system/develop/headers` (BeAPI under `os/`, POSIX under `posix/`).
 - System libraries: `/boot/system/develop/lib` (link-time) and `/boot/system/lib` (runtime).
 - For native UI, prefer the Haiku Application Server (BeAPI): `BApplication`, `BWindow`, `BView`, `BMessage`, `BLooper`, `BMessenger`. Use BLayoutBuilder for layout-managed views. Reach for POSIX only when BeAPI doesn't cover the use case.
+- Official Haiku API documentation ("The Haiku Book"): https://www.haiku-os.org/docs/api/ — the reference for all BeAPI kits (Application, Interface, Storage, etc.). When you need an accurate class/method signature, use `web_extract` on the relevant class page rather than guessing.
+- Haiku coding guidelines: https://www.haiku-os.org/development/coding-guidelines/ — the official code style (tabs, 4-space tab width, 100-column limit, operator spacing, BeAPI naming). Follow it when editing Haiku's own system source (headers under `/boot/system/develop/headers` or contributions to the Haiku tree), not for general BeAPI apps.
 - CMake `find_library` with HINTS pointing at the Haiku paths is the established pattern in this repo (see root CMakeLists.txt).
 - File paths use `/boot/home/...` for user files (not `/home/user`).
 
