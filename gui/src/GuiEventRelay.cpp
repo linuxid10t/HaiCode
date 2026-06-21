@@ -221,6 +221,26 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    // AskUserRequested → MSG_ASK_USER_REQ (question with radio options + custom text)
+    bus_.subscribe(EventType::AskUserRequested, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        std::string call_id = data.value("call_id", "");
+        std::string question = data.value("question", "");
+
+        // Pack options as repeated string fields
+        BMessage msg(MSG_ASK_USER_REQ);
+        msg.AddString("call_id", call_id.c_str());
+        msg.AddString("question", question.c_str());
+        if (data.contains("options") && data["options"].is_array()) {
+            for (auto& opt : data["options"]) {
+                msg.AddString("option", opt.get<std::string>().c_str());
+            }
+        }
+        main_window_.SendMessage(&msg);
+    });
+
     // PermissionRequested → MSG_PERMISSION_REQ
     // Note: The promise_ptr is passed directly (engine thread blocks on future.get())
     // The promise is created in HaiCodeApp's permission callback and packed into the message

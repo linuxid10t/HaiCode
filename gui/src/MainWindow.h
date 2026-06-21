@@ -84,6 +84,8 @@ private:
     void _HandlePermissionReq(BMessage* msg);
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);
+    void _HandleAskUserReq(BMessage* msg);
+    void _HandleAskUserReply(BMessage* msg);
     void _HandleTodosUpdated(BMessage* msg);
     void _HandleBuildHookResult(BMessage* msg);
     void _HandleCompaction(BMessage* msg);

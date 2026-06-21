@@ -57,7 +57,8 @@ enum class EngineEventKind {
     TodoUpdated,
     BuildHookResult,
     Compaction,
-    Interrupted
+    Interrupted,
+    AskUserRequested
 };
 
 struct EngineEvent {
@@ -128,6 +129,7 @@ private:
     void render_statusbar();
     void render_permission_overlay();
     void render_plan_overlay();
+    void render_ask_overlay();
     void render_confirm_build_overlay();
     void render_todos_overlay();
     void render_thinking_indicator();
@@ -223,6 +225,15 @@ private:
     std::string  plan_session_id_;
     int          plan_scroll_ = 0;
     bool         confirm_build_visible_ = false;
+
+    // --- Ask-user overlay ---
+    bool         ask_visible_ = false;
+    std::string  ask_call_id_;
+    std::string  ask_question_;
+    std::vector<std::string> ask_options_;
+    std::string  ask_custom_;   // typed "Other" text
+    bool         ask_on_custom_ = false;  // cursor on the Other input
+    int          ask_sel_ = 0;  // 0..N-1 = options, N = Other
 
     // Focus: 0=sessions pane, 1=chat+input pane
     int focus_ = 1;

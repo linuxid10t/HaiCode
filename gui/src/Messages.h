@@ -25,6 +25,8 @@ static const uint32 MSG_SELECT_SESSION = 'SLss';
 static const uint32 MSG_PERMISSION_REP = 'PRrp';  // reply from PermissionWindow
 static const uint32 MSG_TOGGLE_MODE    = 'TGmd';  // mode button pressed
 static const uint32 MSG_PLAN_DECISION  = 'PLdc';  // reply from PlanReviewWindow (approved bool)
+static const uint32 MSG_ASK_USER_REQ   = 'AUrq';  // engine → UI: show AskUserWindow
+static const uint32 MSG_ASK_USER_REPLY = 'AUrp';  // UI → engine: user's answer
 
 // Settings
 static const uint32 MSG_SHOW_SETTINGS   = 'SHst';

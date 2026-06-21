@@ -107,6 +107,13 @@ public:
                        const std::vector<Todo>& todos);
     std::vector<Todo> load_todos(const std::string& session_id);
 
+    // Update the 'output' field of the tool_result row matching `call_id`.
+    // Used by the engine to replace the placeholder output echoed by ask_user
+    // with the user's real answer after they reply in the UI. No-op if no
+    // row matches.
+    void update_tool_result_by_call_id(const std::string& call_id,
+                                       const std::string& new_output);
+
 private:
     Database& db_;
     int next_seq(const std::string& session_id);

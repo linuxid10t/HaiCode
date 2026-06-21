@@ -611,4 +611,49 @@ std::vector<Todo> SessionStore::load_todos(const std::string& session_id) {
     return out;
 }
 
+void SessionStore::update_tool_result_by_call_id(const std::string& call_id,
+                                                  const std::string& new_output) {
+    // Find the tool_result message whose data_json contains this call_id,
+    // then update its data_json with the new output. The data_json is a JSON
+    // object with at least {call_id, output}. We replace the 'output' field.
+    const char* sql =
+        "SELECT id, data_json FROM session_message"
+        " WHERE type='tool_result' AND data_json LIKE ?";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), sql, -1, &stmt, nullptr);
+    std::string pattern = "%\"call_id\":\"" + call_id + "\"%";
+    sqlite3_bind_text(stmt, 1, pattern.c_str(), -1, SQLITE_TRANSIENT);
+
+    std::string msg_id;
+    std::string data_json;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* id_col = (const char*)sqlite3_column_text(stmt, 0);
+        const char* data_col = (const char*)sqlite3_column_text(stmt, 1);
+        if (id_col) msg_id = id_col;
+        if (data_col) data_json = data_col;
+    }
+    sqlite3_finalize(stmt);
+
+    if (msg_id.empty()) return;
+
+    // Parse the JSON, update 'output', serialize back.
+    try {
+        auto j = nlohmann::json::parse(data_json);
+        j["output"] = new_output;
+        std::string updated = j.dump();
+        int64_t now = util::now_ms();
+        const char* upd =
+            "UPDATE session_message SET data_json=?, time_updated=? WHERE id=?";
+        sqlite3_stmt* stmt2 = nullptr;
+        sqlite3_prepare_v2(db_.handle(), upd, -1, &stmt2, nullptr);
+        sqlite3_bind_text(stmt2, 1, updated.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt2, 2, now);
+        sqlite3_bind_text(stmt2, 3, msg_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt2);
+        sqlite3_finalize(stmt2);
+    } catch (...) {
+        // Parse error or other issue — silently fail, no-op.
+    }
+}
+
 } // namespace haicode

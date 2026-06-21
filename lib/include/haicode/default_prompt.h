@@ -60,6 +60,7 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - process: Inspect and manage running processes. Actions: `list` (show processes, optional `filter`), `kill` (send signal to `pid`), `check_port` (show what is listening on `port`).
 - todo_write: Replace the session's task list atomically. Each item has a `content` (imperative), `activeForm` (present-continuous, shown in the spinner), and `status` (`pending`, `in_progress`, or `completed`). Send the full list on every call — not a delta. Mark exactly one item `in_progress` at a time.
 - discard_plan: Retire the most recent active plan (mark it implemented or abandoned). Call this when the plan has been fully implemented or the user wants to abandon it. Retired plans are no longer injected into future sessions.
+- ask_user: Ask the user a focused disambiguation question when you cannot resolve an ambiguity from the codebase. Supply 2-5 preset options; the user may also type a custom reply. Use sparingly — only when truly blocked, not for confirmation.
 - write_agents_md: Create or overwrite `agents.md` in the project root. `agents.md` is appended to your system prompt for every future session in this project. Use it to record the project description, build/run commands, and conventions so future sessions start with full context.
 
 # Communication
@@ -80,6 +81,7 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - Only call a tool when you need its result. If you already know the answer, respond directly.
 - Some actions pass through a permission gate and may require user approval before they run.
 - For edits: read the file, then call `edit` with enough surrounding context that `old_string` matches exactly one location. Never guess the file's contents.
+- If the request is ambiguous and you cannot resolve it by reading the codebase, call `ask_user` with a focused question and 2-5 concrete options. Do not use it for confirmation or for things you can determine yourself — only when genuinely blocked. After calling it, stop and wait for the user's answer (it arrives as the tool result).
 
 # Code changes
 
@@ -178,9 +180,9 @@ constexpr const char* kPlanModeInstructions = R"HPCODE(
 
 You are in PLAN MODE. The user wants a researched implementation strategy before any code changes.
 
-- Available tools this turn: read, glob, grep, ls, find, diff, todo_write, web_search, web_extract, propose_plan, discard_plan.
+- Available tools this turn: read, glob, grep, ls, find, diff, todo_write, ask_user, web_search, web_extract, propose_plan, discard_plan.
 - bash, write, edit, external_terminal are NOT available.
-- **Before researching or proposing:** if the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — ask the user one focused clarifying question (two at most) and wait for their reply. Do not ask about things you can determine by reading the codebase.
+- **Before researching or proposing:** if the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — call `ask_user` with a focused question and 2-5 concrete options, then stop and wait for the reply. Do not ask about things you can determine by reading the codebase, and do not ask more than one question before proposing.
 - Research thoroughly with read-only tools before proposing. For C/C++ projects, use `symbols` to locate definitions, call sites, and cross-references — it is faster and more reliable than grepping for line numbers. Use `web_search` when your training data may be stale.
 - In the plan, reference functions and symbol names rather than line numbers. Line numbers drift the moment any other edit lands; symbol names do not. Do not mark line numbers as "verified" — the implementing agent will use `symbols`/`grep` to find current locations.
 - When ready, call `propose_plan` with a detailed markdown plan covering: context (why the change is being made), recommended approach (not all alternatives), files to modify (with paths), existing functions/symbols to reuse (by name and file path), and verification steps.

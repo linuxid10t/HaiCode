@@ -83,6 +83,12 @@ public:
     // is already running for the session (to avoid DB contention).
     void compact_now(const std::string& session_id);
 
+    // Supply an answer to a pending ask_user question. Unblocks the agentic
+    // loop that called ask_user. Called by GUI/TUI event handlers.
+    void reply_to_ask(const std::string& session_id,
+                      const std::string& call_id,
+                      const std::string& answer);
+
     const AppConfig& config() const { return config_; }
 
     // Read-only access to the provider registry (used by the UI to look up
@@ -117,6 +123,21 @@ private:
     std::map<std::string, SessionMode> session_modes_;
     std::map<std::string, std::shared_ptr<Provider>> session_providers_;
     std::mutex mu_;
+
+    // Track pending ask_user questions per session. The agentic_loop blocks on
+    // asking_cv_ after publishing AskUserRequested; reply_to_ask() sets the
+    // answer and wakes the cv.
+    struct PendingAsk {
+        std::string session_id;
+        std::string call_id;
+        std::string question;
+        std::vector<std::string> options;
+        std::string answer;
+        bool replied = false;
+    };
+    std::map<std::string, PendingAsk> pending_ask_;
+    std::mutex ask_mu_;
+    std::condition_variable asking_cv_;
 };
 
 // Parse a "## Tasks" checklist from plan markdown into seed-ready Todo items.

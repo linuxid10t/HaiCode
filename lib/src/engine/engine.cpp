@@ -5,6 +5,7 @@
 #include <haicode/model_info.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <condition_variable>
 #include <sys/utsname.h>
 #include <cstdio>
 #include <algorithm>
@@ -609,7 +610,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             static const std::set<std::string> plan_allowed = {
                 "read", "glob", "grep", "ls", "find",
                 "web_search", "web_extract",
-                "diff", "todo_write",
+                "diff", "todo_write", "ask_user",
                 "propose_plan", "discard_plan",
             };
             std::erase_if(tool_defs, [](const ToolDefinition& td) {
@@ -918,6 +919,67 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 break;
             }
 
+            // ask_user: the tool returned a placeholder. Publish
+            // AskUserRequested so the UI shows a dialog, then block until the
+            // user replies via reply_to_ask(). Once replied, overwrite the
+            // placeholder tool_result with the real answer and re-publish
+            // ToolSuccess so the UI's tool bubble shows the picked answer.
+            if (call.name == "ask_user" && result.success) {
+                std::string question = call.input.value("question", "");
+                std::vector<std::string> options;
+                if (call.input.contains("options") && call.input["options"].is_array()) {
+                    for (auto& opt : call.input["options"]) {
+                        if (opt.is_string()) options.push_back(opt.get<std::string>());
+                    }
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(ask_mu_);
+                    PendingAsk pa;
+                    pa.session_id = session_id;
+                    pa.call_id    = call.id;
+                    pa.question   = question;
+                    pa.options    = options;
+                    pa.replied    = false;
+                    pending_ask_[call.id] = pa;
+                }
+
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["call_id"]    = call.id;
+                ev["question"]   = question;
+                ev["options"]    = options;
+                bus_.publish(events::EventType::AskUserRequested, ev);
+
+                std::string answer;
+                {
+                    std::unique_lock<std::mutex> lock(ask_mu_);
+                    const std::string& cid = call.id;
+                    asking_cv_.wait(lock, [this, cid]() {
+                        auto it = pending_ask_.find(cid);
+                        return it != pending_ask_.end() && it->second.replied;
+                    });
+                    answer = pending_ask_[call.id].answer;
+                    pending_ask_.erase(call.id);
+                }
+
+                // Overwrite the placeholder tool_result row with the real answer.
+                nlohmann::json reply_out = {{"answer", answer}};
+                store_.update_tool_result_by_call_id(call.id, reply_out.dump(2));
+
+                // Re-publish ToolSuccess so the UI swaps the placeholder bubble
+                // for the user's picked answer.
+                {
+                    nlohmann::json rev;
+                    rev["session_id"] = session_id;
+                    rev["call_id"]    = call.id;
+                    rev["output"]     = reply_out.dump(2);
+                    rev["success"]    = true;
+                    bus_.publish(events::EventType::ToolSuccess, rev);
+                }
+                continue;
+            }
+
             // todo_write: persist the parsed list to the session_todo
             // table and publish a TodoUpdated event so the UI can refresh.
             // Unlike propose_plan, this does NOT end the turn — the model
@@ -1027,6 +1089,18 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         session_providers_.erase(session_id);
+    }
+}
+
+void SessionEngine::reply_to_ask(const std::string& session_id,
+                                  const std::string& call_id,
+                                  const std::string& answer) {
+    std::lock_guard<std::mutex> lock(ask_mu_);
+    auto it = pending_ask_.find(call_id);
+    if (it != pending_ask_.end() && it->second.session_id == session_id) {
+        it->second.answer = answer;
+        it->second.replied = true;
+        asking_cv_.notify_all();
     }
 }
 

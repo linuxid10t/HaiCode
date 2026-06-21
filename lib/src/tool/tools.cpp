@@ -875,6 +875,79 @@ public:
     }
 };
 
+// ---- AskUserTool ----
+//
+// Asks the user a focused disambiguation question with 2-5 preset
+// options. The tool itself is synchronous and only records intent as
+// JSON output — the engine detects it by name, publishes AskUserRequested,
+// ends the turn, and blocks until the UI replies. The real answer appears
+// as a subsequent tool_result replacement.
+
+class AskUserTool : public Tool {
+public:
+    std::string name() const override { return "ask_user"; }
+    std::string description() const override {
+        return "Ask the user a focused disambiguation question when needed to "
+               "resolve ambiguity. Supply 2-5 preset options; the user may also "
+               "type a custom reply. The answer flows back as a tool result.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"question", {{"type", "string"}, {"description", "The question text."}}},
+                {"options", {
+                    {"type", "array"},
+                    {"items", {{"type", "string"}}},
+                    {"description", "2-5 preset choices."}
+                }}
+            }},
+            {"required", nlohmann::json::array({"question", "options"})}
+        };
+    }
+    std::string required_permission() const override { return "ask_user"; }
+    std::string resource(const nlohmann::json& /*input*/, const ToolContext& ctx) const override {
+        return ctx.working_dir.empty() ? "." : ctx.working_dir;
+    }
+
+    ToolResult execute(const nlohmann::json& input, const ToolContext& /*ctx*/) override {
+        std::string question = input.value("question", "");
+        if (question.empty())
+            return {false, "", missing_field("ask_user", "question", input)};
+
+        if (!input.contains("options") || !input["options"].is_array())
+            return {false, "", "ask_user: 'options' must be an array of strings."};
+
+        std::vector<std::string> options;
+        int idx = 0;
+        for (const auto& o : input["options"]) {
+            if (!o.is_string())
+                return {false, "", "ask_user: options[" + std::to_string(idx)
+                                  + "] must be a string."};
+            std::string s = o.get<std::string>();
+            if (s.empty())
+                return {false, "", "ask_user: options[" + std::to_string(idx)
+                                  + "] is empty."};
+            options.push_back(s);
+            ++idx;
+        }
+        if (options.size() < 2)
+            return {false, "", "ask_user: 'options' must contain at least 2 choices."};
+        if (options.size() > 5)
+            return {false, "", "ask_user: 'options' may have at most 5 choices."};
+
+        // Echo the request so the engine has the structured payload for the
+        // AskUserRequested event. The real answer comes via tool_result
+        // replacement after the UI replies.
+        nlohmann::json out = {
+            {"question", question},
+            {"options",  options},
+            {"status",   "asking"}
+        };
+        return {true, out.dump(2), ""};
+    }
+};
+
 // ---- ProposePlanTool ----
 //
 // Only meaningful in Plan mode (the engine filters it out of tool_defs in
@@ -1900,6 +1973,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<DiscardPlanTool>());
     registry.register_tool(std::make_shared<WriteAgentsMdTool>());
     registry.register_tool(std::make_shared<TodoWriteTool>());
+    registry.register_tool(std::make_shared<AskUserTool>());
     registry.register_tool(std::make_shared<DiffTool>());
     registry.register_tool(std::make_shared<GitTool>());
     registry.register_tool(std::make_shared<FindTool>());

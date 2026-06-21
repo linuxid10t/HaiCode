@@ -190,8 +190,9 @@ ToolResult ToolRegistry::execute(const std::string& name,
     if (name == "web_search" || name == "web_extract")
         return tool->execute(input, ctx);
 
-    // propose_plan and todo_write only write internal state — always allow.
-    if (name == "propose_plan" || name == "todo_write")
+    // propose_plan, todo_write, and ask_user only write internal state or ask
+    // the user a question — always allow.
+    if (name == "propose_plan" || name == "todo_write" || name == "ask_user")
         return tool->execute(input, ctx);
 
     // process list and check_port are read-only — always allow.

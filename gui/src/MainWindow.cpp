@@ -3,6 +3,7 @@
 #include "ChatView.h"
 #include "PermissionWindow.h"
 #include "PlanReviewWindow.h"
+#include "AskUserWindow.h"
 
 #include <Application.h>
 #include <Window.h>
@@ -538,6 +539,12 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_PLAN_DECISION:
             _HandlePlanDecision(msg);
+            break;
+        case MSG_ASK_USER_REQ:
+            _HandleAskUserReq(msg);
+            break;
+        case MSG_ASK_USER_REPLY:
+            _HandleAskUserReply(msg);
             break;
         case MSG_TOGGLE_MODE:
             _ToggleMode();
@@ -1686,3 +1693,55 @@ MainWindow::_PersistProviderModel()
     pm.AddString("model",    default_model_.c_str());
     be_app->PostMessage(&pm);
 }
+
+void
+MainWindow::_HandleAskUserReq(BMessage* msg)
+{
+    const char* question = nullptr;
+    const char* call_id = nullptr;
+    msg->FindString("question", &question);
+    msg->FindString("call_id", &call_id);
+    if (!question || !call_id) return;
+
+    // Collect repeated "option" strings into a vector.
+    std::vector<BString> options;
+    int32 i = 0;
+    const char* opt = nullptr;
+    while (msg->FindString("option", i, &opt) == B_OK) {
+        options.push_back(BString(opt));
+        ++i;
+    }
+
+    AskUserWindow* w = new AskUserWindow(
+        BString(question),
+        options,
+        BString(active_session_id_.c_str()),
+        BString(call_id),
+        BMessenger(this)
+    );
+    w->Show();
+}
+
+void
+MainWindow::_HandleAskUserReply(BMessage* msg)
+{
+    const char* call_id = nullptr;
+    const char* session_id = nullptr;
+    const char* answer = nullptr;
+    bool cancelled = false;
+
+    msg->FindString("call_id", &call_id);
+    msg->FindString("session_id", &session_id);
+    msg->FindBool("cancelled", &cancelled);
+    if (!cancelled)
+        msg->FindString("answer", &answer);
+
+    if (!call_id || !engine_) return;
+    std::string sid = session_id ? session_id : active_session_id_;
+
+    // Empty answer on cancel so the model sees a clear signal.
+    std::string reply = cancelled ? "(user cancelled the question)"
+                                  : (answer ? answer : "");
+    engine_->reply_to_ask(sid, call_id, reply);
+}
+

@@ -179,6 +179,19 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::AskUserRequested, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::AskUserRequested;
+        ev.session_id = j.value("session_id", "");
+        ev.str1       = j.value("call_id", "");
+        ev.str3       = j.value("question", "");
+        if (j.contains("options") && j["options"].is_array()) {
+            for (auto& o : j["options"])
+                if (o.is_string()) ev.todos.push_back({o.get<std::string>(), "", "pending"});
+        }
+        push_engine_event(std::move(ev));
+    });
+
     bus_.subscribe(events::EventType::TodoUpdated, [this](const json& j) {
         EngineEvent ev;
         ev.kind       = EngineEventKind::TodoUpdated;
@@ -377,6 +390,17 @@ void TuiApp::process_engine_events() {
             plan_session_id_= ev.session_id;
             plan_scroll_    = 0;
             plan_visible_   = true;
+            break;
+
+        case EngineEventKind::AskUserRequested:
+            ask_call_id_   = ev.str1;
+            ask_question_  = ev.str3;
+            ask_options_.clear();
+            for (auto& t : ev.todos) ask_options_.push_back(t.content);
+            ask_custom_.clear();
+            ask_on_custom_ = false;
+            ask_sel_       = 0;
+            ask_visible_   = true;
             break;
 
         case EngineEventKind::TodoUpdated:
@@ -786,6 +810,63 @@ void TuiApp::handle_key(int key) {
         return;
     }
 
+    // ---------- Ask-user overlay ----------
+    if (ask_visible_) {
+        int num = static_cast<int>(ask_options_.size());
+        if (ask_on_custom_) {
+            // Typing into the "Other" text field.
+            if (key == '\n' || key == KEY_ENTER) {
+                std::string answer = ask_custom_.empty()
+                    ? "(user cancelled the question)" : ask_custom_;
+                engine_.reply_to_ask(active_session_id_, ask_call_id_, answer);
+                ask_visible_ = false;
+            } else if (key == 27 || key == KEY_BACKSPACE) {
+                if (key == 27) { ask_visible_ = false;
+                    engine_.reply_to_ask(active_session_id_, ask_call_id_,
+                                         "(user cancelled the question)");
+                } else if (!ask_custom_.empty()) {
+                    ask_custom_.pop_back();
+                }
+            } else if (key >= 0x20 && key < 0x7f && ask_custom_.size() < 200) {
+                ask_custom_ += static_cast<char>(key);
+            }
+        } else {
+            switch (key) {
+            case KEY_UP:
+            case 'k':
+                ask_sel_ = std::max(0, ask_sel_ - 1);
+                break;
+            case KEY_DOWN:
+            case 'j':
+                ask_sel_ = std::min(num, ask_sel_ + 1);  // num = Other row
+                break;
+            case '\n':
+            case KEY_ENTER: {
+                if (ask_sel_ < num) {
+                    engine_.reply_to_ask(active_session_id_, ask_call_id_,
+                                         ask_options_[ask_sel_]);
+                    ask_visible_ = false;
+                } else {
+                    ask_on_custom_ = true;
+                    if (ask_custom_.empty()) ask_custom_ = "";
+                }
+                break;
+            }
+            case 27:
+            case 'q':
+            case 'Q':
+                ask_visible_ = false;
+                engine_.reply_to_ask(active_session_id_, ask_call_id_,
+                                     "(user cancelled the question)");
+                break;
+            default:
+                break;
+            }
+        }
+        render_all();
+        return;
+    }
+
     // ---------- Todos overlay ----------
     if (todos_visible_) {
         int visible_rows = std::max(5, rows_ - 10);
@@ -1016,6 +1097,7 @@ void TuiApp::render_all() {
     render_statusbar();
 
     if (plan_visible_)           render_plan_overlay();
+    if (ask_visible_)            render_ask_overlay();
     if (confirm_build_visible_)  render_confirm_build_overlay();
     if (todos_visible_)          render_todos_overlay();
     if (perm_visible_)           render_permission_overlay();
@@ -1414,6 +1496,62 @@ void TuiApp::render_plan_overlay() {
     ::whline(win, ACS_HLINE, box_w - 2);
     ::wattron(win, A_BOLD);
     mvwprintw(win, box_h - 1, 2, " [a] approve   [d] discard   ↑/↓ scroll ");
+    ::wattroff(win, A_BOLD);
+
+    ::wnoutrefresh(win);
+    ::delwin(win);
+}
+
+void TuiApp::render_ask_overlay() {
+    int box_w = std::min(cols_ - 4, std::max(50, cols_ - 8));
+    int box_h = std::min(rows_ - 4, std::max(12, rows_ - 4));
+    int box_y = (rows_ - box_h) / 2;
+    int box_x = (cols_ - box_w) / 2;
+
+    WINDOW* win = ::newwin(box_h, box_w, box_y, box_x);
+    ::box(win, 0, 0);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, 0, 2, " Question ");
+    ::wattroff(win, A_BOLD);
+
+    int inner_w = box_w - 4;
+    int row = 1;
+
+    // Question text, word-wrapped.
+    auto lines = wrap(ask_question_, inner_w);
+    for (auto& l : lines) {
+        if (row >= box_h - 2) break;
+        mvwprintw(win, row++, 2, "%s", truncate(l, inner_w).c_str());
+    }
+    row++;
+
+    // Options as radio rows.
+    for (int i = 0; i < (int)ask_options_.size(); ++i) {
+        if (row >= box_h - 2) break;
+        bool selected = (!ask_on_custom_ && i == ask_sel_);
+        const char* mark = "( )";
+        if (selected) { ::wattron(win, A_REVERSE); mark = "(*)"; }
+        mvwprintw(win, row, 2, "%s %s", mark, truncate(ask_options_[i], inner_w - 4).c_str());
+        if (selected) ::wattroff(win, A_REVERSE);
+        row++;
+    }
+
+    // "Other:" row.
+    if (row < box_h - 2) {
+        bool selected = (ask_on_custom_ || ask_sel_ == (int)ask_options_.size());
+        const char* mark = "( )";
+        if (selected) { ::wattron(win, A_REVERSE); mark = "(*)"; }
+        mvwprintw(win, row, 2, "%s Other: %s", mark, ask_custom_.c_str());
+        if (selected) ::wattroff(win, A_REVERSE);
+        if (ask_on_custom_) mvwprintw(win, row, 10 + ask_custom_.size(), "_");
+        row++;
+    }
+
+    // Footer hint.
+    ::wmove(win, box_h - 2, 1);
+    ::whline(win, ACS_HLINE, box_w - 2);
+    ::wattron(win, A_BOLD);
+    mvwprintw(win, box_h - 1, 2, " \xe2\x86\x91/\xe2\x86\x93 select   Enter confirm   Esc cancel ");
     ::wattroff(win, A_BOLD);
 
     ::wnoutrefresh(win);

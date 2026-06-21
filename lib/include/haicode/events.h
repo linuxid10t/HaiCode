@@ -37,6 +37,7 @@ enum class EventType {
     PlanProposed,
     TodoUpdated,
     BuildHookResult,
+    AskUserRequested,
 };
 
 struct BaseEvent {
