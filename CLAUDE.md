@@ -38,6 +38,7 @@ make -C build test_config_permission
 ./build/lib/test_process                      # ProcessTool unit tests
 ./build/lib/test_file_tools                   # ReadTool / WriteTool / EditTool unit tests
 ./build/lib/test_config_permission            # ConfigLoader + PermissionGate unit tests
+./build/lib/test_compaction                   # auto-compaction threshold + DB round-trip
 ```
 
 ## Test
@@ -50,6 +51,7 @@ make -C build test_config_permission
 | `test_process` | ProcessTool: list/filter, kill (via forked subprocess), check_port, error cases |
 | `test_file_tools` | ReadTool: offset/limit, binary rejection, relative paths, empty file. WriteTool: atomic write, parent dir creation, binary content, empty content. EditTool: replace_all, duplicate detection, delete, binary rejection, whitespace matching |
 | `test_config_permission` | ConfigLoader::load_file: all fields, permissions (allow/deny/ask/default resource), build_command, web_search, instructions, providers, model contexts, missing/invalid files. ConfigLoader::merge: scalar overlay, empty overlay preservation, appended collections. PermissionGate: allow/deny/ask rules, wildcards, fnmatch patterns, last-rule-wins, session priority, add_allow, ask callback. ToolRegistry gate integration |
+| `test_compaction` | Auto-compaction: threshold decision arithmetic (trigger at `effective*threshold`, disabled when `window==0`), `get_context_window` unknown vs override, `SessionStore::compact_messages` DB round-trip (head replaced by one `compaction_summary` at seq 0, tail seqs untouched, no-op when `keep_from_seq<=1`) |
 
 All tests use `/tmp` for scratch files and clean up after themselves.
 
@@ -82,6 +84,8 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 | `types.h` | Shared types and constants |
 
 **Agentic loop** (`lib/src/engine/engine.cpp`): `SessionEngine` spawns one `std::thread` per session. The thread runs up to 50 steps (default; configurable via `max_steps` in agent config): `ContextBuilder::build()` → `Provider::stream()` → collect text/tool-calls via `StreamCallbacks` → execute tools via `ToolRegistry` → repeat if `FinishReason::ToolUse`. An `std::atomic<bool>` per session allows interruption between steps. If any tool returns `result.denied == true`, the loop publishes `StepFailed` and breaks immediately. `session_running_` (a `std::map<string,bool>` under mutex) tracks whether a session thread is active — do not use `std::thread::joinable()` for this, as it returns true even after the thread finishes. The dynamic system block (separate from the stable cached body) escalates in tone as the step budget depletes: `render_dynamic_prompt()` appends a "getting tight" line at 5–14 steps left and a "CRITICAL" line at 1–4 steps left, so the model reprioritizes before exhaustion.
+
+**Auto-compaction** (`SessionEngine::compact_history`): at the top of each loop step, if `config_.auto_compact` is on and the previous step's total input tokens (`usage.input + cache_read + cache_write`) reach `threshold = (window - reserve) * auto_compact_threshold`, the conversation head (everything before the last `user_prompted` message) is summarized into one `[Conversation summary]` message via a non-streaming `provider->stream()` call with a summarization prompt, then persisted through `SessionStore::compact_messages` (delete head rows `seq < tail_start_seq`, insert the summary at seq 0 so it precedes the intact tail). Compaction is disabled when the context window is unknown (`get_context_window == 0`) — set `"models": {"<model_id>": <tokens>}` in config to enable it for unrecognized models. The two `CompactionStarted`/`CompactionEnded` events drive a "compacting context…" indicator in both frontends.
 
 **Providers** (`lib/src/provider/`): `AnthropicProvider` and `OpenAIProvider` each implement `stream()` (SSE) and `list_models()` (HTTP GET, reports HTTP status via an `error` out-param). `base_url` is the **complete API root** (scheme + host + path prefix + version segment); the code appends only the resource path (`/messages`, `/chat/completions`, `/models`), so the version must be part of `base_url`. Defaults: `https://api.anthropic.com/v1`, `https://api.openai.com/v1`. OpenAI's message format differs from Anthropic's; `translate_messages()` in `openai.cpp` converts between them, including converting Anthropic content arrays with `tool_use` blocks into OpenAI `tool_calls`. Register providers via `ProviderRegistry::register_provider()`.
 

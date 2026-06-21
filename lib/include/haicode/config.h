@@ -69,6 +69,14 @@ struct AppConfig {
     // Initial mode for newly created sessions: "plan" or "build".
     // Defaults to "plan" so new sessions start in Plan mode unless overridden.
     std::string default_mode = "plan";
+
+    // Auto-compaction: when the input-token usage for a session approaches the
+    // model's context window, summarize the older portion of the conversation
+    // into a single synthetic message so the session can continue. Disabled
+    // entirely when the model's context window is unknown (0).
+    bool   auto_compact          = true;
+    double auto_compact_threshold = 0.80; // 0.0–1.0 fraction of the window
+    int    auto_compact_reserve   = 8192; // tokens reserved for summary + output
 };
 
 class ConfigLoader {

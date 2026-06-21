@@ -2,6 +2,7 @@
 #include <haicode/util.h>
 #include <haicode/default_prompt.h>
 #include <haicode/pricing.h>
+#include <haicode/model_info.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <sys/utsname.h>
@@ -97,6 +98,21 @@ std::string render_dynamic_prompt(const std::string& model,
     return base;
 }
 
+// Rough token estimate: ~4 characters per token (the common BPE average for
+// English/code). Used only as a pre-flight compaction trigger before any
+// provider usage is available; once a step reports real usage, that value
+// takes over. Slightly over-estimates JSON/whitespace-heavy content, which is
+// the safe direction (trigger a touch early rather than a touch late).
+static int estimate_request_tokens(const std::string& system,
+                                    const std::string& system_dynamic,
+                                    const std::vector<nlohmann::json>& messages)
+{
+    size_t chars = system.size() + system_dynamic.size();
+    for (auto& m : messages)
+        chars += m.dump().size();
+    return static_cast<int>(chars / 4);
+}
+
 LLMRequest ContextBuilder::build(
     const std::vector<SessionMessage>& messages,
     const std::string& system_prompt,
@@ -170,6 +186,14 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 } else {
                     m["content"] = text;
                 }
+                result.push_back(m);
+            } else if (msg.type == "compaction_summary") {
+                // A prior compaction's summary. Emit it as a user-role message
+                // so the provider treats it as a plain turn and the assistant
+                // retains the context the summary captured.
+                nlohmann::json m;
+                m["role"] = "user";
+                m["content"] = data.value("text", "");
                 result.push_back(m);
             } else if (msg.type == "tool_result") {
                 nlohmann::json m;
@@ -535,6 +559,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
     // Agentic loop
     int step = 0;
+    // Input-token count reported by the provider on the previous step. The true
+    // prompt size is input + cache_read + cache_write (cache reads/writes still
+    // occupy the context window). Used to decide whether to compact.
+    int prev_total_input = 0;
     for (; step < max_steps; ++step) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
@@ -590,6 +618,40 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         }
         auto req = builder.build(messages, system, system_dynamic, tool_defs,
                                   model_id, provider_id);
+
+        // Auto-compaction: if the context is approaching the model's window,
+        // summarize the older portion of the conversation before sending the
+        // request. Disabled when the window is unknown (0) or auto_compact is off.
+        //
+        // Token count source: prefer the provider's reported usage from the
+        // previous step (prev_total_input) since it's exact. It starts at 0 and
+        // is set after each step — it is NOT reset between turns, so on step 0
+        // of any turn after the first it still holds the previous turn's final
+        // usage, which is accurate enough. The estimate fallback only fires on
+        // the very first step of the very first turn, where no usage exists.
+        if (config_.auto_compact) {
+            int window = haicode::get_context_window(provider_id, model_id,
+                                                     config_.model_contexts);
+            if (window > 0) {
+                int effective = window - config_.auto_compact_reserve;
+                int threshold = static_cast<int>(effective * config_.auto_compact_threshold);
+                int current_tokens = prev_total_input;
+                if (current_tokens == 0) {
+                    current_tokens = estimate_request_tokens(system, system_dynamic,
+                                                             req.messages);
+                }
+                if (threshold > 0 && current_tokens >= threshold) {
+                    if (compact_history(session_id, *provider, model_id,
+                                        provider_id, interrupt_flag,
+                                        current_tokens, threshold)) {
+                        // Reload + rebuild so the compacted history is sent.
+                        messages = store_.load_messages(session_id);
+                        req = builder.build(messages, system, system_dynamic,
+                                            tool_defs, model_id, provider_id);
+                    }
+                }
+            }
+        }
 
         // Apply per-session inference params (max_tokens / temperature / top_p /
         // reasoning_effort) stored in model_json. Defaults inside LLMRequest
@@ -735,6 +797,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         // Update cost
         store_.update_cost(session_id, step_cost, usage);
+
+        // Track the prompt size this step reported, for next iteration's
+        // compaction decision. Cache reads/writes still occupy the window, so
+        // the sum is the true prompt size.
+        prev_total_input = usage.input + usage.cache_read + usage.cache_write;
 
         // Publish step ended
         {
@@ -962,6 +1029,122 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     }
 }
 
+// Summarization instruction prepended to the head slice. Stored as the system
+// prompt of the summarization LLMRequest so the provider sees it as the stable
+// cached body.
+static const char* kCompactionSummaryPrompt =
+    "Summarize the following conversation between a user and a coding assistant. "
+    "Preserve: the user's goals and key decisions, file paths and identifiers "
+    "mentioned, tool outcomes that affected the solution, any unresolved problems, "
+    "and the current state of any work in progress. Be concise — aim for under "
+    "1500 tokens. Write only the summary prose, no preamble.";
+
+bool SessionEngine::compact_history(const std::string& session_id,
+                                     Provider& provider,
+                                     const std::string& model_id,
+                                     const std::string& /*provider_id*/,
+                                     std::atomic<bool>* interrupt_flag,
+                                     int prev_input_tokens,
+                                     int threshold_tokens)
+{
+    auto messages = store_.load_messages(session_id);
+    if (messages.size() < 4) return false;  // too little to compact
+
+    // Partition: keep the tail from the last user_prompted onward intact.
+    // The head (everything before) is what we summarize.
+    int tail_start_seq = -1;
+    for (auto& m : messages) {
+        if (m.type == "user_prompted") tail_start_seq = m.seq;
+    }
+    // If there's no user turn at all, compact everything except the very last
+    // message (defensive — shouldn't normally happen in a live session).
+    if (tail_start_seq <= 1) {
+        tail_start_seq = messages.back().seq;
+    }
+
+    std::vector<SessionMessage> head;
+    int messages_before = 0;
+    for (auto& m : messages) {
+        if (m.seq < tail_start_seq) { head.push_back(m); ++messages_before; }
+    }
+    if (head.empty()) return false;
+
+    {
+        nlohmann::json ev;
+        ev["session_id"]         = session_id;
+        ev["prev_input_tokens"]  = prev_input_tokens;
+        ev["threshold"]          = threshold_tokens;
+        ev["messages_before"]    = messages_before;
+        bus_.publish(events::EventType::CompactionStarted, ev);
+    }
+
+    // Build the head into provider messages and prepend the summarization
+    // instruction as the first user turn.
+    ContextBuilder builder;
+    auto assembled = builder.assemble_messages(head);
+    nlohmann::json instr;
+    instr["role"] = "user";
+    instr["content"] = kCompactionSummaryPrompt;
+    assembled.insert(assembled.begin(), instr);
+
+    LLMRequest req;
+    req.model_id    = model_id;
+    req.system      = "You are a precise conversation summarizer.";
+    req.messages    = std::move(assembled);
+    req.max_tokens  = 2048;
+
+    std::string summary;
+    TokenUsage sum_usage;
+    bool summary_failed = false;
+    std::string summary_error;
+
+    StreamCallbacks cbs;
+    cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
+        summary += delta;
+    };
+    cbs.on_finish = [&](FinishReason /*reason*/, TokenUsage tok,
+                        std::vector<ToolCall> /*calls*/) {
+        sum_usage = tok;
+    };
+    cbs.on_error = [&](const std::string& error) {
+        summary_failed = true;
+        summary_error = error;
+    };
+
+    provider.stream(req, cbs);
+
+    // If the user interrupted mid-summary, abort without persisting.
+    if (interrupt_flag && interrupt_flag->load()) return false;
+
+    // If summarization failed, don't compact — better to fail open and let the
+    // next step's request proceed (the provider will reject it if truly over
+    // the limit, surfacing a StepFailed the user can act on).
+    if (summary_failed || summary.empty()) {
+        fprintf(stderr, "[engine] compaction skipped: summary %s (error=%s)\n",
+                summary.empty() ? "was empty" : "failed",
+                summary_error.c_str());
+        return false;
+    }
+
+    // Persist: role=user with a clear prefix so both providers treat it as a
+    // plain user turn and it's identifiable in scrollback.
+    nlohmann::json data;
+    data["role"] = "user";
+    data["text"] = std::string("[Conversation summary]\n") + summary;
+    store_.compact_messages(session_id, tail_start_seq, data.dump());
+
+    {
+        nlohmann::json ev;
+        ev["session_id"]      = session_id;
+        ev["summary_tokens"]  = sum_usage.output;
+        ev["messages_before"] = messages.size();
+        ev["messages_after"]  = (messages.size() - messages_before) + 1;
+        bus_.publish(events::EventType::CompactionEnded, ev);
+    }
+
+    return true;
+}
+
 void SessionEngine::seed_todos(const std::string& session_id,
                                const std::vector<Todo>& todos)
 {
@@ -978,6 +1161,46 @@ void SessionEngine::seed_todos(const std::string& session_id,
         ev["todos"].push_back(item);
     }
     bus_.publish(events::EventType::TodoUpdated, ev);
+}
+
+void SessionEngine::compact_now(const std::string& session_id) {
+    // Refuse if the agentic loop is running — compacting mid-turn would race
+    // on the DB and corrupt the in-flight request.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (session_running_.count(session_id) && session_running_[session_id]) {
+            nlohmann::json ev;
+            ev["session_id"] = session_id;
+            ev["error"] = "Cannot compact while the session is running.";
+            bus_.publish(events::EventType::CompactionEnded, ev);
+            return;
+        }
+    }
+
+    auto session_opt = store_.get(session_id);
+    if (!session_opt) return;
+    auto session = *session_opt;
+    auto model_json = nlohmann::json::parse(session.model_json, nullptr, false);
+    std::string model_id = model_json.value("id", config_.model);
+    std::string provider_id = model_json.value("provider_id", "anthropic");
+
+    auto provider = providers_.get(provider_id);
+    if (!provider) {
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["error"] = "No provider available for: " + provider_id;
+        bus_.publish(events::EventType::CompactionEnded, ev);
+        return;
+    }
+
+    // Run on a background thread. Uses a sentinel threshold (0) — compact_history
+    // only uses the threshold for the CompactionStarted payload, not the decision.
+    std::thread([this, session_id, provider, model_id, provider_id]() {
+        compact_history(session_id, *provider, model_id, provider_id,
+                        nullptr, 0, 0);
+        std::lock_guard<std::mutex> g(mu_);
+        // Nothing persistent to clean; session_providers_ is managed by agentic_loop.
+    }).detach();
 }
 
 static std::string to_active_form(const std::string& content) {

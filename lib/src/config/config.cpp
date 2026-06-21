@@ -182,6 +182,18 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 cfg.default_mode = dm;
         }
 
+        // Auto-compaction tuning.
+        if (j.contains("auto_compact") && j["auto_compact"].is_boolean())
+            cfg.auto_compact = j["auto_compact"].get<bool>();
+        if (j.contains("auto_compact_threshold") && j["auto_compact_threshold"].is_number()) {
+            double t = j["auto_compact_threshold"].get<double>();
+            if (t > 0.0 && t < 1.0) cfg.auto_compact_threshold = t;
+        }
+        if (j.contains("auto_compact_reserve") && j["auto_compact_reserve"].is_number_integer()) {
+            int r = j["auto_compact_reserve"].get<int>();
+            if (r > 0) cfg.auto_compact_reserve = r;
+        }
+
         // web_search tool config: {"web_search": {"engine": "mojeek", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
@@ -229,6 +241,12 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.build_command = overlay.build_command;
     if (!overlay.default_mode.empty())
         result.default_mode = overlay.default_mode;
+    if (!overlay.auto_compact)
+        result.auto_compact = false;
+    if (overlay.auto_compact_threshold != 0.80)
+        result.auto_compact_threshold = overlay.auto_compact_threshold;
+    if (overlay.auto_compact_reserve != 8192)
+        result.auto_compact_reserve = overlay.auto_compact_reserve;
     return result;
 }
 

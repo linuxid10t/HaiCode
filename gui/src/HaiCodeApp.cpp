@@ -407,6 +407,16 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             if (msg->FindInt32("web_search_max_results", &ws_max) == B_OK && ws_max > 0)
                 config_.web_search_max_results = ws_max;
 
+            // Context-window override for a model (from the Settings General tab).
+            int32 context_window = 0;
+            const char* context_model = nullptr;
+            if (msg->FindInt32("context_window", &context_window) == B_OK
+                && context_window > 0
+                && msg->FindString("context_model", &context_model) == B_OK
+                && context_model && *context_model) {
+                config_.model_contexts[context_model] = context_window;
+            }
+
             // Persist the full providers map, preserving other top-level keys.
             BPath settings_path;
             if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
@@ -432,6 +442,12 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     {"engine", config_.web_search_engine},
                     {"max_results", config_.web_search_max_results},
                 };
+                if (!config_.model_contexts.empty()) {
+                    nlohmann::json models_j = nlohmann::json::object();
+                    for (auto& [mid, win] : config_.model_contexts)
+                        models_j[mid] = win;
+                    j["models"] = models_j;
+                }
                 nlohmann::json providers_j = nlohmann::json::object();
                 for (auto& [id, p] : config_.providers) {
                     providers_j[id] = {
@@ -472,6 +488,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
             main_window_->SetEngine(*engine_);
             main_window_->RebuildProviderMenu(config_.providers);
+            main_window_->PostMessage(new BMessage(MSG_SETTINGS_SAVED));
 
             // Re-fetch models for the currently selected provider.
             std::string refresh_id = config_.provider;

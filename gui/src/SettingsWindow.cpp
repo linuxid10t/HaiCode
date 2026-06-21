@@ -21,6 +21,8 @@
 #include <cstdlib>
 #include <nlohmann/json.hpp>
 
+#include <haicode/model_info.h>
+
 // ---------------------------------------------------------------------------
 // ProviderEditWindow
 // ---------------------------------------------------------------------------
@@ -145,6 +147,7 @@ ProviderEditWindow::_Done()
 
 static const uint32 MSG_SAVE   = 'SAVs';
 static const uint32 MSG_CANCEL = 'CANs';
+static const uint32 MSG_MODEL_CHANGED = 'MODc';  // model dropdown selection changed
 
 SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
                                BMessenger target)
@@ -225,6 +228,31 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     }
     model_field_ = new BMenuField("model_field", "Default model:", model_menu_);
 
+    // Context-window override for the selected model. Pre-filled from
+    // config_.model_contexts (exact match on config_.model); updated when the
+    // model dropdown selection changes. Empty means "use built-in default".
+    context_field_ = new BTextControl("ctx", "Context size (tokens):",
+                                      "", nullptr);
+    context_field_->SetDivider(label_w);
+    {
+        std::string model_for_ctx = config_.model;
+        auto mcit = config_.model_contexts.find(model_for_ctx);
+        if (mcit != config_.model_contexts.end() && mcit->second > 0) {
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d", mcit->second);
+            context_field_->SetText(buf);
+        } else {
+            int builtin = haicode::get_context_window(config_.provider,
+                                                      model_for_ctx,
+                                                      config_.model_contexts);
+            if (builtin > 0) {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "%d", builtin);
+                context_field_->SetText(buf);
+            }
+        }
+    }
+
     bool mode_is_plan = (config_.default_mode != "build");
     mode_plan_radio_  = new BRadioButton("mode_plan",  "Plan mode (default)", nullptr);
     mode_build_radio_ = new BRadioButton("mode_build", "Build mode", nullptr);
@@ -235,6 +263,10 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         .SetInsets(B_USE_DEFAULT_SPACING)
         .Add(provider_field_)
         .Add(model_field_)
+        .Add(context_field_)
+        .Add(new BStringView("ctx_hint",
+            "(context window in tokens; sets/overrides the limit for this model)"
+            "\nLeave blank to use the built-in default for known models."))
         .Add(new BSeparatorView(B_HORIZONTAL))
         .Add(new BStringView("mode_label", "New-session start mode:"))
         .AddGroup(B_VERTICAL)
@@ -411,6 +443,10 @@ SettingsWindow::MessageReceived(BMessage* msg)
         case MSG_SAVE:
             _Save();
             break;
+        case MSG_MODEL_CHANGED:
+            // Model dropdown selection changed — sync the context field.
+            _RefreshContextField();
+            break;
         case MSG_SET_PROVIDER: {
             // Provider dropdown changed — refetch the model list.
             while (model_menu_->CountItems() > 0)
@@ -429,7 +465,8 @@ SettingsWindow::MessageReceived(BMessage* msg)
                 delete model_menu_->RemoveItem((int32)0);
             const char* m = nullptr;
             for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i)
-                model_menu_->AddItem(new BMenuItem(m, nullptr));
+                model_menu_->AddItem(
+                    new BMenuItem(m, new BMessage(MSG_MODEL_CHANGED)));
             BMenuItem* to_mark = nullptr;
             if (model_menu_->CountItems() > 0) {
                 if (auto* existing = model_menu_->FindItem(preserved.c_str()))
@@ -447,6 +484,7 @@ SettingsWindow::MessageReceived(BMessage* msg)
             }
             if (to_mark) to_mark->SetMarked(true);
             model_menu_->SetLabelFromMarked(true);
+            _RefreshContextField();
             break;
         }
         case MSG_CANCEL:
@@ -507,6 +545,15 @@ SettingsWindow::_Save()
     }
     saved.AddInt32("web_search_max_results", ws_max);
 
+    // Context-window override for the selected model.
+    if (context_field_ && context_field_->Text() && *context_field_->Text()) {
+        long ctx = std::atol(context_field_->Text());
+        if (ctx > 0 && !model_sel.empty()) {
+            saved.AddInt32("context_window", static_cast<int32>(ctx));
+            saved.AddString("context_model", model_sel.c_str());
+        }
+    }
+
     target_.SendMessage(&saved);
     Quit();
 }
@@ -517,6 +564,29 @@ SettingsWindow::_MarkedProviderId() const
     if (auto* marked = provider_menu_->FindMarked())
         return marked->Label();
     return "";
+}
+
+void
+SettingsWindow::_RefreshContextField()
+{
+    if (!context_field_) return;
+    std::string model;
+    if (auto* marked = model_menu_->FindMarked()) {
+        std::string label = marked->Label();
+        // Skip placeholder labels like "(loading…)" / "(none available)".
+        if (!label.empty() && label[0] != '(') model = label;
+    }
+
+    auto mcit = config_.model_contexts.find(model);
+    if (mcit != config_.model_contexts.end() && mcit->second > 0) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d", mcit->second);
+        context_field_->SetText(buf);
+        return;
+    }
+    int builtin = haicode::get_context_window(_MarkedProviderId(), model,
+                                              config_.model_contexts);
+    context_field_->SetText(builtin > 0 ? std::to_string(builtin).c_str() : "");
 }
 
 void

@@ -47,3 +47,6 @@ target_link_libraries(test_config_permission haicode)
 
 add_executable(test_step_budget tests/test_step_budget.cpp)
 target_link_libraries(test_step_budget haicode)
+
+add_executable(test_compaction tests/test_compaction.cpp)
+target_link_libraries(test_compaction haicode)

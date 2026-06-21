@@ -86,6 +86,8 @@ private:
     void _HandlePlanDecision(BMessage* msg);
     void _HandleTodosUpdated(BMessage* msg);
     void _HandleBuildHookResult(BMessage* msg);
+    void _HandleCompaction(BMessage* msg);
+    void _HandleCompactNow();
     void _RefreshTodosFromEngine();
 
     void _ToggleMode();
@@ -121,6 +123,7 @@ private:
     BButton*       new_session_btn_ = nullptr;
     BButton*       dir_btn_         = nullptr;
     BButton*       mode_btn_        = nullptr;
+    BButton*       compact_btn_     = nullptr;
     BCheckBox*     auto_edits_chk_  = nullptr;
     BCheckBox*     yolo_chk_        = nullptr;
     BFilePanel*    dir_panel_       = nullptr;
@@ -150,7 +153,8 @@ private:
 
     // Engine state mirror for UI
     bool           engine_running_        = false;
-    std::string    streaming_state_ = "idle";  // idle|thinking|streaming|tool
+    bool           compacting_            = false;
+    std::string    streaming_state_ = "idle";  // idle|thinking|streaming|tool|compacting
     std::string    current_tool_name_;
 
     // Per-prompt / per-session token accounting

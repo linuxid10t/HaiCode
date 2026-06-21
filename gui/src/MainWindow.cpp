@@ -210,10 +210,20 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // ---- Status strip (engine state, token counts, context size) ----
     status_strip_ = new BStringView("status_strip", "[BUILD] \xe2\x9c\x93 idle");
-    status_strip_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     BFont status_font(*be_plain_font);
     status_font.SetSize(11.0f);
     status_strip_->SetFont(&status_font);
+
+    // Compact button — sits immediately right of the status text on the left.
+    compact_btn_ = new BButton("compact", "Compact",
+                               new BMessage(MSG_COMPACT_NOW));
+
+    BGroupView* status_row = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(status_row)
+        .Add(status_strip_)
+        .Add(compact_btn_)
+        .AddGlue()
+    .End();
 
     // ---- Layout ----
     // Toolbar group
@@ -325,7 +335,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                 .Add(side_panel, 0.20f)
                 .AddGroup(B_VERTICAL, B_USE_SMALL_SPACING, 0.60f)
                     .Add(toolbar_group)
-                    .Add(status_strip_)
+                    .Add(status_row)
                     .Add(transcript_label)
                     .Add(chat_view_->ScrollContainer())
                     .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
@@ -419,6 +429,9 @@ MainWindow::MessageReceived(BMessage* msg)
             if (!active_session_id_.empty())
                 engine_->interrupt(active_session_id_);
             interrupt_btn_->SetEnabled(false);
+            break;
+        case MSG_COMPACT_NOW:
+            _HandleCompactNow();
             break;
         case MSG_NEW_SESSION:
             _NewSession();
@@ -520,6 +533,9 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_BUILD_HOOK:
             _HandleBuildHookResult(msg);
             break;
+        case MSG_COMPACTION:
+            _HandleCompaction(msg);
+            break;
         case MSG_PLAN_DECISION:
             _HandlePlanDecision(msg);
             break;
@@ -528,6 +544,10 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_APPLY_INFERENCE:
             _ApplyInference();
+            break;
+        case MSG_SETTINGS_SAVED:
+            // Engine was recreated with new config — refresh the context meter.
+            _UpdateMaxContext();
             break;
         case MSG_SHOW_SETTINGS:
             be_app->PostMessage(msg);
@@ -994,11 +1014,9 @@ MainWindow::_LoadHistory(const std::string& session_id)
 void
 MainWindow::_RestoreSessionTotals(const std::string& session_id)
 {
-    // Repopulate token/cost/context fields from the persisted SessionInfo so
-    // the status strip reflects reality immediately on session create/switch,
-    // before the next live StepEnded arrives. Cumulative input is the best
-    // available estimate of current context size; a live StepEnded with
-    // in_tok > 0 will overwrite current_context_tokens_ with a fresher value.
+    // Repopulate token/cost fields from the persisted SessionInfo so the status
+    // strip reflects reality immediately on session create/switch, before the
+    // next live StepEnded arrives.
     last_prompt_input_  = 0;
     last_prompt_output_ = 0;
     auto si = store_.get(session_id);
@@ -1006,13 +1024,17 @@ MainWindow::_RestoreSessionTotals(const std::string& session_id)
         session_input_total_      = si->tokens.input;
         session_output_total_     = si->tokens.output;
         session_cost_             = si->cost;
-        current_context_tokens_   = si->tokens.input;
     } else {
         session_input_total_      = 0;
         session_output_total_     = 0;
         session_cost_             = 0.0;
-        current_context_tokens_   = 0;
     }
+    // current_context_tokens_ is the live per-request size, NOT the cumulative
+    // session total. On load we have no accurate provider-reported value, and a
+    // byte-based estimate of raw data_json is unreliable (no truncation, JSON
+    // envelope overhead). Leave it 0 so the meter shows "context: — / max"
+    // until the first real StepEnded reports the exact value.
+    current_context_tokens_ = 0;
 }
 
 void
@@ -1308,6 +1330,37 @@ MainWindow::_HandleBuildHookResult(BMessage* msg)
 }
 
 void
+MainWindow::_HandleCompaction(BMessage* msg)
+{
+    const char* phase = nullptr;
+    if (msg->FindString("phase", &phase) != B_OK) return;
+    std::string ph = phase ? phase : "";
+
+    if (ph == "start") {
+        compacting_ = true;
+        streaming_state_ = "compacting";
+    } else if (ph == "end") {
+        compacting_ = false;
+        streaming_state_ = engine_running_ ? "thinking" : "idle";
+        int32 before = 0, after = 0;
+        msg->FindInt32("messages_before", &before);
+        msg->FindInt32("messages_after",  &after);
+        char buf[80];
+        snprintf(buf, sizeof(buf), "Context compacted (%ld\xe2\x86\x92%ld messages).",
+                 (long)before, (long)after);
+        chat_view_->AppendSystem(buf);
+    }
+    _UpdateStatusStrip();
+}
+
+void
+MainWindow::_HandleCompactNow()
+{
+    if (!engine_ || active_session_id_.empty()) return;
+    engine_->compact_now(active_session_id_);
+}
+
+void
 MainWindow::_RefreshTodosFromEngine()
 {
     if (!engine_ || active_session_id_.empty() || !todos_list_) return;
@@ -1547,7 +1600,10 @@ MainWindow::_UpdateStatusStrip()
 
     // State glyph + label
     std::string glyph, label;
-    if (!engine_running_) {
+    if (compacting_) {
+        glyph = "\xe2\x9c\x8e";  // LOWER RIGHT PENCIL
+        label = "compacting context\xe2\x80\xa6";
+    } else if (!engine_running_) {
         glyph = "\xe2\x9c\x93";  // CHECK MARK
         label = "idle";
     } else if (streaming_state_ == "streaming") {
@@ -1591,6 +1647,10 @@ MainWindow::_UpdateStatusStrip()
     }
 
     status_strip_->SetText(s.c_str());
+
+    if (compact_btn_)
+        compact_btn_->SetEnabled(!compacting_ && !engine_running_
+                                 && !active_session_id_.empty());
 }
 
 void

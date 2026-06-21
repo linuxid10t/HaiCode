@@ -190,6 +190,28 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    // CompactionStarted/CompactionEnded → MSG_COMPACTION
+    bus_.subscribe(EventType::CompactionStarted, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_COMPACTION);
+        msg.AddString("phase", "start");
+        msg.AddInt32("prev_input_tokens", data.value("prev_input_tokens", 0));
+        msg.AddInt32("threshold", data.value("threshold", 0));
+        main_window_.SendMessage(&msg);
+    });
+    bus_.subscribe(EventType::CompactionEnded, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_COMPACTION);
+        msg.AddString("phase", "end");
+        msg.AddInt32("messages_before", data.value("messages_before", 0));
+        msg.AddInt32("messages_after",  data.value("messages_after",  0));
+        main_window_.SendMessage(&msg);
+    });
+
     // Interrupted → MSG_INTERRUPTED (engine confirms the runner thread stopped)
     bus_.subscribe(EventType::Interrupted, [this](const json& data) {
         std::string sid = data.value("session_id", "");

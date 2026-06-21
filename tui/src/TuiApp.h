@@ -56,6 +56,7 @@ enum class EngineEventKind {
     PlanProposed,
     TodoUpdated,
     BuildHookResult,
+    Compaction,
     Interrupted
 };
 
@@ -191,6 +192,7 @@ private:
     // --- Status ---
     bool engine_running_ = false;
     bool thinking_       = false;  // true between submit and first text delta
+    bool compacting_     = false;  // true while summarizing the context head
     int  total_tokens_   = 0;
     int  last_prompt_input_  = 0;
     int  last_prompt_output_ = 0;

@@ -241,6 +241,23 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    bus_.subscribe(events::EventType::CompactionStarted, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::Compaction;
+        ev.session_id = j.value("session_id", "");
+        ev.str1       = "start";
+        push_engine_event(std::move(ev));
+    });
+    bus_.subscribe(events::EventType::CompactionEnded, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::Compaction;
+        ev.session_id = j.value("session_id", "");
+        ev.str1       = "end";
+        ev.int1       = j.value("messages_before", 0);
+        ev.int2       = j.value("messages_after",  0);
+        push_engine_event(std::move(ev));
+    });
+
     bus_.subscribe(events::EventType::Interrupted, [this](const json& j) {
         EngineEvent ev;
         ev.kind       = EngineEventKind::Interrupted;
@@ -377,6 +394,19 @@ void TuiApp::process_engine_events() {
             }
             break;
 
+        case EngineEventKind::Compaction:
+            if (ev.str1 == "start") {
+                compacting_ = true;
+            } else {
+                compacting_ = false;
+                char buf[80];
+                snprintf(buf, sizeof(buf),
+                         "Context compacted (%d\xe2\x86\x92%d messages).",
+                         ev.int1, ev.int2);
+                append_line({ LineType::System, buf });
+            }
+            break;
+
         case EngineEventKind::Interrupted:
             engine_running_ = false;
             thinking_ = false;
@@ -423,6 +453,7 @@ void TuiApp::select_session(int idx) {
     session_output_total_  = sessions_[idx].tokens.output;
     session_cost_          = sessions_[idx].cost;
     current_context_tokens_ = 0;
+    compacting_ = false;
     current_todos_  = engine_.get_todos(active_session_id_);
     todos_scroll_   = 0;
 
@@ -1182,7 +1213,10 @@ void TuiApp::render_input() {
     mvwaddstr(win_input_, 1, 2, visible.c_str());
 
     // Running indicator on the right of the input line
-    if (engine_running_) {
+    if (compacting_) {
+        std::string indicator = "[compacting context\xe2\x80\xa6]";
+        mvwaddstr(win_input_, 1, w - (int)indicator.size() - 1, indicator.c_str());
+    } else if (engine_running_) {
         std::string indicator;
         if (thinking_)        indicator = "[* thinking] \xe2\x80\xa2 ^C stop";
         else if (streaming_)  indicator = "[~ streaming] \xe2\x80\xa2 ^C stop";

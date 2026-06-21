@@ -21,7 +21,10 @@ public:
                      const std::vector<ToolDefinition>& tools,
                      const std::string& model_id,
                      const std::string& provider_id);
-private:
+
+    // Assemble stored SessionMessages into the provider-facing message list.
+    // Public so SessionEngine::compact_history can build the head slice for a
+    // summarization call without going through the full build() path.
     std::vector<nlohmann::json> assemble_messages(const std::vector<SessionMessage>& msgs);
 };
 
@@ -75,10 +78,27 @@ public:
     void seed_todos(const std::string& session_id,
                     const std::vector<Todo>& todos);
 
+    // Manually trigger compaction on a session, regardless of token count.
+    // Runs compact_history on a background thread. No-op if the agentic loop
+    // is already running for the session (to avoid DB contention).
+    void compact_now(const std::string& session_id);
+
     const AppConfig& config() const { return config_; }
 
 private:
     void agentic_loop(const std::string& session_id);
+
+    // Summarize the conversation head (everything before the last user turn)
+    // into a single compaction_summary row, replacing the head in the DB.
+    // Returns true if compaction occurred (caller must reload messages).
+    // Honors the interrupt flag: aborts and returns false if set mid-summary.
+    bool compact_history(const std::string& session_id,
+                         Provider& provider,
+                         const std::string& model_id,
+                         const std::string& provider_id,
+                         std::atomic<bool>* interrupt_flag,
+                         int prev_input_tokens,
+                         int threshold_tokens);
 
     SessionStore& store_;
     ProviderRegistry& providers_;

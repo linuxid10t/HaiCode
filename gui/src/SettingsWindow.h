@@ -54,6 +54,7 @@ private:
     void _Save();
     void _FetchModelsForMarkedProvider();
     std::string _MarkedProviderId() const;
+    void _RefreshContextField();   // sync context field to marked model's window
 
     // Working copy of the full config; config_.providers is mutated by
     // add/edit/remove, and the scalar fields are read from the General/Tools
@@ -69,6 +70,7 @@ private:
     BMenuField*  provider_field_   = nullptr;
     BPopUpMenu*  model_menu_       = nullptr;
     BMenuField*  model_field_      = nullptr;
+    BTextControl* context_field_   = nullptr;
     BRadioButton* mode_plan_radio_   = nullptr;
     BRadioButton* mode_build_radio_  = nullptr;
 

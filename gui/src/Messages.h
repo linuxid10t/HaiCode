@@ -14,10 +14,12 @@ static const uint32 MSG_PLAN_PROPOSED  = 'PLpr';   // plan_str + path_str
 static const uint32 MSG_TODOS_UPDATED  = 'TDup';   // repeated "todo_content"/"todo_active"/"todo_status" strings
 static const uint32 MSG_BUILD_HOOK     = 'BHrs';   // "success" bool, "exit_code" int32
 static const uint32 MSG_INTERRUPTED    = 'INtd';   // engine → UI: interrupt completed
+static const uint32 MSG_COMPACTION     = 'CMpt';   // "phase" string ("start"/"end"), counts
 
 // UI → Engine / UI internal
 static const uint32 MSG_SUBMIT_PROMPT  = 'PMpt';
 static const uint32 MSG_INTERRUPT      = 'INTr';
+static const uint32 MSG_COMPACT_NOW    = 'CMnw';  // Compact button pressed
 static const uint32 MSG_NEW_SESSION    = 'NSes';
 static const uint32 MSG_SELECT_SESSION = 'SLss';
 static const uint32 MSG_PERMISSION_REP = 'PRrp';  // reply from PermissionWindow

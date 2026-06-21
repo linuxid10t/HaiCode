@@ -493,6 +493,58 @@ std::vector<SessionMessage> SessionStore::load_messages(const std::string& sessi
     return results;
 }
 
+void SessionStore::compact_messages(const std::string& session_id,
+                                     int keep_from_seq,
+                                     const std::string& summary_data_json) {
+    if (keep_from_seq <= 1) return;  // nothing before the tail to compact
+
+    sqlite3_exec(db_.handle(), "BEGIN;", nullptr, nullptr, nullptr);
+
+    // Delete the head: every message with seq < keep_from_seq.
+    {
+        const char* del =
+            "DELETE FROM session_message WHERE session_id=? AND seq<?";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_.handle(), del, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, keep_from_seq);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    // Insert the summary at seq 0 — now free since all deleted rows had
+    // seq >= 1. This keeps it ordered before the intact tail.
+    {
+        int64_t now = util::now_ms();
+        std::string id = util::make_id("msg");
+        const char* ins =
+            "INSERT INTO session_message (id, session_id, type, seq, data_json,"
+            " time_created, time_updated) VALUES (?,?,?,?,?,?,?)";
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db_.handle(), ins, -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 3, "compaction_summary", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 4, 0);
+        sqlite3_bind_text(stmt, 5, summary_data_json.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 6, now);
+        sqlite3_bind_int64(stmt, 7, now);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+    }
+
+    sqlite3_exec(db_.handle(), "COMMIT;", nullptr, nullptr, nullptr);
+
+    int64_t now = util::now_ms();
+    const char* upd = "UPDATE session SET time_updated=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), upd, -1, &stmt, nullptr);
+    sqlite3_bind_int64(stmt, 1, now);
+    sqlite3_bind_text(stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 void SessionStore::replace_todos(const std::string& session_id,
                                  const std::vector<Todo>& todos) {
     // Atomic whole-list replace: DELETE then INSERT each row inside one
