@@ -1316,6 +1316,10 @@ MainWindow::_ToggleMode()
                 ? haicode::SessionMode::Build
                 : haicode::SessionMode::Plan;
     engine_->set_mode(active_session_id_, next);
+    engine_->inject_message(active_session_id_,
+        next == haicode::SessionMode::Plan
+            ? haicode::kSwitchedToPlanMessage
+            : haicode::kSwitchedToBuildMessage);
     _RefreshModeButton();
     _UpdateStatusStrip();
 }

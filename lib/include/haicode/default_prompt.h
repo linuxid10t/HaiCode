@@ -196,4 +196,20 @@ constexpr const char* kPlanApprovedMessage = R"HPCODE(
 The plan has been approved. You are now in Build mode. Begin implementing the plan. If tasks were seeded from the plan's ## Tasks section, call `todo_write` first to confirm them, then work through each task marking it in_progress/completed as you go.
 )HPCODE";
 
+// Injected as a user_prompted message when the user manually toggles into
+// Plan mode mid-conversation. Without this, the model sees only a silent
+// system-prompt change and often keeps acting like it's still in Build mode
+// because prior conversation history is full of Build-mode tool calls.
+constexpr const char* kSwitchedToPlanMessage = R"HPCODE(
+Switching to Plan mode. Stop any in-progress edits. From here on, research and propose a plan instead of modifying files — bash, write, edit, and external_terminal are no longer available. When ready, call propose_plan.
+)HPCODE";
+
+// Injected when the user manually toggles back into Build mode (not via
+// plan approval — that path uses kPlanApprovedMessage). Mirrors the Plan
+// notice so the model has an explicit signal in the chat history rather
+// than relying on the system-prompt change alone.
+constexpr const char* kSwitchedToBuildMessage = R"HPCODE(
+Switching to Build mode. You may now use bash, write, edit, and external_terminal again. Resume normal implementation work.
+)HPCODE";
+
 }  // namespace haicode

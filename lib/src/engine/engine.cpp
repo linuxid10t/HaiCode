@@ -550,6 +550,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             }
         }
 
+        // Re-read mode each step. The user can toggle Plan/Build mid-loop
+        // (GUI _ToggleMode / TUI toggle_mode call set_mode, which updates the
+        // in-memory cache + DB synchronously); the tool allowlist and the
+        // plan-mode system block below must reflect the flip on the next step,
+        // not on the next turn.
+        mode = get_mode(session_id);
+        plan_mode_block = (mode == SessionMode::Plan) ? kPlanModeInstructions
+                                                       : std::string{};
+
         // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
         // stay current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,

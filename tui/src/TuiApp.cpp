@@ -680,8 +680,10 @@ void TuiApp::handle_key(int key) {
         case 'Y':
         case '\n':
         case KEY_ENTER:
-            if (!active_session_id_.empty())
+            if (!active_session_id_.empty()) {
                 engine_.set_mode(active_session_id_, SessionMode::Build);
+                engine_.inject_message(active_session_id_, kSwitchedToBuildMessage);
+            }
             confirm_build_visible_ = false;
             break;
         case 'n':
@@ -1329,6 +1331,7 @@ void TuiApp::toggle_mode() {
         confirm_build_visible_ = true;
     } else {
         engine_.set_mode(active_session_id_, SessionMode::Plan);
+        engine_.inject_message(active_session_id_, kSwitchedToPlanMessage);
     }
 }
 
