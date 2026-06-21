@@ -10,6 +10,10 @@
 
 class BListView;
 class BStringView;
+class BTextControl;
+class BRadioButton;
+class BMenuField;
+class BPopUpMenu;
 
 // Modal-ish editor for a single provider entry. Owned by SettingsWindow;
 // posts MSG_PROVIDER_DIALOG_DONE back to the parent with the edited fields.
@@ -35,8 +39,9 @@ private:
 
 class SettingsWindow : public BWindow {
 public:
-    // providers is the current map (id → config) to seed the list.
-    SettingsWindow(const std::map<std::string, haicode::ProviderConfig>& providers,
+    // config is the full current AppConfig; its providers seed the Providers
+    // tab and its scalars seed the General/Tools tabs.
+    SettingsWindow(const haicode::AppConfig& config,
                    BMessenger target);
 
     void MessageReceived(BMessage* msg) override;
@@ -47,11 +52,32 @@ private:
     void _OpenEditor(const std::string& editing_id);
     void _ApplyDialogResult(BMessage* msg);
     void _Save();
+    void _FetchModelsForMarkedProvider();
+    std::string _MarkedProviderId() const;
 
-    // Working copy of the providers map, mutated by add/edit/remove.
-    std::map<std::string, haicode::ProviderConfig> providers_;
+    // Working copy of the full config; config_.providers is mutated by
+    // add/edit/remove, and the scalar fields are read from the General/Tools
+    // tab controls at save time.
+    haicode::AppConfig config_;
 
+    // Providers tab
     BListView*   list_       = nullptr;
     BStringView* empty_hint_ = nullptr;
+
+    // General tab
+    BPopUpMenu*  provider_menu_    = nullptr;
+    BMenuField*  provider_field_   = nullptr;
+    BPopUpMenu*  model_menu_       = nullptr;
+    BMenuField*  model_field_      = nullptr;
+    BRadioButton* mode_plan_radio_   = nullptr;
+    BRadioButton* mode_build_radio_  = nullptr;
+
+    // Tools tab
+    BTextControl* build_cmd_field_   = nullptr;
+    BRadioButton* ws_mojeek_radio_   = nullptr;
+    BRadioButton* ws_ddglite_radio_  = nullptr;
+    BRadioButton* ws_ddghtml_radio_  = nullptr;
+    BTextControl* ws_max_field_      = nullptr;
+
     BMessenger   target_;
 };

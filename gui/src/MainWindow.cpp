@@ -534,6 +534,22 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_AUTO_ALLOW_EDITS:
         case MSG_YOLO:
+            // Persist both toggle states to the active session's model_json so
+            // they survive session switches and app restart. The toggled value
+            // comes from the message; the other is read from its checkbox.
+            if (!active_session_id_.empty()) {
+                int32 ae = (auto_edits_chk_ ? auto_edits_chk_->Value()
+                                            : B_CONTROL_OFF);
+                int32 yo = (yolo_chk_ ? yolo_chk_->Value() : B_CONTROL_OFF);
+                if (msg->what == MSG_AUTO_ALLOW_EDITS)
+                    msg->FindInt32("be:value", &ae);
+                else
+                    msg->FindInt32("be:value", &yo);
+                store_.update_permission_flags(
+                    active_session_id_,
+                    ae == B_CONTROL_ON,
+                    yo == B_CONTROL_ON);
+            }
             be_app->PostMessage(msg);
             break;
         case MSG_FETCH_MODELS: {
@@ -788,6 +804,8 @@ MainWindow::_SelectSession(int idx)
     be_app->PostMessage(&notify);
 
     // Sync toolbar to session's stored provider/model/directory
+    bool restore_auto_edits = false;
+    bool restore_yolo = false;
     auto si = store_.get(active_session_id_);
     if (si) {
         // Restore working directory
@@ -802,6 +820,8 @@ MainWindow::_SelectSession(int idx)
             auto mj = nlohmann::json::parse(si->model_json);
             provider_id = mj.value("provider_id", "");
             model_id    = mj.value("id", "");
+            restore_auto_edits = mj.value("auto_edits", false);
+            restore_yolo       = mj.value("yolo", false);
         } catch (...) {}
 
         if (!provider_id.empty())
@@ -845,6 +865,25 @@ MainWindow::_SelectSession(int idx)
     _RestoreInference();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
+
+    // Restore permission checkboxes from the session's model_json. SetValue()
+    // changes the visual state but does NOT invoke the message, so post the
+    // restored values to be_app so it updates auto_edits_on_/yolo_on_ and
+    // reapplies rules — mirrors the pattern in _NewSession.
+    if (auto_edits_chk_) auto_edits_chk_->SetValue(
+        restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
+    if (yolo_chk_)       yolo_chk_->SetValue(
+        restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
+    {
+        BMessage m(MSG_AUTO_ALLOW_EDITS);
+        m.AddInt32("be:value", restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
+        be_app->PostMessage(&m);
+    }
+    {
+        BMessage m(MSG_YOLO);
+        m.AddInt32("be:value", restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
+        be_app->PostMessage(&m);
+    }
 }
 
 void

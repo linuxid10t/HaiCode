@@ -39,8 +39,6 @@ struct AppConfig {
     std::string model;
     std::string provider;
     std::string agent;
-    std::optional<std::string> shell;
-    bool autoupdate = false;
     std::map<std::string, ProviderConfig> providers;
     std::map<std::string, MCPServerConfig> mcp;
     std::map<std::string, AgentConfig> agents;
@@ -68,6 +66,9 @@ struct AppConfig {
     // model sees the build error immediately. Configured via "build_command" in
     // project .haicode/config.json (e.g. "make -C build -j4 2>&1").
     std::string build_command;
+    // Initial mode for newly created sessions: "plan" or "build".
+    // Defaults to "plan" so new sessions start in Plan mode unless overridden.
+    std::string default_mode = "plan";
 };
 
 class ConfigLoader {

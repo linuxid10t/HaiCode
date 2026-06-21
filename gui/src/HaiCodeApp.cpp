@@ -317,17 +317,27 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             msg->FindString("provider_id", &pid);
             std::string provider_id = pid ? pid : "anthropic";
 
+            // Reply to whoever sent the request: a caller may attach a
+            // "reply" BMessenger (e.g. SettingsWindow's model dropdown) so the
+            // results don't get routed to MainWindow. Fall back to MainWindow
+            // when no reply target is present or it's invalid.
+            BMessenger reply_to(main_window_);
+            BMessenger explicit_reply;
+            if (msg->FindMessenger("reply", &explicit_reply) == B_OK
+                    && explicit_reply.IsValid())
+                reply_to = explicit_reply;
+
             // Capture shared_ptr so the provider stays alive through the thread
             auto provider = providers_->get(provider_id);
             if (!provider) {
                 // No key configured — send empty list so dropdown shows "(none available)"
                 BMessage reply(MSG_MODELS_LOADED);
                 reply.AddString("provider_id", provider_id.c_str());
-                main_window_->PostMessage(&reply);
+                reply_to.SendMessage(&reply);
                 break;
             }
 
-            BMessenger win_msgr(main_window_);
+            BMessenger win_msgr(reply_to);
             std::thread([provider, provider_id, win_msgr]() {
                 std::string err;
                 auto models = provider->list_models(err);
@@ -341,7 +351,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_SHOW_SETTINGS: {
-            SettingsWindow* win = new SettingsWindow(config_.providers, BMessenger(this));
+            SettingsWindow* win = new SettingsWindow(config_, BMessenger(this));
             win->Show();
             break;
         }
@@ -368,6 +378,35 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 }
             } catch (...) {}
 
+            // Apply scalar settings from the settings window.
+            const char* model = nullptr;
+            const char* provider = nullptr;
+            const char* default_mode = nullptr;
+            const char* build_command = nullptr;
+            const char* ws_engine = nullptr;
+            int32 ws_max = 0;
+            if (msg->FindString("model", &model) == B_OK && model)
+                config_.model = model;
+            if (msg->FindString("provider", &provider) == B_OK && provider)
+                config_.provider = provider;
+            if (msg->FindString("default_mode", &default_mode) == B_OK
+                && default_mode && (*default_mode == '\0'
+                    || *default_mode == 'p' || *default_mode == 'b')) {
+                // Accept "plan"/"build"; treat empty as "leave as-is".
+                if (*default_mode)
+                    config_.default_mode = default_mode;
+            }
+            if (msg->FindString("build_command", &build_command) == B_OK)
+                config_.build_command = build_command ? build_command : "";
+            if (msg->FindString("web_search_engine", &ws_engine) == B_OK && ws_engine
+                && (std::string(ws_engine) == "mojeek"
+                    || std::string(ws_engine) == "ddg_lite"
+                    || std::string(ws_engine) == "ddg_html")) {
+                config_.web_search_engine = ws_engine;
+            }
+            if (msg->FindInt32("web_search_max_results", &ws_max) == B_OK && ws_max > 0)
+                config_.web_search_max_results = ws_max;
+
             // Persist the full providers map, preserving other top-level keys.
             BPath settings_path;
             if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
@@ -383,6 +422,16 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 }
                 if (!config_.provider.empty()) j["provider"] = config_.provider;
                 if (!config_.model.empty())    j["model"]    = config_.model;
+                if (!config_.default_mode.empty())
+                    j["default_mode"] = config_.default_mode;
+                if (!config_.build_command.empty())
+                    j["build_command"] = config_.build_command;
+                else
+                    j.erase("build_command");
+                j["web_search"] = {
+                    {"engine", config_.web_search_engine},
+                    {"max_results", config_.web_search_max_results},
+                };
                 nlohmann::json providers_j = nlohmann::json::object();
                 for (auto& [id, p] : config_.providers) {
                     providers_j[id] = {

@@ -3,17 +3,22 @@
 
 #include <Application.h>
 #include <Button.h>
+#include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
+#include <MenuField.h>
 #include <MenuItem.h>
+#include <PopUpMenu.h>
 #include <RadioButton.h>
 #include <ScrollView.h>
 #include <SeparatorView.h>
 #include <StringItem.h>
 #include <StringView.h>
+#include <TabView.h>
 #include <TextControl.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <nlohmann/json.hpp>
 
 // ---------------------------------------------------------------------------
@@ -141,15 +146,16 @@ ProviderEditWindow::_Done()
 static const uint32 MSG_SAVE   = 'SAVs';
 static const uint32 MSG_CANCEL = 'CANs';
 
-SettingsWindow::SettingsWindow(const std::map<std::string, haicode::ProviderConfig>& providers,
+SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
                                BMessenger target)
-    : BWindow(BRect(0, 0, 520, 360),
+    : BWindow(BRect(0, 0, 560, 400),
               "Preferences",
               B_TITLED_WINDOW,
-              B_NOT_RESIZABLE | B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
-    , providers_(providers)
+              B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
+    , config_(config)
     , target_(target)
 {
+    // ---- Providers tab ----
     list_ = new BListView("providers_list", B_SINGLE_SELECTION_LIST);
     list_->SetSelectionMessage(new BMessage(MSG_LIST_SEL));
     list_->SetExplicitMinSize(BSize(480, 140));
@@ -166,13 +172,9 @@ SettingsWindow::SettingsWindow(const std::map<std::string, haicode::ProviderConf
     edit_btn->SetEnabled(false);
     remove_btn->SetEnabled(false);
 
-    auto* save_btn   = new BButton("save",   "Save",   new BMessage(MSG_SAVE));
-    auto* cancel_btn = new BButton("cancel", "Cancel", new BMessage(MSG_CANCEL));
-    save_btn->MakeDefault(true);
-
-    BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
-        .SetInsets(B_USE_WINDOW_INSETS)
-        .Add(new BStringView("title", "Providers"))
+    auto* providers_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
+    BLayoutBuilder::Group<>(providers_tab)
+        .SetInsets(B_USE_DEFAULT_SPACING)
         .Add(scroll)
         .Add(empty_hint_)
         .AddGroup(B_HORIZONTAL)
@@ -180,7 +182,121 @@ SettingsWindow::SettingsWindow(const std::map<std::string, haicode::ProviderConf
             .Add(edit_btn)
             .Add(remove_btn)
             .AddGlue()
+        .End();
+
+    // ---- General tab ----
+    float label_w = 120.0f;
+
+    // Default provider dropdown — one item per configured provider.
+    provider_menu_ = new BPopUpMenu("provider");
+    provider_menu_->SetRadioMode(true);
+    provider_menu_->SetLabelFromMarked(true);
+    bool found_provider = false;
+    for (auto& [id, p] : config_.providers) {
+        auto* msg = new BMessage(MSG_SET_PROVIDER);
+        msg->AddString("provider_id", id.c_str());
+        auto* item = new BMenuItem(id.c_str(), msg);
+        provider_menu_->AddItem(item);
+        if (id == config_.provider) {
+            item->SetMarked(true);
+            found_provider = true;
+        }
+    }
+    if (!found_provider && provider_menu_->CountItems() > 0)
+        provider_menu_->ItemAt(0)->SetMarked(true);
+    if (provider_menu_->CountItems() == 0) {
+        auto* item = new BMenuItem("(none configured)", nullptr);
+        item->SetEnabled(false);
+        item->SetMarked(true);
+        provider_menu_->AddItem(item);
+    }
+    provider_field_ = new BMenuField("provider_field", "Default provider:",
+                                     provider_menu_);
+
+    // Default model dropdown — populated after a fetch (per selected provider).
+    model_menu_ = new BPopUpMenu("model");
+    model_menu_->SetRadioMode(true);
+    model_menu_->SetLabelFromMarked(true);
+    {
+        auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
+        loading->SetEnabled(false);
+        loading->SetMarked(true);
+        model_menu_->AddItem(loading);
+    }
+    model_field_ = new BMenuField("model_field", "Default model:", model_menu_);
+
+    bool mode_is_plan = (config_.default_mode != "build");
+    mode_plan_radio_  = new BRadioButton("mode_plan",  "Plan mode (default)", nullptr);
+    mode_build_radio_ = new BRadioButton("mode_build", "Build mode", nullptr);
+    (mode_is_plan ? mode_plan_radio_ : mode_build_radio_)->SetValue(B_CONTROL_ON);
+
+    auto* general_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
+    BLayoutBuilder::Group<>(general_tab)
+        .SetInsets(B_USE_DEFAULT_SPACING)
+        .Add(provider_field_)
+        .Add(model_field_)
+        .Add(new BSeparatorView(B_HORIZONTAL))
+        .Add(new BStringView("mode_label", "New-session start mode:"))
+        .AddGroup(B_VERTICAL)
+            .Add(mode_plan_radio_)
+            .Add(mode_build_radio_)
         .End()
+        .AddGlue();
+
+    // ---- Tools tab ----
+    build_cmd_field_ = new BTextControl("build_command", "Build command:",
+                                        config_.build_command.c_str(), nullptr);
+    build_cmd_field_->SetDivider(label_w);
+
+    bool ws_mojeek  = (config_.web_search_engine != "ddg_lite"
+                       && config_.web_search_engine != "ddg_html");
+    bool ws_ddglite = (config_.web_search_engine == "ddg_lite");
+    ws_mojeek_radio_  = new BRadioButton("ws_mojeek",  "Mojeek",  nullptr);
+    ws_ddglite_radio_ = new BRadioButton("ws_ddglite", "DuckDuckGo Lite", nullptr);
+    ws_ddghtml_radio_ = new BRadioButton("ws_ddghtml", "DuckDuckGo HTML", nullptr);
+    ws_mojeek_radio_->SetValue(ws_mojeek  ? B_CONTROL_ON : B_CONTROL_OFF);
+    ws_ddglite_radio_->SetValue(ws_ddglite ? B_CONTROL_ON : B_CONTROL_OFF);
+    ws_ddghtml_radio_->SetValue(config_.web_search_engine == "ddg_html"
+                                ? B_CONTROL_ON : B_CONTROL_OFF);
+
+    char maxbuf[16];
+    snprintf(maxbuf, sizeof(maxbuf), "%d", config_.web_search_max_results);
+    ws_max_field_ = new BTextControl("ws_max", "Max results:",
+                                     maxbuf, nullptr);
+    ws_max_field_->SetDivider(label_w);
+
+    auto* tools_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
+    BLayoutBuilder::Group<>(tools_tab)
+        .SetInsets(B_USE_DEFAULT_SPACING)
+        .Add(build_cmd_field_)
+        .Add(new BStringView("bc_hint",
+            "(run after each successful write/edit; non-zero exit shows errors to the model)"))
+        .Add(new BSeparatorView(B_HORIZONTAL))
+        .Add(new BStringView("ws_label", "Web search engine:"))
+        .AddGroup(B_VERTICAL)
+            .Add(ws_mojeek_radio_)
+            .Add(ws_ddglite_radio_)
+            .Add(ws_ddghtml_radio_)
+        .End()
+        .Add(ws_max_field_)
+        .AddGlue();
+
+    // ---- Tabs ----
+    auto* tab_view = new BTabView("prefs_tabs", B_WIDTH_FROM_WIDEST);
+    tab_view->AddTab(providers_tab, new BTab());
+    tab_view->AddTab(general_tab,   new BTab());
+    tab_view->AddTab(tools_tab,     new BTab());
+    tab_view->TabAt(0)->SetLabel("Providers");
+    tab_view->TabAt(1)->SetLabel("General");
+    tab_view->TabAt(2)->SetLabel("Tools");
+
+    auto* save_btn   = new BButton("save",   "Save",   new BMessage(MSG_SAVE));
+    auto* cancel_btn = new BButton("cancel", "Cancel", new BMessage(MSG_CANCEL));
+    save_btn->MakeDefault(true);
+
+    BLayoutBuilder::Group<>(this, B_VERTICAL, B_USE_DEFAULT_SPACING)
+        .SetInsets(B_USE_WINDOW_INSETS)
+        .Add(tab_view)
         .Add(new BSeparatorView(B_HORIZONTAL))
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
@@ -191,6 +307,10 @@ SettingsWindow::SettingsWindow(const std::map<std::string, haicode::ProviderConf
 
     CenterOnScreen();
     _RepopulateList();
+
+    // Kick off an initial model-list fetch for the currently-marked provider
+    // so the Default model dropdown is populated on open.
+    _FetchModelsForMarkedProvider();
 }
 
 std::string
@@ -207,10 +327,10 @@ void
 SettingsWindow::_RepopulateList()
 {
     list_->MakeEmpty();
-    for (auto& [id, p] : providers_) {
+    for (auto& [id, p] : config_.providers) {
         list_->AddItem(new BStringItem(_SummaryFor(p).c_str()));
     }
-    bool empty = providers_.empty();
+    bool empty = config_.providers.empty();
     if (empty) empty_hint_->Show(); else empty_hint_->Hide();
     if (auto* edit = dynamic_cast<BButton*>(FindView("edit")))
         edit->SetEnabled(false);
@@ -223,8 +343,8 @@ SettingsWindow::_OpenEditor(const std::string& editing_id)
 {
     std::string type, key, url;
     if (!editing_id.empty()) {
-        auto it = providers_.find(editing_id);
-        if (it == providers_.end()) return;
+        auto it = config_.providers.find(editing_id);
+        if (it == config_.providers.end()) return;
         type = it->second.type;
         key  = it->second.api_key;
         url  = it->second.base_url;
@@ -252,12 +372,12 @@ SettingsWindow::_ApplyDialogResult(BMessage* msg)
     // (The edit dialog already posts the real key when the field is left blank;
     // this guards against any caller that forgets to.)
     std::string incoming_key = key_s ? key_s : "";
-    auto existing = providers_.find(p.id);
-    if (incoming_key.empty() && existing != providers_.end())
+    auto existing = config_.providers.find(p.id);
+    if (incoming_key.empty() && existing != config_.providers.end())
         p.api_key = existing->second.api_key;
     else
         p.api_key = incoming_key;
-    providers_[p.id] = std::move(p);
+    config_.providers[p.id] = std::move(p);
     _RepopulateList();
 }
 
@@ -271,7 +391,7 @@ SettingsWindow::MessageReceived(BMessage* msg)
         case MSG_PROVIDER_EDIT: {
             int32 sel = list_->CurrentSelection();
             if (sel < 0) break;
-            auto it = providers_.begin();
+            auto it = config_.providers.begin();
             std::advance(it, sel);
             _OpenEditor(it->first);
             break;
@@ -279,9 +399,9 @@ SettingsWindow::MessageReceived(BMessage* msg)
         case MSG_PROVIDER_REMOVE: {
             int32 sel = list_->CurrentSelection();
             if (sel < 0) break;
-            auto it = providers_.begin();
+            auto it = config_.providers.begin();
             std::advance(it, sel);
-            providers_.erase(it);
+            config_.providers.erase(it);
             _RepopulateList();
             break;
         }
@@ -291,6 +411,44 @@ SettingsWindow::MessageReceived(BMessage* msg)
         case MSG_SAVE:
             _Save();
             break;
+        case MSG_SET_PROVIDER: {
+            // Provider dropdown changed — refetch the model list.
+            while (model_menu_->CountItems() > 0)
+                delete model_menu_->RemoveItem((int32)0);
+            auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
+            loading->SetEnabled(false);
+            loading->SetMarked(true);
+            model_menu_->AddItem(loading);
+            _FetchModelsForMarkedProvider();
+            break;
+        }
+        case MSG_MODELS_LOADED: {
+            // Repopulate model dropdown from the fetched list.
+            std::string preserved = config_.model;
+            while (model_menu_->CountItems() > 0)
+                delete model_menu_->RemoveItem((int32)0);
+            const char* m = nullptr;
+            for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i)
+                model_menu_->AddItem(new BMenuItem(m, nullptr));
+            BMenuItem* to_mark = nullptr;
+            if (model_menu_->CountItems() > 0) {
+                if (auto* existing = model_menu_->FindItem(preserved.c_str()))
+                    to_mark = existing;
+                else
+                    to_mark = model_menu_->ItemAt(0);
+            } else {
+                std::string label = "(none available)";
+                const char* err = nullptr;
+                if (msg->FindString("error", &err) == B_OK && err && *err)
+                    label = std::string("(fetch failed: ") + err + ")";
+                to_mark = new BMenuItem(label.c_str(), nullptr);
+                to_mark->SetEnabled(false);
+                model_menu_->AddItem(to_mark);
+            }
+            if (to_mark) to_mark->SetMarked(true);
+            model_menu_->SetLabelFromMarked(true);
+            break;
+        }
         case MSG_CANCEL:
             Quit();
             break;
@@ -312,9 +470,9 @@ SettingsWindow::MessageReceived(BMessage* msg)
 void
 SettingsWindow::_Save()
 {
-    // Serialize providers_ as a JSON object { "id": {type,key,url}, ... }.
+    // Serialize providers as a JSON object { "id": {type,key,url}, ... }.
     nlohmann::json j;
-    for (auto& [id, p] : providers_) {
+    for (auto& [id, p] : config_.providers) {
         j[id] = {
             {"type",     p.type},
             {"api_key",  p.api_key},
@@ -323,6 +481,52 @@ SettingsWindow::_Save()
     }
     BMessage saved(MSG_SETTINGS_SAVED);
     saved.AddString("providers", j.dump().c_str());
+
+    // Scalars from the General/Tools tabs.
+    std::string provider_sel, model_sel;
+    if (auto* m = provider_menu_->FindMarked()) provider_sel = m->Label();
+    if (auto* m = model_menu_->FindMarked())    model_sel   = m->Label();
+    saved.AddString("model", model_sel.c_str());
+    saved.AddString("provider", provider_sel.c_str());
+    const char* mode = "plan";
+    if (mode_build_radio_ && mode_build_radio_->Value() == B_CONTROL_ON)
+        mode = "build";
+    saved.AddString("default_mode", mode);
+    saved.AddString("build_command",
+                    build_cmd_field_ ? build_cmd_field_->Text() : "");
+    const char* ws_engine = "mojeek";
+    if (ws_ddglite_radio_ && ws_ddglite_radio_->Value() == B_CONTROL_ON)
+        ws_engine = "ddg_lite";
+    else if (ws_ddghtml_radio_ && ws_ddghtml_radio_->Value() == B_CONTROL_ON)
+        ws_engine = "ddg_html";
+    saved.AddString("web_search_engine", ws_engine);
+    int32 ws_max = 5;
+    if (ws_max_field_ && ws_max_field_->Text()) {
+        long n = std::atol(ws_max_field_->Text());
+        if (n > 0) ws_max = static_cast<int32>(n);
+    }
+    saved.AddInt32("web_search_max_results", ws_max);
+
     target_.SendMessage(&saved);
     Quit();
+}
+
+std::string
+SettingsWindow::_MarkedProviderId() const
+{
+    if (auto* marked = provider_menu_->FindMarked())
+        return marked->Label();
+    return "";
+}
+
+void
+SettingsWindow::_FetchModelsForMarkedProvider()
+{
+    std::string pid = _MarkedProviderId();
+    if (pid.empty()) return;
+    BMessage fetch(MSG_FETCH_MODELS);
+    fetch.AddString("provider_id", pid.c_str());
+    // Route the reply back to this window instead of MainWindow.
+    fetch.AddMessenger("reply", BMessenger(this));
+    be_app->PostMessage(&fetch);
 }

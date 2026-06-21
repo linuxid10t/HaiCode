@@ -24,14 +24,12 @@ static void write_file(const std::string& path, const std::string& content) {
 
 static bool cfg_basic_fields() {
     const std::string p = "/tmp/tfc_basic.json";
-    write_file(p, R"({"model":"claude-opus-4","provider":"anthropic","agent":"code","shell":"/bin/bash"})");
+    write_file(p, R"({"model":"claude-opus-4","provider":"anthropic","agent":"code"})");
     haicode::ConfigLoader loader;
     auto cfg = loader.load_file(p);
     CHECK(cfg.model    == "claude-opus-4",  "model mismatch");
     CHECK(cfg.provider == "anthropic",      "provider mismatch");
     CHECK(cfg.agent    == "code",           "agent mismatch");
-    CHECK(cfg.shell.has_value(),            "shell should be set");
-    CHECK(*cfg.shell   == "/bin/bash",      "shell mismatch");
     std::remove(p.c_str());
     std::cout << "[OK] load_file basic fields\n";
     return true;

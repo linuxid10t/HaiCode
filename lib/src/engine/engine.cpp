@@ -253,6 +253,7 @@ std::string SessionEngine::create_session(const std::string& project_dir,
     nlohmann::json model_json;
     model_json["id"]          = eff_model;
     model_json["provider_id"] = eff_provider;
+    model_json["mode"]        = config_.default_mode;
 
     auto session = store_.create(project_dir, eff_agent, model_json.dump());
     return session.id;
@@ -394,11 +395,11 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
     if (auto si = store_.get(session_id)) {
         try {
             auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
-            return mj.value("mode", "build") == "plan"
+            return mj.value("mode", config_.default_mode) == "plan"
                 ? SessionMode::Plan : SessionMode::Build;
         } catch (...) {}
     }
-    return SessionMode::Build;
+    return (config_.default_mode == "plan") ? SessionMode::Plan : SessionMode::Build;
 }
 
 void SessionEngine::agentic_loop(const std::string& session_id) {
@@ -420,7 +421,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         if (it != session_modes_.end()) {
             mode = it->second;
         } else {
-            std::string mode_str = model_json.value("mode", "build");
+            std::string mode_str = model_json.value("mode", config_.default_mode);
             mode = (mode_str == "plan") ? SessionMode::Plan : SessionMode::Build;
             session_modes_[session_id] = mode;
         }

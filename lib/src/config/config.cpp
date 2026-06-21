@@ -94,8 +94,6 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             cfg.provider = j["provider"].get<std::string>();
         if (j.contains("agent") && j["agent"].is_string())
             cfg.agent = j["agent"].get<std::string>();
-        if (j.contains("shell") && j["shell"].is_string())
-            cfg.shell = j["shell"].get<std::string>();
 
         if (j.contains("providers") && j["providers"].is_object()) {
             for (auto& [k, v] : j["providers"].items()) {
@@ -176,6 +174,14 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
         if (j.contains("build_command") && j["build_command"].is_string())
             cfg.build_command = j["build_command"].get<std::string>();
 
+        // Default session mode: "plan" or "build". Unrecognized values are
+        // ignored so the struct default ("build") stands.
+        if (j.contains("default_mode") && j["default_mode"].is_string()) {
+            std::string dm = j["default_mode"].get<std::string>();
+            if (dm == "plan" || dm == "build")
+                cfg.default_mode = dm;
+        }
+
         // web_search tool config: {"web_search": {"engine": "mojeek", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
@@ -196,7 +202,6 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
     if (!overlay.model.empty()) result.model = overlay.model;
     if (!overlay.provider.empty()) result.provider = overlay.provider;
     if (!overlay.agent.empty()) result.agent = overlay.agent;
-    if (overlay.shell) result.shell = overlay.shell;
     for (auto& [k, v] : overlay.providers)
         result.providers[k] = v;
     for (auto& [id, ov] : overlay.agents) {
@@ -222,6 +227,8 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.web_search_max_results = overlay.web_search_max_results;
     if (!overlay.build_command.empty())
         result.build_command = overlay.build_command;
+    if (!overlay.default_mode.empty())
+        result.default_mode = overlay.default_mode;
     return result;
 }
 
