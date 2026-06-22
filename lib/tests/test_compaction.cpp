@@ -154,9 +154,12 @@ static bool test_summary_emitted_as_assistant_role() {
           "summary must assemble as assistant, got " + out[0].value("role","<missing>"));
     CHECK(out[1].value("role", "") == "user",
           "user_prompted must follow as user, got " + out[1].value("role","<missing>"));
-    // Lead-in is present so the model knows what it's reading.
+    // Lead-in is present so the model knows what it's reading, and is flagged
+    // as a system-injected compaction (not normal assistant speech).
     std::string c0 = out[0].value("content", "");
-    CHECK(c0.find("summary of the prior conversation") != std::string::npos,
+    CHECK(c0.find("compacted earlier turns") != std::string::npos,
+          "summary content should carry the compaction flag");
+    CHECK(c0.find("Summary of the prior conversation") != std::string::npos,
           "summary content should carry the lead-in");
     CHECK(c0.find("prior summary content") != std::string::npos,
           "summary content should retain the stored text");

@@ -5,6 +5,7 @@
 #include <haicode/model_info.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
+#include <thread>
 #include <condition_variable>
 #include <sys/utsname.h>
 #include <cstdio>
@@ -97,6 +98,33 @@ std::string render_dynamic_prompt(const std::string& model,
                 "new exploratory reads.";
     }
     return base;
+}
+
+// Render the current todo list as a short markdown block, appended to the
+// dynamic system text in Build mode. Returns "" when the list is empty so
+// callers can blindly concatenate. Capped at 20 items.
+static std::string render_todos_block(const std::vector<Todo>& todos) {
+    if (todos.empty()) return {};
+    std::string out = "\n\n# Active todos\n\n";
+    const size_t cap = 20;
+    size_t shown = 0;
+    for (const auto& t : todos) {
+        if (shown >= cap) break;
+        const std::string& s = t.status;
+        const char* marker = (s == "completed")   ? "[x]"
+                           : (s == "in_progress") ? "[in_progress]"
+                                                  : "[ ]";
+        out += "- ";
+        out += marker;
+        out += ' ';
+        out += t.content;
+        out += '\n';
+        ++shown;
+    }
+    if (todos.size() > cap) {
+        out += "- …and " + std::to_string(todos.size() - cap) + " more\n";
+    }
+    return out;
 }
 
 // Rough token estimate: ~4 characters per token (the common BPE average for
@@ -231,7 +259,12 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 // rejects with "conversation roles must alternate".
                 nlohmann::json m;
                 m["role"] = "assistant";
-                m["content"] = std::string("Here is a summary of the prior conversation:\n")
+                m["content"] = std::string(
+                        "[compacted earlier turns — the context window was approaching "
+                        "its limit, so the system summarized everything before this point. "
+                        "Treat the following as the canonical record of what happened "
+                        "earlier; the raw messages are no longer in context.]\n\n"
+                        "Summary of the prior conversation:\n")
                              + data.value("text", "");
                 result.push_back(m);
                 // Single-turn fallback (Fix 2) can put the summary right
@@ -266,8 +299,10 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 // model can see every tool it called within this agentic run.
                 if (i < last_user_prompt_idx
                         && output.size() > MAX_OLD_TOOL_RESULT) {
+                    size_t dropped = output.size() - MAX_OLD_TOOL_RESULT;
                     output.resize(MAX_OLD_TOOL_RESULT);
-                    output += "\n[truncated]";
+                    output += "\n[truncated: " + std::to_string(dropped)
+                            + " more bytes]";
                 }
                 content["content"] = output;
                 m["content"] = nlohmann::json::array({content});
@@ -663,6 +698,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                 session.directory,
                                                 max_steps - step);
 
+        // Re-inject the current todo list (Build mode only) so the model
+        // stays anchored to outstanding work without having to remember it
+        // from the plan. Lives in the dynamic block to preserve the stable
+        // body's prefix cache.
+        if (mode == SessionMode::Build) {
+            auto todos_now = store_.load_todos(session_id);
+            system_dynamic += render_todos_block(todos_now);
+        }
+
         auto messages = store_.load_messages(session_id);
 
         ContextBuilder builder;
@@ -762,6 +806,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         FinishReason finish_reason = FinishReason::EndTurn;
         TokenUsage usage;
         bool step_failed = false;
+        std::string step_error;
 
         StreamCallbacks cbs;
         cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
@@ -801,15 +846,55 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         };
         cbs.on_error = [&](const std::string& error) {
             step_failed = true;
-            nlohmann::json ev;
-            ev["session_id"] = session_id;
-            ev["error"] = error;
-            bus_.publish(events::EventType::StepFailed, ev);
+            step_error = error;
         };
 
         provider->stream(req, cbs);
 
-        if (step_failed) break;
+        // One retry on transient errors (provider overload, gateway timeout,
+        // dropped connection), but only when nothing has streamed yet — if the
+        // UI has already received text deltas, retrying would emit them again.
+        auto is_transient_err = [](const std::string& err) {
+            std::string lo = err;
+            std::transform(lo.begin(), lo.end(), lo.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            static const char* hits[] = {
+                "overloaded", "timeout", "timed out", "connection",
+                "internal server", "service unavailable", "bad gateway",
+                "gateway timeout", "temporarily unavailable",
+            };
+            for (const char* h : hits) {
+                if (lo.find(h) != std::string::npos) return true;
+            }
+            return false;
+        };
+        if (step_failed && is_transient_err(step_error)
+                && full_text.empty() && full_reasoning.empty()
+                && tool_calls.empty()
+                && !(interrupt_flag && interrupt_flag->load())) {
+            fprintf(stderr, "[engine] transient provider error: %s — retrying once\n",
+                    step_error.c_str());
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            step_failed = false;
+            step_error.clear();
+            // Surface the retry in the UI so the user sees fresh activity.
+            {
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["assistant_message_id"] = assistant_msg_id;
+                ev["model_id"] = model_id;
+                bus_.publish(events::EventType::StepStarted, ev);
+            }
+            provider->stream(req, cbs);
+        }
+
+        if (step_failed) {
+            nlohmann::json ev;
+            ev["session_id"] = session_id;
+            ev["error"] = step_error;
+            bus_.publish(events::EventType::StepFailed, ev);
+            break;
+        }
 
         if (!full_reasoning.empty()) {
             nlohmann::json ev;
@@ -823,9 +908,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // next iteration would send the model its own phantom empty tool_use
         // block, which is what causes the "stumble on empty toolcall" loop.
         bool had_parse_failure = false;
+        std::vector<std::string> failed_names;
         for (auto it = tool_calls.begin(); it != tool_calls.end(); ) {
             if (it->parse_failed) {
                 had_parse_failure = true;
+                failed_names.push_back(it->name);
                 fprintf(stderr,
                     "[engine] dropping malformed tool_call %s (%s); raw=%zu bytes: %.200s\n",
                     it->id.c_str(), it->name.c_str(),
@@ -843,6 +930,25 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             } else {
                 ++it;
             }
+        }
+
+        // If any tool calls were dropped, embed a synthetic note into the
+        // assistant turn so the model sees on its next iteration that the calls
+        // failed and need to be retried. Encoded as assistant text (not a
+        // separate user message) to keep role alternation clean and avoid
+        // forging a fake user turn in the chat history.
+        if (had_parse_failure) {
+            std::string names_str;
+            for (size_t k = 0; k < failed_names.size(); ++k) {
+                if (k) names_str += ", ";
+                names_str += failed_names[k];
+            }
+            std::string note = "\n\n[SYSTEM NOTE: tool call input JSON failed to "
+                               "parse during streaming (calls: " + names_str +
+                               "). Those calls were dropped. Retry them on the "
+                               "next turn.]";
+            if (full_text.empty()) full_text = note;
+            else full_text += note;
         }
 
         // Persist assistant turn (text and/or valid tool calls only).
