@@ -58,7 +58,8 @@ enum class EngineEventKind {
     BuildHookResult,
     Compaction,
     Interrupted,
-    AskUserRequested
+    AskUserRequested,
+    SessionRenamed
 };
 
 struct EngineEvent {

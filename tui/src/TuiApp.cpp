@@ -278,6 +278,17 @@ void TuiApp::subscribe_events() {
         push_engine_event(std::move(ev));
     });
 
+    // SessionRenamed — reload the session list so the sidebar reflects the new
+    // title. The heuristic fires in submit_prompt before any StepEnded, so
+    // without this the sidebar would lag until the first step completes.
+    bus_.subscribe(events::EventType::SessionRenamed, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::SessionRenamed;
+        ev.session_id = j.value("session_id", "");
+        ev.str1       = j.value("title", "");
+        push_engine_event(std::move(ev));
+    });
+
     // Note: PermissionRequested events are delivered directly from main.cpp's
     // PermissionGate ask-callback via push_engine_event() (not via the bus),
     // because the callback has a direct pointer to TuiApp and because using
@@ -375,6 +386,10 @@ void TuiApp::process_engine_events() {
             break;
 
         case EngineEventKind::SessionsChanged:
+            sessions_ = store_.list();
+            break;
+
+        case EngineEventKind::SessionRenamed:
             sessions_ = store_.list();
             break;
 

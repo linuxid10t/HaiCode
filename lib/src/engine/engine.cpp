@@ -127,6 +127,48 @@ static std::string render_todos_block(const std::vector<Todo>& todos) {
     return out;
 }
 
+// Derive a short, human-readable session title from the first user message.
+// Takes the first non-empty line, collapses internal whitespace to single
+// spaces, strips leading/trailing whitespace, and truncates to ~60 characters
+// at a word boundary (appending an ellipsis when it truncates).
+static std::string derive_heuristic_title(const std::string& text) {
+    // Take the first non-empty line.
+    std::string line;
+    std::istringstream ss(text);
+    std::string raw;
+    while (std::getline(ss, raw)) {
+        // Trim whitespace.
+        size_t b = raw.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) continue;
+        size_t e = raw.find_last_not_of(" \t\r\n");
+        line = raw.substr(b, e - b + 1);
+        break;
+    }
+    if (line.empty()) return {};
+
+    // Collapse runs of whitespace into single spaces.
+    std::string collapsed;
+    collapsed.reserve(line.size());
+    bool in_ws = false;
+    for (char c : line) {
+        if (c == ' ' || c == '\t') {
+            if (!in_ws && !collapsed.empty()) collapsed.push_back(' ');
+            in_ws = true;
+        } else {
+            collapsed.push_back(c);
+            in_ws = false;
+        }
+    }
+
+    constexpr size_t kMax = 60;
+    if (collapsed.size() <= kMax) return collapsed;
+
+    // Truncate at the last word boundary at or before kMax.
+    size_t cut = collapsed.find_last_of(' ', kMax);
+    if (cut == std::string::npos || cut == 0) cut = kMax;
+    return collapsed.substr(0, cut) + "…";
+}
+
 // Rough token estimate: ~4 characters per token (the common BPE average for
 // English/code). Used only as a pre-flight compaction trigger before any
 // provider usage is available; once a step reports real usage, that value
@@ -383,6 +425,23 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     data["role"] = "user";
     data["text"] = text;
     store_.append_message(session_id, "user_prompted", data.dump());
+
+    // Immediate heuristic autonaming: if the session still has no title, derive
+    // one from this first user message so the sidebar is descriptive without
+    // waiting for an LLM round-trip.
+    if (config_.autoname_sessions) {
+        auto sess = store_.get(session_id);
+        if (sess && sess->title.empty()) {
+            std::string title = derive_heuristic_title(text);
+            if (!title.empty()) {
+                store_.update_title(session_id, title);
+                nlohmann::json rev;
+                rev["session_id"] = session_id;
+                rev["title"] = title;
+                bus_.publish(events::EventType::SessionRenamed, rev);
+            }
+        }
+    }
 
     // A fresh user turn rearms the compaction hysteresis so the first
     // step of this turn is allowed to compact again if needed.
@@ -1266,6 +1325,20 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         bus_.publish(events::EventType::StepFailed, ev);
     }
 
+    // First-turn LLM title refinement. Fires at most once per session: gated
+    // on exactly one user_prompted message (the initial prompt). Skipped for
+    // resumed/continued sessions and disabled sessions. Best-effort — failures
+    // leave the heuristic title in place.
+    if (config_.autoname_sessions && config_.autoname_llm_refine) {
+        int user_count = 0;
+        for (const auto& m : store_.load_messages(session_id)) {
+            if (m.type == "user_prompted") ++user_count;
+        }
+        if (user_count == 1) {
+            refine_title_llm(session_id, *provider, model_id);
+        }
+    }
+
     // Clear the active provider entry now that the loop has exited.
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -1427,6 +1500,79 @@ bool SessionEngine::compact_history(const std::string& session_id,
     }
 
     return true;
+}
+
+void SessionEngine::refine_title_llm(const std::string& session_id,
+                                      Provider& provider,
+                                      const std::string& model_id)
+{
+    // Load the first user_prompted message — the seed for the title.
+    auto messages = store_.load_messages(session_id);
+    std::string first_user;
+    for (const auto& m : messages) {
+        if (m.type != "user_prompted") continue;
+        auto j = nlohmann::json::parse(m.data_json, nullptr, false);
+        if (j.is_object()) first_user = j.value("text", "");
+        break;
+    }
+    if (first_user.empty()) return;
+
+    // Clamp very long prompts so the summarization prompt stays cheap.
+    if (first_user.size() > 2000) first_user = first_user.substr(0, 2000) + "…";
+
+    nlohmann::json user_msg;
+    user_msg["role"] = "user";
+    user_msg["content"] =
+        "Write a concise session title (at most 6 words, no quotes, no "
+        "trailing punctuation) summarizing what the user wants in this "
+        "prompt. Respond with the title and nothing else.\n\n"
+        "Prompt:\n" + first_user;
+
+    LLMRequest req;
+    req.model_id    = model_id;
+    req.system      = "You generate short descriptive titles for chat sessions.";
+    req.messages    = {std::move(user_msg)};
+    req.max_tokens  = 48;
+
+    std::string raw_title;
+    bool failed = false;
+    std::string err;
+
+    StreamCallbacks cbs;
+    cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
+        raw_title += delta;
+    };
+    cbs.on_finish = [&](FinishReason, TokenUsage, std::vector<ToolCall>) {};
+    cbs.on_error = [&](const std::string& error) {
+        failed = true;
+        err = error;
+    };
+
+    provider.stream(req, cbs);
+
+    if (failed) {
+        fprintf(stderr, "[engine] title refinement failed: %s\n", err.c_str());
+        return;
+    }
+
+    // Trim surrounding whitespace and stray quotes the model sometimes adds.
+    auto trim = [](std::string s) {
+        size_t b = s.find_first_not_of(" \t\r\n\"'");
+        if (b == std::string::npos) return std::string();
+        size_t e = s.find_last_not_of(" \t\r\n\"'");
+        return s.substr(b, e - b + 1);
+    };
+    // The model may emit a trailing newline or a second line; keep only the first.
+    size_t nl = raw_title.find('\n');
+    if (nl != std::string::npos) raw_title = raw_title.substr(0, nl);
+    std::string title = trim(raw_title);
+    if (title.empty()) return;
+
+    store_.update_title(session_id, title);
+    nlohmann::json ev;
+    ev["session_id"] = session_id;
+    ev["title"] = title;
+    bus_.publish(events::EventType::SessionRenamed, ev);
 }
 
 void SessionEngine::seed_todos(const std::string& session_id,

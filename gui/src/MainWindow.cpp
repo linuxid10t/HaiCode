@@ -537,6 +537,9 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_COMPACTION:
             _HandleCompaction(msg);
             break;
+        case MSG_SESSION_RENAMED:
+            _RefreshSessionList();
+            break;
         case MSG_PLAN_DECISION:
             _HandlePlanDecision(msg);
             break;

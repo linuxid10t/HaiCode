@@ -253,4 +253,14 @@ GuiEventRelay::attach()
         // to the PermissionGate, which calls it synchronously on the engine thread.
         // This handler is a no-op; kept for potential future use.
     });
+
+    // SessionRenamed → MSG_SESSION_RENAMED. Not gated on is_active_session:
+    // the renamed session may not be the active one but still appears in the
+    // sidebar, so the list must refresh regardless.
+    bus_.subscribe(EventType::SessionRenamed, [this](const json& data) {
+        std::string title = data.value("title", "");
+        BMessage msg(MSG_SESSION_RENAMED);
+        msg.AddString("title", title.c_str());
+        main_window_.SendMessage(&msg);
+    });
 }

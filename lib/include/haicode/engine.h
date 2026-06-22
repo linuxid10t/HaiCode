@@ -110,6 +110,14 @@ private:
                          int prev_input_tokens,
                          int threshold_tokens);
 
+    // One-shot LLM call that turns the first user prompt into a concise (≤6
+    // word) descriptive session title. Replaces the heuristic title via
+    // update_title and publishes SessionRenamed. Best-effort: any error is
+    // logged to stderr and the existing heuristic title is left in place.
+    void refine_title_llm(const std::string& session_id,
+                          Provider& provider,
+                          const std::string& model_id);
+
     SessionStore& store_;
     ProviderRegistry& providers_;
     ToolRegistry& tools_;

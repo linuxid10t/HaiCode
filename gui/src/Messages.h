@@ -15,6 +15,7 @@ static const uint32 MSG_TODOS_UPDATED  = 'TDup';   // repeated "todo_content"/"t
 static const uint32 MSG_BUILD_HOOK     = 'BHrs';   // "success" bool, "exit_code" int32
 static const uint32 MSG_INTERRUPTED    = 'INtd';   // engine → UI: interrupt completed
 static const uint32 MSG_COMPACTION     = 'CMpt';   // "phase" string ("start"/"end"), counts
+static const uint32 MSG_SESSION_RENAMED= 'SRnm';   // "title" string — refresh session list
 
 // UI → Engine / UI internal
 static const uint32 MSG_SUBMIT_PROMPT  = 'PMpt';

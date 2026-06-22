@@ -194,6 +194,12 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             if (r > 0) cfg.auto_compact_reserve = r;
         }
 
+        // Session autonaming: master toggle + LLM refine sub-flag.
+        if (j.contains("autoname_sessions") && j["autoname_sessions"].is_boolean())
+            cfg.autoname_sessions = j["autoname_sessions"].get<bool>();
+        if (j.contains("autoname_llm_refine") && j["autoname_llm_refine"].is_boolean())
+            cfg.autoname_llm_refine = j["autoname_llm_refine"].get<bool>();
+
         // web_search tool config: {"web_search": {"engine": "mojeek", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
@@ -247,6 +253,14 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.auto_compact_threshold = overlay.auto_compact_threshold;
     if (overlay.auto_compact_reserve != 8192)
         result.auto_compact_reserve = overlay.auto_compact_reserve;
+
+    // Booleans: overlay only wins if it explicitly disables (false). A missing
+    // key parses to the struct default (true), so we must not let it clobber a
+    // base value that the user set to false in a more specific config layer.
+    if (!overlay.autoname_sessions)
+        result.autoname_sessions = false;
+    if (!overlay.autoname_llm_refine)
+        result.autoname_llm_refine = false;
     return result;
 }
 

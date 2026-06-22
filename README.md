@@ -198,6 +198,32 @@ since the threshold cannot be sized safely. Set the window explicitly via the
 top-level `"models"` object (e.g. `"models": {"my-local-model": 131072}`) to
 enable compaction for models HaiCode doesn't recognize.
 
+### Session autonaming
+
+New sessions are created with an empty title and given a descriptive name
+automatically, in two stages:
+
+1. **Immediately** on the first prompt — a short title is derived from the first
+   line of the user's message (whitespace collapsed, truncated to ~60 chars at a
+   word boundary). This costs nothing and appears in the sidebar before the model
+   even responds.
+2. **After the first turn completes** — a one-shot LLM call refines the title
+   into a concise (≤6-word) description. It fires at most once per session
+   (gated on a single `user_prompted` message) and is best-effort: on any error
+   the heuristic title is kept.
+
+```json
+{
+  "autoname_sessions": true,
+  "autoname_llm_refine": true
+}
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `autoname_sessions` | `true` | Master switch. When `false`, both stages are skipped and titles stay empty. |
+| `autoname_llm_refine` | `true` | Enables the LLM refinement step only. Set `false` to keep just the heuristic title. |
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).

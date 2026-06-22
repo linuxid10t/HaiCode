@@ -38,6 +38,7 @@ enum class EventType {
     TodoUpdated,
     BuildHookResult,
     AskUserRequested,
+    SessionRenamed,
 };
 
 struct BaseEvent {
