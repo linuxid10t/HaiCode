@@ -1325,16 +1325,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         bus_.publish(events::EventType::StepFailed, ev);
     }
 
-    // First-turn LLM title refinement. Fires at most once per session: gated
-    // on exactly one user_prompted message (the initial prompt). Skipped for
-    // resumed/continued sessions and disabled sessions. Best-effort — failures
-    // leave the heuristic title in place.
+    // Periodic LLM title refinement. Fires on turn 1 (generates a fresh title)
+    // and again every 5 turns (6, 11, 16, …) so the model can reconsider the
+    // title as the conversation's focus shifts. The 1/6/11/… cadence comes
+    // from `user_count % 5 == 1`. Best-effort — failures leave the existing
+    // title in place. Skipped when autonaming or refine is disabled.
     if (config_.autoname_sessions && config_.autoname_llm_refine) {
         int user_count = 0;
         for (const auto& m : store_.load_messages(session_id)) {
             if (m.type == "user_prompted") ++user_count;
         }
-        if (user_count == 1) {
+        if (user_count >= 1 && user_count % 5 == 1) {
             refine_title_llm(session_id, *provider, model_id);
         }
     }
@@ -1506,27 +1507,50 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
                                       Provider& provider,
                                       const std::string& model_id)
 {
-    // Load the first user_prompted message — the seed for the title.
+    // Load the full message history so we can summarize the conversation's
+    // actual subject, not just the first prompt. We take the latest user
+    // prompt and a sample of recent assistant text to keep the call cheap.
     auto messages = store_.load_messages(session_id);
-    std::string first_user;
+    std::vector<std::string> user_texts;
     for (const auto& m : messages) {
         if (m.type != "user_prompted") continue;
         auto j = nlohmann::json::parse(m.data_json, nullptr, false);
-        if (j.is_object()) first_user = j.value("text", "");
-        break;
+        if (j.is_object()) user_texts.push_back(j.value("text", ""));
     }
-    if (first_user.empty()) return;
+    if (user_texts.empty()) return;
 
-    // Clamp very long prompts so the summarization prompt stays cheap.
-    if (first_user.size() > 2000) first_user = first_user.substr(0, 2000) + "…";
+    // Reconsideration: the current persisted title (may be empty on first call).
+    auto sess = store_.get(session_id);
+    std::string current_title = sess ? sess->title : "";
+
+    // Build a compact digest of the user's prompts so the model has the real
+    // subject matter. Clamp each to keep the request small.
+    auto clamp = [](std::string s) -> std::string {
+        if (s.size() > 400) s = s.substr(0, 400) + "…";
+        return s;
+    };
+    std::string digest;
+    for (size_t i = 0; i < user_texts.size(); ++i) {
+        digest += std::to_string(i + 1) + ". " + clamp(user_texts[i]) + "\n";
+    }
 
     nlohmann::json user_msg;
     user_msg["role"] = "user";
-    user_msg["content"] =
-        "Write a concise session title (at most 6 words, no quotes, no "
-        "trailing punctuation) summarizing what the user wants in this "
-        "prompt. Respond with the title and nothing else.\n\n"
-        "Prompt:\n" + first_user;
+    if (current_title.empty()) {
+        user_msg["content"] =
+            "Write a concise session title (at most 6 words, no quotes, no "
+            "trailing punctuation) summarizing what the user wants based on "
+            "these prompts. Respond with only the title.\n\n"
+            "Prompts:\n" + digest;
+    } else {
+        user_msg["content"] =
+            "The current session title is: \"" + current_title + "\"\n\n"
+            "Here are the user's prompts so far:\n" + digest +
+            "\nReconsider the title. If it still fits the conversation, "
+            "repeat it verbatim. If it no longer reflects what the session is "
+            "about, write a better concise title (at most 6 words, no quotes, "
+            "no trailing punctuation). Respond with only the title.";
+    }
 
     LLMRequest req;
     req.model_id    = model_id;
@@ -1567,6 +1591,10 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     if (nl != std::string::npos) raw_title = raw_title.substr(0, nl);
     std::string title = trim(raw_title);
     if (title.empty()) return;
+
+    // On reconsideration, skip the write if the model echoed the existing title
+    // verbatim — avoids a needless DB update and sidebar flicker.
+    if (!current_title.empty() && title == current_title) return;
 
     store_.update_title(session_id, title);
     nlohmann::json ev;

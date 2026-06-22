@@ -207,10 +207,12 @@ automatically, in two stages:
    line of the user's message (whitespace collapsed, truncated to ~60 chars at a
    word boundary). This costs nothing and appears in the sidebar before the model
    even responds.
-2. **After the first turn completes** — a one-shot LLM call refines the title
-   into a concise (≤6-word) description. It fires at most once per session
-   (gated on a single `user_prompted` message) and is best-effort: on any error
-   the heuristic title is kept.
+2. **Periodically** via a one-shot LLM call — on turn 1 and again every 5 turns
+   (6, 11, 16, …), the model reconsiders the title given the full prompt
+   history. On the first call it generates a fresh ≤6-word title; on later calls
+   it either repeats the current title verbatim (no change) or returns a revised
+   one if the session's focus has shifted. Best-effort: on any error the
+   existing title is kept.
 
 ```json
 {
@@ -222,7 +224,7 @@ automatically, in two stages:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `autoname_sessions` | `true` | Master switch. When `false`, both stages are skipped and titles stay empty. |
-| `autoname_llm_refine` | `true` | Enables the LLM refinement step only. Set `false` to keep just the heuristic title. |
+| `autoname_llm_refine` | `true` | Enables the LLM refinement step only. Set `false` to keep just the heuristic title. Refinement fires on turn 1 and every 5 turns thereafter. |
 
 ## License
 
