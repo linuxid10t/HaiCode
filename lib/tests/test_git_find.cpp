@@ -211,11 +211,29 @@ static std::string setup_find_tree() {
     return root;
 }
 
+// Initialize a small self-contained git repo for the GitTool tests so they
+// don't depend on the location of the haicode checkout.
+static std::string setup_git_repo() {
+    std::string root = "/tmp/test_git_haicode";
+    system(("rm -rf " + root).c_str());
+    system(("mkdir -p " + root).c_str());
+    std::ofstream(root + "/README.md") << "test repo\n";
+    std::ofstream(root + "/CMakeLists.txt") << "# placeholder\n";
+    // -c flags supply identity locally so the test doesn't depend on a
+    // configured global user.name/user.email.
+    std::string init_and_commit =
+        "cd " + root + " && "
+        "git init -q -b main && "
+        "git -c user.name=test -c user.email=t@t add . && "
+        "git -c user.name=test -c user.email=t@t commit -q -m 'init' >/dev/null";
+    system(init_and_commit.c_str());
+    return root;
+}
+
 int main() {
     std::cout << "=== GitTool + FindTool Tests ===\n\n";
 
-    // Use the haicode repo itself as the git test directory
-    git_repo = "/boot/home/haicode";
+    git_repo = setup_git_repo();
     find_root = setup_find_tree();
 
     bool ok = true;
@@ -240,6 +258,7 @@ int main() {
     ok &= test_find_default_path();
 
     system(("rm -rf " + find_root).c_str());
+    system(("rm -rf " + git_repo).c_str());
 
     if (ok) {
         std::cout << "\nAll GitTool + FindTool tests passed!\n";

@@ -114,6 +114,40 @@ static int estimate_request_tokens(const std::string& system,
     return static_cast<int>(chars / 4);
 }
 
+int choose_tail_start_seq(const std::vector<SessionMessage>& msgs, int K) {
+    if (msgs.empty()) return -1;
+
+    // Multi-turn case: tail starts at the most recent user_prompted, provided
+    // it is not the very first message (otherwise the head would be empty).
+    for (size_t i = msgs.size(); i-- > 0; ) {
+        if (msgs[i].type == "user_prompted") {
+            if (i > 0) return msgs[i].seq;
+            break;  // only user_prompted is at index 0 — fall through
+        }
+    }
+
+    // Single-turn fallback: keep the last K assistant_text-with-tool_calls
+    // round-trips intact and summarize everything before them.
+    int count = 0;
+    int boundary_idx = -1;
+    for (size_t i = msgs.size(); i-- > 0; ) {
+        if (msgs[i].type != "assistant_text") continue;
+        bool has_tools = false;
+        try {
+            auto d = nlohmann::json::parse(msgs[i].data_json);
+            has_tools = d.contains("tool_calls")
+                     && d["tool_calls"].is_array()
+                     && !d["tool_calls"].empty();
+        } catch (...) {}
+        if (!has_tools) continue;
+        ++count;
+        if (count >= K) { boundary_idx = static_cast<int>(i); break; }
+    }
+    // Need something before the boundary to summarize.
+    if (boundary_idx <= 0) return -1;
+    return msgs[boundary_idx].seq;
+}
+
 LLMRequest ContextBuilder::build(
     const std::vector<SessionMessage>& messages,
     const std::string& system_prompt,
@@ -189,13 +223,36 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 }
                 result.push_back(m);
             } else if (msg.type == "compaction_summary") {
-                // A prior compaction's summary. Emit it as a user-role message
-                // so the provider treats it as a plain turn and the assistant
-                // retains the context the summary captured.
+                // A prior compaction's summary. Emit it as an assistant turn
+                // (with a fixed lead-in) so the tail's first message — which
+                // by construction is a user turn — produces a legal
+                // user/assistant alternation. Emitting as `user` would put
+                // two consecutive user messages on the wire, which Anthropic
+                // rejects with "conversation roles must alternate".
                 nlohmann::json m;
-                m["role"] = "user";
-                m["content"] = data.value("text", "");
+                m["role"] = "assistant";
+                m["content"] = std::string("Here is a summary of the prior conversation:\n")
+                             + data.value("text", "");
                 result.push_back(m);
+                // Single-turn fallback (Fix 2) can put the summary right
+                // before an assistant_text turn, which would still violate
+                // alternation. Look ahead at the next *renderable* message;
+                // if it would emit as assistant, insert a stub user turn.
+                for (size_t j = i + 1; j < msgs.size(); ++j) {
+                    const auto& nx = msgs[j];
+                    if (nx.type == "assistant_text") {
+                        nlohmann::json stub;
+                        stub["role"] = "user";
+                        stub["content"] = "Continue from where the summary leaves off.";
+                        result.push_back(stub);
+                        break;
+                    }
+                    if (nx.type == "user_prompted" || nx.type == "tool_result"
+                        || nx.type == "compaction_summary") {
+                        break;  // already a user-emitting turn — no stub needed
+                    }
+                    // unknown type — keep looking
+                }
             } else if (msg.type == "tool_result") {
                 nlohmann::json m;
                 m["role"] = "user";
@@ -291,6 +348,13 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     data["role"] = "user";
     data["text"] = text;
     store_.append_message(session_id, "user_prompted", data.dump());
+
+    // A fresh user turn rearms the compaction hysteresis so the first
+    // step of this turn is allowed to compact again if needed.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        last_compaction_step_[session_id] = -1;
+    }
 
     // Publish event
     nlohmann::json ev;
@@ -642,10 +706,21 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     current_tokens = estimate_request_tokens(system, system_dynamic,
                                                              req.messages);
                 }
-                if (threshold > 0 && current_tokens >= threshold) {
+                int lcs;
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    auto it = last_compaction_step_.find(session_id);
+                    lcs = (it != last_compaction_step_.end()) ? it->second : -1;
+                }
+                if (should_compact_with_hysteresis(current_tokens, threshold,
+                                                   step, lcs)) {
                     if (compact_history(session_id, *provider, model_id,
                                         provider_id, interrupt_flag,
                                         current_tokens, threshold)) {
+                        {
+                            std::lock_guard<std::mutex> lock(mu_);
+                            last_compaction_step_[session_id] = step;
+                        }
                         // Reload + rebuild so the compacted history is sent.
                         messages = store_.load_messages(session_id);
                         req = builder.build(messages, system, system_dynamic,
@@ -1104,15 +1179,46 @@ void SessionEngine::reply_to_ask(const std::string& session_id,
     }
 }
 
-// Summarization instruction prepended to the head slice. Stored as the system
-// prompt of the summarization LLMRequest so the provider sees it as the stable
-// cached body.
-static const char* kCompactionSummaryPrompt =
+// First-pass summarization instruction. Prepended to the head slice as a user
+// turn; the model returns the summary text.
+static const char* kCompactionSummaryPromptFirst =
     "Summarize the following conversation between a user and a coding assistant. "
     "Preserve: the user's goals and key decisions, file paths and identifiers "
     "mentioned, tool outcomes that affected the solution, any unresolved problems, "
     "and the current state of any work in progress. Be concise — aim for under "
     "1500 tokens. Write only the summary prose, no preamble.";
+
+// Resegment prompt — used when the head already begins with a prior
+// compaction summary. Tells the model to keep the old summary verbatim under
+// "## Segment 1" and add a "## Segment 2" for the new messages.
+static const char* kCompactionSummaryPromptResegment =
+    "The conversation history below begins with a prior summary written during "
+    "an earlier compaction. Preserve that prior summary VERBATIM under a "
+    "`## Segment 1` heading. Then summarize the remaining new messages under a "
+    "`## Segment 2` heading, following the same preservation rules: user goals "
+    "and decisions, file paths and identifiers, tool outcomes, unresolved "
+    "problems, current state. Be concise — aim for under 1500 tokens total. "
+    "Write only the two-segment summary, no preamble.";
+
+bool should_compact_with_hysteresis(int prev_total_input,
+                                    int threshold_tokens,
+                                    int step,
+                                    int last_compaction_step) {
+    if (threshold_tokens <= 0) return false;
+    if (prev_total_input < threshold_tokens) return false;
+    // First time we've ever crossed threshold this turn — fire.
+    if (last_compaction_step < 0) return true;
+    // Already compacted recently. Enforce a 2-step minimum gap so a tail that
+    // remains above threshold doesn't trigger compaction on every single step.
+    if (step - last_compaction_step < 2) return false;
+    return true;
+}
+
+const char* select_summary_prompt(const std::vector<SessionMessage>& head) {
+    if (!head.empty() && head.front().type == "compaction_summary")
+        return kCompactionSummaryPromptResegment;
+    return kCompactionSummaryPromptFirst;
+}
 
 bool SessionEngine::compact_history(const std::string& session_id,
                                      Provider& provider,
@@ -1125,17 +1231,10 @@ bool SessionEngine::compact_history(const std::string& session_id,
     auto messages = store_.load_messages(session_id);
     if (messages.size() < 4) return false;  // too little to compact
 
-    // Partition: keep the tail from the last user_prompted onward intact.
-    // The head (everything before) is what we summarize.
-    int tail_start_seq = -1;
-    for (auto& m : messages) {
-        if (m.type == "user_prompted") tail_start_seq = m.seq;
-    }
-    // If there's no user turn at all, compact everything except the very last
-    // message (defensive — shouldn't normally happen in a live session).
-    if (tail_start_seq <= 1) {
-        tail_start_seq = messages.back().seq;
-    }
+    // Pick the boundary. Multi-turn: at the last user_prompted (if any). Else:
+    // single-turn fallback that keeps the last K round-trips intact.
+    int tail_start_seq = choose_tail_start_seq(messages);
+    if (tail_start_seq < 0) return false;
 
     std::vector<SessionMessage> head;
     int messages_before = 0;
@@ -1154,12 +1253,14 @@ bool SessionEngine::compact_history(const std::string& session_id,
     }
 
     // Build the head into provider messages and prepend the summarization
-    // instruction as the first user turn.
+    // instruction as the first user turn. Pick the resegment prompt if the
+    // head already starts with a prior summary, so the model preserves it
+    // verbatim under "## Segment 1" instead of paraphrasing it again.
     ContextBuilder builder;
     auto assembled = builder.assemble_messages(head);
     nlohmann::json instr;
     instr["role"] = "user";
-    instr["content"] = kCompactionSummaryPrompt;
+    instr["content"] = select_summary_prompt(head);
     assembled.insert(assembled.begin(), instr);
 
     LLMRequest req;
@@ -1201,11 +1302,13 @@ bool SessionEngine::compact_history(const std::string& session_id,
         return false;
     }
 
-    // Persist: role=user with a clear prefix so both providers treat it as a
-    // plain user turn and it's identifiable in scrollback.
+    // Persist: stored as raw summary text. `assemble_messages` wraps it as an
+    // assistant turn with a fixed "Here is a summary of the prior conversation:"
+    // lead-in when sending to the provider, so the on-disk text stays clean
+    // for resegmentation (Fix 4) and scrollback rendering.
     nlohmann::json data;
-    data["role"] = "user";
-    data["text"] = std::string("[Conversation summary]\n") + summary;
+    data["role"] = "assistant";
+    data["text"] = summary;
     store_.compact_messages(session_id, tail_start_seq, data.dump());
 
     {
@@ -1239,19 +1342,6 @@ void SessionEngine::seed_todos(const std::string& session_id,
 }
 
 void SessionEngine::compact_now(const std::string& session_id) {
-    // Refuse if the agentic loop is running — compacting mid-turn would race
-    // on the DB and corrupt the in-flight request.
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        if (session_running_.count(session_id) && session_running_[session_id]) {
-            nlohmann::json ev;
-            ev["session_id"] = session_id;
-            ev["error"] = "Cannot compact while the session is running.";
-            bus_.publish(events::EventType::CompactionEnded, ev);
-            return;
-        }
-    }
-
     auto session_opt = store_.get(session_id);
     if (!session_opt) return;
     auto session = *session_opt;
@@ -1268,14 +1358,36 @@ void SessionEngine::compact_now(const std::string& session_id) {
         return;
     }
 
-    // Run on a background thread. Uses a sentinel threshold (0) — compact_history
-    // only uses the threshold for the CompactionStarted payload, not the decision.
-    std::thread([this, session_id, provider, model_id, provider_id]() {
-        compact_history(session_id, *provider, model_id, provider_id,
-                        nullptr, 0, 0);
-        std::lock_guard<std::mutex> g(mu_);
-        // Nothing persistent to clean; session_providers_ is managed by agentic_loop.
-    }).detach();
+    // Acquire the same lock submit_prompt / continue_session use, and mark
+    // the session as running for the duration of the worker thread. This
+    // closes the race where compact_now used to release mu_ before spawning
+    // a detached worker, letting a subsequent submit_prompt also start the
+    // agentic_loop and trample the same SQLite rows.
+    std::lock_guard<std::mutex> lock(mu_);
+    if (session_running_.count(session_id) && session_running_[session_id]) {
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["error"] = "Cannot compact while the session is running.";
+        bus_.publish(events::EventType::CompactionEnded, ev);
+        return;
+    }
+
+    // Join any previously finished runner thread before overwriting the slot
+    // (matches the pattern in submit_prompt / continue_session).
+    auto th_it = runner_threads_.find(session_id);
+    if (th_it != runner_threads_.end() && th_it->second.joinable())
+        th_it->second.join();
+
+    session_running_[session_id] = true;
+    runner_threads_[session_id] = std::thread(
+        [this, session_id, provider, model_id, provider_id]() {
+            // Sentinel threshold of 0 — compact_history only echoes it in the
+            // CompactionStarted payload, not in the decision logic.
+            compact_history(session_id, *provider, model_id, provider_id,
+                            nullptr, 0, 0);
+            std::lock_guard<std::mutex> g(mu_);
+            session_running_[session_id] = false;
+        });
 }
 
 static std::string to_active_form(const std::string& content) {

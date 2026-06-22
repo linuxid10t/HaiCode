@@ -122,6 +122,10 @@ private:
     std::map<std::string, bool> session_running_;  // true while agentic_loop is executing
     std::map<std::string, SessionMode> session_modes_;
     std::map<std::string, std::shared_ptr<Provider>> session_providers_;
+    // Step number at which the most recent successful compaction fired, per
+    // session. Negative = "never compacted this turn". Reset to -1 in
+    // submit_prompt so each new user turn rearms the trigger. Guarded by mu_.
+    std::map<std::string, int> last_compaction_step_;
     std::mutex mu_;
 
     // Track pending ask_user questions per session. The agentic_loop blocks on
@@ -143,6 +147,32 @@ private:
 // Parse a "## Tasks" checklist from plan markdown into seed-ready Todo items.
 // Returns an empty vector if no "## Tasks" section is found.
 std::vector<Todo> parse_plan_tasks(const std::string& markdown);
+
+// Hysteresis gate for the auto-compaction trigger. Returns true if a
+// compaction should fire this step given the previous compaction step
+// (use a negative value to mean "never"). Blocks re-firing within 2 steps
+// of the previous compaction to prevent runaway recompaction in the
+// degenerate case where the post-compaction tail is itself above threshold.
+bool should_compact_with_hysteresis(int prev_total_input,
+                                    int threshold_tokens,
+                                    int step,
+                                    int last_compaction_step);
+
+// Pick the summarization system instruction to send to the model. First-pass
+// summarization uses one prompt; if the head already begins with a prior
+// compaction_summary (re-compaction), uses the resegment prompt that tells the
+// model to preserve the prior summary verbatim and add a second segment.
+const char* select_summary_prompt(const std::vector<SessionMessage>& head);
+
+// Pick the seq at which the compaction tail begins. Two modes:
+//   1. Multi-turn (preferred): tail starts at the most recent user_prompted,
+//      provided it has at least one message before it to summarize.
+//   2. Single-turn fallback: when the only user_prompted is the very first
+//      message (long agentic loop with one prompt), keep the last K
+//      assistant_text-with-tool_calls round-trips intact and return the seq
+//      of the K-th most recent such assistant.
+// Returns -1 if there is nothing worth compacting (caller treats as no-op).
+int choose_tail_start_seq(const std::vector<SessionMessage>& msgs, int K = 4);
 
 // Tiered dynamic system block: wording escalates as the step budget depletes
 // so the model reprioritizes before running out. The stable cached body is
