@@ -385,8 +385,8 @@ MainWindow::RebuildProviderMenu(const std::map<std::string, haicode::ProviderCon
         delete provider_menu_->RemoveItem((int32)0);
 
     for (auto& [id, p] : providers) {
+        (void)p;
         std::string label = id;
-        if (!p.base_url.empty()) label += "  (" + p.base_url + ")";
         auto* msg = new BMessage(MSG_FETCH_MODELS);
         msg->AddString("provider_id", id.c_str());
         auto* item = new BMenuItem(label.c_str(), msg);
