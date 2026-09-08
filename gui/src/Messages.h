@@ -40,6 +40,7 @@ static const uint32 MSG_PROVIDER_REMOVE = 'PVrm';  // remove button
 static const uint32 MSG_PROVIDER_DIALOG_DONE = 'PVdd'; // add/edit sub-dialog OK
 static const uint32 MSG_LIST_SEL        = 'PVls';  // list selection changed
 static const uint32 MSG_SET_PROVIDER    = 'PVsp';  // provider dropdown changed (carries "provider_id")
+static const uint32 MSG_WS_ENGINE_SELECTED = 'WSes'; // web-search engine menu item (carries "engine")
 
 // Model list
 static const uint32 MSG_FETCH_MODELS    = 'FTmd';  // MainWindow → be_app; "provider_id" string

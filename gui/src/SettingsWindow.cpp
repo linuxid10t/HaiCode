@@ -321,15 +321,44 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     build_cmd_field_->SetDivider(label_w);
 
     bool ws_mojeek  = (config_.web_search_engine != "ddg_lite"
-                       && config_.web_search_engine != "ddg_html");
-    bool ws_ddglite = (config_.web_search_engine == "ddg_lite");
-    ws_mojeek_radio_  = new BRadioButton("ws_mojeek",  "Mojeek",  nullptr);
-    ws_ddglite_radio_ = new BRadioButton("ws_ddglite", "DuckDuckGo Lite", nullptr);
-    ws_ddghtml_radio_ = new BRadioButton("ws_ddghtml", "DuckDuckGo HTML", nullptr);
-    ws_mojeek_radio_->SetValue(ws_mojeek  ? B_CONTROL_ON : B_CONTROL_OFF);
-    ws_ddglite_radio_->SetValue(ws_ddglite ? B_CONTROL_ON : B_CONTROL_OFF);
-    ws_ddghtml_radio_->SetValue(config_.web_search_engine == "ddg_html"
-                                ? B_CONTROL_ON : B_CONTROL_OFF);
+                       && config_.web_search_engine != "ddg_html"
+                       && config_.web_search_engine != "exa"
+                       && config_.web_search_engine != "zai");
+
+    // Engine selector: dropdown instead of a radio group. Each item carries
+    // the engine id in its message; save reads it from the marked item's
+    // message, never the label. Engines that need an API key reveal a masked
+    // key field when selected.
+    ws_engine_menu_ = new BPopUpMenu("ws_engine_menu");
+    struct WSEntry { const char* label; const char* value; };
+    static const WSEntry kWSEngines[] = {
+        {"Mojeek",          "mojeek"},
+        {"DuckDuckGo Lite", "ddg_lite"},
+        {"DuckDuckGo HTML", "ddg_html"},
+        {"Exa",             "exa"},
+        {"Z.AI",            "zai"},
+    };
+    BMenuItem* ws_marked = nullptr;
+    for (auto& e : kWSEngines) {
+        auto* item = new BMenuItem(e.label,
+                                   new BMessage(MSG_WS_ENGINE_SELECTED));
+        item->Message()->AddString("engine", e.value);
+        ws_engine_menu_->AddItem(item);
+        if ((ws_mojeek && std::string(e.value) == "mojeek")
+            || std::string(e.value) == config_.web_search_engine)
+            ws_marked = item;
+    }
+    if (!ws_marked) ws_marked = ws_engine_menu_->ItemAt(0);
+    ws_marked->SetMarked(true);
+    ws_engine_field_ = new BMenuField("ws_engine_field", "Search engine:",
+                                      ws_engine_menu_);
+
+    // Key field starts empty and masked; hidden entirely for keyless engines.
+    // Same keep-if-empty save semantics as the provider editor, with the
+    // stored key swapped per engine in _RememberKeyForEngine().
+    ws_key_field_ = new BTextControl("ws_key", "API key:", "", nullptr);
+    ws_key_field_->TextView()->HideTyping(true);
+    ws_key_field_->SetDivider(130.0f);
 
     char maxbuf[16];
     snprintf(maxbuf, sizeof(maxbuf), "%d", config_.web_search_max_results);
@@ -344,14 +373,14 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         .Add(new BStringView("bc_hint",
             "(run after each successful write/edit; non-zero exit shows errors to the model)"))
         .Add(new BSeparatorView(B_HORIZONTAL))
-        .Add(new BStringView("ws_label", "Web search engine:"))
-        .AddGroup(B_VERTICAL)
-            .Add(ws_mojeek_radio_)
-            .Add(ws_ddglite_radio_)
-            .Add(ws_ddghtml_radio_)
-        .End()
+        .Add(ws_engine_field_)
+        .Add(ws_key_field_)
         .Add(ws_max_field_)
         .AddGlue();
+
+    // Initialize per-engine stored key + visibility for the marked engine.
+    _RememberKeyForEngine(_MarkedWSEngine().c_str());
+    _UpdateKeyFieldVisibility();
 
     // ---- Tabs ----
     auto* tab_view = new BTabView("prefs_tabs", B_WIDTH_FROM_WIDEST);
@@ -527,6 +556,27 @@ SettingsWindow::MessageReceived(BMessage* msg)
             _RefreshContextField();
             break;
         }
+        case MSG_WS_ENGINE_SELECTED: {
+            // The menu marks the new item before invoking this, so the engine
+            // whose field content is on display is ws_current_engine_.
+            std::string next = _MarkedWSEngine();
+            if (next.empty() || next == ws_current_engine_) break;
+            if (ws_key_field_) {
+                const char* text = ws_key_field_->Text();
+                if (text && *text)
+                    ws_typed_keys_[ws_current_engine_] = text;
+                else
+                    ws_typed_keys_.erase(ws_current_engine_);  // blank = keep stored
+                // Swap in the new engine's in-progress text (or blank).
+                auto it = ws_typed_keys_.find(next);
+                ws_key_field_->SetText(it != ws_typed_keys_.end()
+                                           ? it->second.c_str() : "");
+            }
+            ws_current_engine_ = next;
+            _RememberKeyForEngine(ws_current_engine_.c_str());
+            _UpdateKeyFieldVisibility();
+            break;
+        }
         case MSG_CANCEL:
             Quit();
             break;
@@ -572,12 +622,21 @@ SettingsWindow::_Save()
     saved.AddString("default_mode", mode);
     saved.AddString("build_command",
                     build_cmd_field_ ? build_cmd_field_->Text() : "");
-    const char* ws_engine = "mojeek";
-    if (ws_ddglite_radio_ && ws_ddglite_radio_->Value() == B_CONTROL_ON)
-        ws_engine = "ddg_lite";
-    else if (ws_ddghtml_radio_ && ws_ddghtml_radio_->Value() == B_CONTROL_ON)
-        ws_engine = "ddg_html";
-    saved.AddString("web_search_engine", ws_engine);
+    // Selected engine comes from the dropdown's marked item's message.
+    saved.AddString("web_search_engine", _MarkedWSEngine().c_str());
+    // Key field follows provider-editor semantics: empty means keep the key
+    // already stored for the displayed engine. A typed key overrides it.
+    const char* ws_key_text = ws_key_field_ ? ws_key_field_->Text() : "";
+    if (*ws_key_text) {
+        saved.AddString("web_search_key", ws_key_text);
+        saved.AddString("web_search_key_engine", ws_current_engine_.c_str());
+    } else if (ws_current_engine_ == "exa" || ws_current_engine_ == "zai") {
+        // Blank field on a key-engine: apply any in-progress stash, then
+        // signal "keep existing" by sending the stored key's engine with an
+        // empty key (HaiCodeApp keeps the stored value for that engine).
+        saved.AddString("web_search_key", "");
+        saved.AddString("web_search_key_engine", ws_current_engine_.c_str());
+    }
     int32 ws_max = 5;
     if (ws_max_field_ && ws_max_field_->Text()) {
         long n = std::atol(ws_max_field_->Text());
@@ -627,6 +686,46 @@ SettingsWindow::_RefreshContextField()
     int builtin = haicode::get_context_window(_MarkedProviderId(), model,
                                               config_.model_contexts);
     context_field_->SetText(builtin > 0 ? std::to_string(builtin).c_str() : "");
+}
+
+std::string
+SettingsWindow::_MarkedWSEngine() const
+{
+    if (auto* marked = ws_engine_menu_->FindMarked()) {
+        const char* engine = nullptr;
+        if (marked->Message()
+            && marked->Message()->FindString("engine", &engine) == B_OK
+            && engine)
+            return engine;
+    }
+    return "";
+}
+
+void
+SettingsWindow::_UpdateKeyFieldVisibility()
+{
+    if (!ws_key_field_) return;
+    const std::string& engine = ws_current_engine_;
+    bool needs_key = (engine == "exa" || engine == "zai");
+    if (needs_key) {
+        if (!ws_key_field_->IsHidden()) return;  // already visible
+        ws_key_field_->Show();
+    } else {
+        if (ws_key_field_->IsHidden()) return;   // already hidden
+        ws_key_field_->Hide();
+    }
+    if (BView* parent = ws_key_field_->Parent())
+        parent->InvalidateLayout();
+}
+
+void
+SettingsWindow::_RememberKeyForEngine(const char* engine_id)
+{
+    if (!engine_id) return;
+    // Capture the key stored in config for this engine so _Save() can apply
+    // "empty field = keep existing" against the right engine.
+    auto it = config_.web_search_api_keys.find(engine_id);
+    ws_existing_key_ = (it != config_.web_search_api_keys.end()) ? it->second : "";
 }
 
 void

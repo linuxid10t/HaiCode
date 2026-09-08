@@ -56,11 +56,15 @@ struct AppConfig {
     // built-in defaults in lib/src/pricing/pricing.cpp. Populated from the
     // top-level "pricing" object in config.json.
     std::map<std::string, ModelPricing> pricing;
-    // web_search tool config. engine = "mojeek" (default), "ddg_lite", or "ddg_html".
-    // Mojeek is the default because DuckDuckGo's lite/html endpoints now serve a
-    // CAPTCHA "anomaly" page to most non-browser clients.
+    // web_search tool config. engine = "mojeek" (default), "ddg_lite", "ddg_html",
+    // "exa", or "zai". Mojeek is the default because DuckDuckGo's lite/html
+    // endpoints now serve a CAPTCHA "anomaly" page to most non-browser clients.
+    // Exa and Z.ai are API-key services; keys resolve at execute time from
+    // web_search_api_keys (config) with an $EXA_API_KEY / $ZAI_API_KEY fallback.
     std::string web_search_engine = "mojeek";
     int         web_search_max_results = 5;
+    // Per-engine API keys, keyed by engine name ("exa", "zai").
+    std::map<std::string, std::string> web_search_api_keys;
     // Shell command to run after a successful write or edit tool call. If the
     // command exits non-zero, the output is appended to the tool result so the
     // model sees the build error immediately. Configured via "build_command" in

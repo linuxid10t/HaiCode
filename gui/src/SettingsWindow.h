@@ -14,6 +14,7 @@ class BTextControl;
 class BRadioButton;
 class BMenuField;
 class BPopUpMenu;
+class BMenuItem;
 
 // Modal-ish editor for a single provider entry. Owned by SettingsWindow;
 // posts MSG_PROVIDER_DIALOG_DONE back to the parent with the edited fields.
@@ -55,6 +56,9 @@ private:
     void _FetchModelsForMarkedProvider();
     std::string _MarkedProviderId() const;
     void _RefreshContextField();   // sync context field to marked model's window
+    std::string _MarkedWSEngine() const;          // engine id of marked menu item
+    void _UpdateKeyFieldVisibility();             // show key field for exa/zai only
+    void _RememberKeyForEngine(const char* engine_id); // stash typed key per engine
 
     // Working copy of the full config; config_.providers is mutated by
     // add/edit/remove, and the scalar fields are read from the General/Tools
@@ -76,10 +80,20 @@ private:
 
     // Tools tab
     BTextControl* build_cmd_field_   = nullptr;
-    BRadioButton* ws_mojeek_radio_   = nullptr;
-    BRadioButton* ws_ddglite_radio_  = nullptr;
-    BRadioButton* ws_ddghtml_radio_  = nullptr;
+    BMenuField*   ws_engine_field_   = nullptr;
+    BPopUpMenu*   ws_engine_menu_    = nullptr;
     BTextControl* ws_max_field_      = nullptr;
+    // Shown only when the selected engine needs an API key (exa/zai).
+    BTextControl* ws_key_field_      = nullptr;
+    // Key already stored in config for the engine currently shown in the
+    // field (not shown in the field itself, which starts empty and is
+    // masked); empty field at save time means "keep existing".
+    std::string ws_existing_key_;
+    // Engine id whose key state the field is currently showing.
+    std::string ws_current_engine_;
+    // Keys typed but not yet saved, keyed by engine, so switching engines in
+    // the dropdown doesn't lose in-progress input.
+    std::map<std::string, std::string> ws_typed_keys_;
 
     BMessenger   target_;
 };

@@ -297,9 +297,11 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - `list` and `check_port` are always allowed; `kill` goes through the gate (`process` permission, resource `pid:<N>`)
 
 ### WebSearchTool (`web_search`) — `web_tools.cpp`
-- Backends: `mojeek` (default, no API key), `ddg_lite`, `ddg_html`. Configurable via `AppConfig::web_search_engine`
+- Backends: `mojeek` (default, no API key), `ddg_lite`, `ddg_html` (HTML scraping), `exa` and `zai` (JSON APIs via `HttpClient::post_json`). Configurable via `AppConfig::web_search_engine`
+- Exa/Z.ai need an API key: resolved from `AppConfig::web_search_api_keys[engine]` (config `web_search.api_keys.exa`/`.zai`), falling back to `$EXA_API_KEY` / `$ZAI_API_KEY`. Missing key → tool error before any network call
+- Exa: `POST api.exa.ai/search` with `x-api-key` header; first `highlights` entry becomes the snippet. Z.ai: `POST api.z.ai/api/paas/v4/web_search` with `Bearer` auth; `content` truncated to 400 chars for the snippet
 - Returns ranked results: title, URL, snippet — read snippets before calling `web_extract`
-- `max_results` defaults to 5, capped at 10
+- `max_results` defaults to 5, capped at 10 (all engines)
 - HTML parsing is in-process (no external deps); DDG may surface CAPTCHA errors
 - Required permission: `web_search`
 

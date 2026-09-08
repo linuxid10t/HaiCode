@@ -209,6 +209,11 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 int n = ws["max_results"].get<int>();
                 if (n > 0) cfg.web_search_max_results = n;
             }
+            if (ws.contains("api_keys") && ws["api_keys"].is_object()) {
+                for (auto& [engine, key] : ws["api_keys"].items())
+                    if (key.is_string())
+                        cfg.web_search_api_keys[engine] = key.get<std::string>();
+            }
         }
     } catch (...) {}
 
@@ -243,6 +248,8 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.web_search_engine = overlay.web_search_engine;
     if (overlay.web_search_max_results > 0)
         result.web_search_max_results = overlay.web_search_max_results;
+    for (auto& [k, v] : overlay.web_search_api_keys)
+        result.web_search_api_keys[k] = v;
     if (!overlay.build_command.empty())
         result.build_command = overlay.build_command;
     if (!overlay.default_mode.empty())

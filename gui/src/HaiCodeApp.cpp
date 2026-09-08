@@ -406,11 +406,26 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             if (msg->FindString("web_search_engine", &ws_engine) == B_OK && ws_engine
                 && (std::string(ws_engine) == "mojeek"
                     || std::string(ws_engine) == "ddg_lite"
-                    || std::string(ws_engine) == "ddg_html")) {
+                    || std::string(ws_engine) == "ddg_html"
+                    || std::string(ws_engine) == "exa"
+                    || std::string(ws_engine) == "zai")) {
                 config_.web_search_engine = ws_engine;
             }
             if (msg->FindInt32("web_search_max_results", &ws_max) == B_OK && ws_max > 0)
                 config_.web_search_max_results = ws_max;
+            // Search API key: paired with its engine id. Non-empty key sets/
+            // replaces it; empty key means "keep the stored key" (provider-
+            // editor semantics). No message pair = nothing to change.
+            const char* ws_key = nullptr;
+            const char* ws_key_engine = nullptr;
+            if (msg->FindString("web_search_key", &ws_key) == B_OK && ws_key
+                && msg->FindString("web_search_key_engine", &ws_key_engine) == B_OK
+                && ws_key_engine
+                && (std::string(ws_key_engine) == "exa"
+                    || std::string(ws_key_engine) == "zai")
+                && *ws_key) {
+                config_.web_search_api_keys[ws_key_engine] = ws_key;
+            }
 
             // Context-window override for a model (from the Settings General tab).
             int32 context_window = 0;
@@ -447,6 +462,15 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     {"engine", config_.web_search_engine},
                     {"max_results", config_.web_search_max_results},
                 };
+                // Preserve any API keys the user set by hand in config.json
+                // (the Settings UI has no key-entry field; keys live in
+                // config.json or env vars only).
+                if (!config_.web_search_api_keys.empty()) {
+                    nlohmann::json keys_j = nlohmann::json::object();
+                    for (auto& [engine, key] : config_.web_search_api_keys)
+                        keys_j[engine] = key;
+                    j["web_search"]["api_keys"] = keys_j;
+                }
                 if (!config_.model_contexts.empty()) {
                     nlohmann::json models_j = nlohmann::json::object();
                     for (auto& [mid, win] : config_.model_contexts)

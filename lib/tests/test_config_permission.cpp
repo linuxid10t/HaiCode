@@ -82,11 +82,15 @@ static bool cfg_build_command() {
 
 static bool cfg_web_search() {
     const std::string p = "/tmp/tfc_websearch.json";
-    write_file(p, R"({"web_search":{"engine":"ddg_lite","max_results":8}})");
+    write_file(p, R"({"web_search":{"engine":"ddg_lite","max_results":8,
+        "api_keys":{"exa":"exa-key-1","zai":"zai-key-2"}}})");
     haicode::ConfigLoader loader;
     auto cfg = loader.load_file(p);
     CHECK(cfg.web_search_engine      == "ddg_lite", "web_search engine mismatch");
     CHECK(cfg.web_search_max_results == 8,           "web_search max_results mismatch");
+    CHECK(cfg.web_search_api_keys.size() == 2,       "expected 2 web_search api keys");
+    CHECK(cfg.web_search_api_keys["exa"] == "exa-key-1", "exa api key mismatch");
+    CHECK(cfg.web_search_api_keys["zai"] == "zai-key-2", "zai api key mismatch");
     std::remove(p.c_str());
     std::cout << "[OK] load_file web_search config\n";
     return true;
@@ -238,11 +242,17 @@ static bool merge_web_search_overlay() {
     haicode::AppConfig base, overlay;
     base.web_search_engine      = "mojeek";
     base.web_search_max_results = 5;
+    base.web_search_api_keys["exa"] = "base-exa";
+    base.web_search_api_keys["zai"] = "base-zai";
     overlay.web_search_engine   = "ddg_lite";
     overlay.web_search_max_results = 10;
+    overlay.web_search_api_keys["exa"] = "overlay-exa";
     haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
     CHECK(result.web_search_engine      == "ddg_lite", "engine overlay should win");
     CHECK(result.web_search_max_results == 10,          "max_results overlay should win");
+    CHECK(result.web_search_api_keys.size() == 2,       "api_keys merge should keep base keys");
+    CHECK(result.web_search_api_keys["exa"] == "overlay-exa", "exa key overlay should win");
+    CHECK(result.web_search_api_keys["zai"] == "base-zai",    "zai key base should survive");
     std::cout << "[OK] merge web_search overlay wins\n";
     return true;
 }

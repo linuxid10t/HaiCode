@@ -5,6 +5,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -414,6 +415,69 @@ static std::string extract_query_param(const std::string& url, const std::string
 // snippet_class: "result-snippet" (lite) or "result__snippet" (html).
 struct SearchResult { std::string title; std::string url; std::string snippet; };
 
+// Resolve an API-key-based search engine's key: config wins, then env.
+// Returns "" when nowhere found; callers turn that into a user-facing error.
+static std::string resolve_search_api_key(const ToolContext& ctx,
+                                          const std::string& engine,
+                                          const char* env_var) {
+    if (ctx.config) {
+        auto it = ctx.config->web_search_api_keys.find(engine);
+        if (it != ctx.config->web_search_api_keys.end() && !it->second.empty())
+            return it->second;
+    }
+    if (const char* env = std::getenv(env_var); env && *env)
+        return env;
+    return "";
+}
+
+// Parse Exa /search JSON: {"results": [{"title", "url", "highlights": [...]}]}.
+static std::vector<SearchResult> parse_exa_results(const nlohmann::json& j,
+                                                   int max_results) {
+    std::vector<SearchResult> out;
+    if (!j.contains("results") || !j["results"].is_array()) return out;
+    for (auto& r : j["results"]) {
+        if ((int)out.size() >= max_results) break;
+        SearchResult sr;
+        sr.title = r.value("title", "");
+        sr.url   = r.value("url", "");
+        if (r.contains("highlights") && r["highlights"].is_array()
+            && !r["highlights"].empty() && r["highlights"][0].is_string())
+            sr.snippet = r["highlights"][0].get<std::string>();
+        // Highlights can run to thousands of chars on long documents; cap
+        // them so 10 results stay well under the tool-output budget.
+        if (sr.snippet.size() > 400) {
+            sr.snippet.resize(400);
+            sr.snippet += "…";
+        }
+        if (!sr.title.empty() || !sr.url.empty())
+            out.push_back(std::move(sr));
+    }
+    return out;
+}
+
+// Parse Z.ai web_search JSON:
+// {"search_result": [{"title", "link", "content", ...}]}. Content can be very
+// long, so cap the snippet.
+static std::vector<SearchResult> parse_zai_results(const nlohmann::json& j,
+                                                   int max_results) {
+    std::vector<SearchResult> out;
+    if (!j.contains("search_result") || !j["search_result"].is_array()) return out;
+    for (auto& r : j["search_result"]) {
+        if ((int)out.size() >= max_results) break;
+        SearchResult sr;
+        sr.title = r.value("title", "");
+        sr.url   = r.value("link", "");
+        sr.snippet = r.value("content", "");
+        if (sr.snippet.size() > 400) {
+            sr.snippet.resize(400);
+            sr.snippet += "…";
+        }
+        if (!sr.title.empty() || !sr.url.empty())
+            out.push_back(std::move(sr));
+    }
+    return out;
+}
+
 static std::vector<SearchResult> parse_ddg_results(const std::string& html,
                                                     const std::string& anchor_class,
                                                     const std::string& snippet_class,
@@ -588,9 +652,10 @@ class WebSearchTool : public Tool {
 public:
     std::string name() const override { return "web_search"; }
     std::string description() const override {
-        return "Search the web (Mojeek, no API key) and return ranked results. "
-               "Use this FIRST when researching — it's cheap. Read the snippets "
-               "before calling web_extract on any URL.";
+        return "Search the web (Mojeek by default; DuckDuckGo, Exa, and Z.ai "
+               "optional via config; Exa/Z.ai need an API key) and return ranked "
+               "results. Use this FIRST when researching — it's cheap. Read the "
+               "snippets before calling web_extract on any URL.";
     }
     nlohmann::json input_schema() const override {
         return {
@@ -623,11 +688,26 @@ public:
         std::string engine = "mojeek";
         if (ctx.config && !ctx.config->web_search_engine.empty())
             engine = ctx.config->web_search_engine;
-        if (engine != "mojeek" && engine != "ddg_lite" && engine != "ddg_html")
+        if (engine != "mojeek" && engine != "ddg_lite" && engine != "ddg_html"
+            && engine != "exa" && engine != "zai")
             engine = "mojeek";
+
+        // API-key engines (exa, zai) resolve their key now so a missing key
+        // fails before any network round-trip.
+        std::string api_key;
+        if (engine == "exa" || engine == "zai") {
+            api_key = resolve_search_api_key(
+                ctx, engine, engine == "exa" ? "EXA_API_KEY" : "ZAI_API_KEY");
+            if (api_key.empty())
+                return {false, "",
+                    "web_search engine '" + engine + "' requires an API key "
+                    "(set web_search.api_keys." + engine + " in config or $"
+                    + (engine == "exa" ? "EXA_API_KEY" : "ZAI_API_KEY") + ")"};
+        }
 
         std::string url;
         std::string anchor_class, snippet_class;
+        std::vector<SearchResult> results;
         if (engine == "ddg_html") {
             url = "https://html.duckduckgo.com/html/?q=" + url_encode(query);
             anchor_class  = "result__a";
@@ -648,13 +728,62 @@ public:
             if (engine == "mojeek") {
                 std::string murl = "https://www.mojeek.com/search?q=" + url_encode(query);
                 body = http_.get(murl, headers, 20L);
+            } else if (engine == "exa" || engine == "zai") {
+                std::map<std::string, std::string> api_headers = {
+                    {"Content-Type", "application/json"},
+                };
+                if (engine == "zai")
+                    api_headers["Accept-Language"] = "en-US,en";
+                std::string api_url, payload;
+                if (engine == "exa") {
+                    api_headers["x-api-key"] = api_key;
+                    api_url = "https://api.exa.ai/search";
+                    payload = nlohmann::json{
+                        {"query", query},
+                        {"numResults", max_results},
+                        {"type", "auto"},
+                        {"contents", {{"highlights", true}}},
+                    }.dump();
+                } else {
+                    api_headers["Authorization"] = "Bearer " + api_key;
+                    api_url = "https://api.z.ai/api/paas/v4/web_search";
+                    payload = nlohmann::json{
+                        {"search_engine", "search-prime"},
+                        {"search_query", query},
+                        {"count", max_results},
+                    }.dump();
+                }
+                long code = 0;
+                body = http_.post_json(api_url, api_headers, payload, 20L, &code);
+                if (code != 200) {
+                    std::string excerpt = body.substr(0, 300);
+                    std::string hint;
+                    if (code == 401 || code == 403)
+                        hint = " (check the API key for this engine)";
+                    else if (code == 429)
+                        hint = " (insufficient balance or rate limit — the "
+                               "provider may bill this search API separately "
+                               "from chat models)";
+                    return {false, "", "web_search: " + engine
+                        + " API returned HTTP " + std::to_string(code)
+                        + hint
+                        + (excerpt.empty() ? "" : ": " + excerpt)};
+                }
+                nlohmann::json j = nlohmann::json::parse(body);
+                results = (engine == "exa") ? parse_exa_results(j, max_results)
+                                            : parse_zai_results(j, max_results);
             } else {
                 body = http_.get(url, headers, 20L);
             }
         } catch (const std::exception& e) {
             return {false, "", std::string("web_search fetch failed: ") + e.what()};
         }
-        if (body.empty())
+        if (results.empty() && body.empty() && (engine == "exa" || engine == "zai")) {
+            // JSON API answered 200 but with nothing usable.
+            return {true, "(no results — empty response from search engine)", ""};
+        }
+        if (body.empty() && (engine == "mojeek" || engine == "ddg_lite"
+                             || engine == "ddg_html"))
             return {true, "(no results — empty response from search engine)", ""};
 
         // DuckDuckGo now serves an "anomaly" CAPTCHA page (HTTP 202) to many
@@ -670,11 +799,11 @@ public:
             }
         }
 
-        std::vector<SearchResult> results;
-        if (engine == "mojeek") {
-            results = parse_mojeek_results(body, max_results);
-        } else {
-            results = parse_ddg_results(body, anchor_class, snippet_class, max_results);
+        if (results.empty() && (engine == "mojeek" || engine == "ddg_lite"
+                                || engine == "ddg_html")) {
+            results = (engine == "mojeek")
+                ? parse_mojeek_results(body, max_results)
+                : parse_ddg_results(body, anchor_class, snippet_class, max_results);
         }
 
         if (results.empty())
