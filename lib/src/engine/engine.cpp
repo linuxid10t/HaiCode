@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <sys/utsname.h>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -641,6 +642,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         int sess_ms = model_json.value("max_steps", 0);
         if (sess_ms > 0) max_steps = sess_ms;
     }
+    // {{STEPS_LEFT}} in the stable template is re-substituted every step, so
+    // the "byte-stable" body varies and defeats Anthropic prefix caching.
+    // The dynamic block already shows the live count; warn, don't fail.
+    if (prompt_tmpl.find("{{STEPS_LEFT}}") != std::string::npos) {
+        fprintf(stderr, "[engine] warning: agent '%s' system_prompt contains "
+                        "{{STEPS_LEFT}}; it will change every step and break "
+                        "Anthropic prefix caching. Move it to the dynamic "
+                        "sentence (it always renders the count) or remove it.\n",
+                session.agent.c_str());
+        fflush(stderr);
+    }
 
     std::string os_info;
     struct utsname uts {};
@@ -710,10 +722,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                        session.directory,
                                                        max_steps);
 
-    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n[engine] system prompt:\n%s\n---\n",
+    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
             mode == SessionMode::Plan ? "plan" : "build",
-            max_steps, config_.instructions.size(), system.c_str());
+            max_steps, config_.instructions.size());
+    // The full prompt embeds project agents.md content; dump it only when
+    // explicitly debugging prompt assembly.
+    if (std::getenv("HPCODE_DEBUG_PROMPT") && *std::getenv("HPCODE_DEBUG_PROMPT")) {
+        fprintf(stderr, "[engine] system prompt:\n%s\n---\n", system.c_str());
+    }
     fflush(stderr);
 
     // Agentic loop
