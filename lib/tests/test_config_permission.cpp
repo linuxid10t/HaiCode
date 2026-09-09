@@ -257,6 +257,19 @@ static bool merge_web_search_overlay() {
     return true;
 }
 
+static bool merge_web_search_default_overlay_preserves_base() {
+    // Regression: a default-constructed overlay (project config file absent)
+    // must not clobber the base engine. The struct default used to be
+    // "mojeek", which wiped the global config's engine on every load.
+    haicode::AppConfig base, overlay;
+    base.web_search_engine = "exa";
+    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    CHECK(result.web_search_engine == "exa",
+          "default overlay should not clobber base engine");
+    std::cout << "[OK] merge default overlay preserves base engine\n";
+    return true;
+}
+
 // ============================================================
 // PermissionGate
 // ============================================================
@@ -462,6 +475,7 @@ int main() {
     ok &= merge_build_command_base_preserved();
     ok &= merge_providers_merged();
     ok &= merge_web_search_overlay();
+    ok &= merge_web_search_default_overlay_preserves_base();
 
     std::cout << "\n-- PermissionGate --\n";
     ok &= perm_allow_rule();

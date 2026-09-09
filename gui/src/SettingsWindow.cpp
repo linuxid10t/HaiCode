@@ -330,6 +330,8 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     // message, never the label. Engines that need an API key reveal a masked
     // key field when selected.
     ws_engine_menu_ = new BPopUpMenu("ws_engine_menu");
+    ws_engine_menu_->SetRadioMode(true);
+    ws_engine_menu_->SetLabelFromMarked(true);
     struct WSEntry { const char* label; const char* value; };
     static const WSEntry kWSEngines[] = {
         {"Mojeek",          "mojeek"},
@@ -379,7 +381,9 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         .AddGlue();
 
     // Initialize per-engine stored key + visibility for the marked engine.
-    _RememberKeyForEngine(_MarkedWSEngine().c_str());
+    ws_current_engine_ = _MarkedWSEngine();
+    if (ws_current_engine_.empty()) ws_current_engine_ = "mojeek";
+    _RememberKeyForEngine(ws_current_engine_.c_str());
     _UpdateKeyFieldVisibility();
 
     // ---- Tabs ----
