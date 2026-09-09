@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <map>
+#include <mutex>
 #include <string>
 
 namespace haicode {
@@ -529,26 +530,26 @@ public:
     // flavors this is a cache hit after list_models(). For Ollama/llama.cpp it
     // fetches a native endpoint on first access for the active model.
     int get_model_context(const std::string& model_id) const override {
-        auto cached = context_cache_.find(model_id);
-        if (cached != context_cache_.end())
-            return cached->second;
+        {
+            std::lock_guard<std::mutex> lock(context_cache_mu_);
+            auto cached = context_cache_.find(model_id);
+            if (cached != context_cache_.end())
+                return cached->second;
+        }
 
+        int ctx = 0;
         if (flavor_ == ServerFlavor::Ollama) {
-            int ctx = fetch_ollama_context(model_id);
-            if (ctx > 0) context_cache_[model_id] = ctx;
-            return ctx;
+            ctx = fetch_ollama_context(model_id);
+        } else if (flavor_ == ServerFlavor::LlamaCpp) {
+            ctx = fetch_llamacpp_context();
+        } else if (flavor_ == ServerFlavor::LMStudio) {
+            ctx = fetch_lmstudio_context(model_id);
         }
-        if (flavor_ == ServerFlavor::LlamaCpp) {
-            int ctx = fetch_llamacpp_context();
-            if (ctx > 0) context_cache_[model_id] = ctx;
-            return ctx;
+        if (ctx > 0) {
+            std::lock_guard<std::mutex> lock(context_cache_mu_);
+            context_cache_[model_id] = ctx;
         }
-        if (flavor_ == ServerFlavor::LMStudio) {
-            int ctx = fetch_lmstudio_context(model_id);
-            if (ctx > 0) context_cache_[model_id] = ctx;
-            return ctx;
-        }
-        return 0;
+        return ctx;
     }
 
     std::vector<std::string> list_models(std::string& error) override {
@@ -605,8 +606,10 @@ public:
                 // Parse context window from the model object for flavors whose
                 // /v1/models response carries it inline.
                 int ctx = parse_model_context_inline(m, flavor_);
-                if (ctx > 0)
+                if (ctx > 0) {
+                    std::lock_guard<std::mutex> lock(context_cache_mu_);
                     context_cache_[mid] = ctx;
+                }
 
                 result.push_back(mid);
             }
@@ -683,7 +686,11 @@ private:
     std::atomic<bool> cancelled_{false};
     // Discovered context windows, keyed by model_id. Populated during
     // list_models() (for vLLM/OpenRouter/LM Studio) or lazily during
-    // get_model_context() (for Ollama/llama.cpp).
+    // get_model_context() (for Ollama/llama.cpp) — both may run on
+    // different threads (the settings-save flow fires list_models on a
+    // detached thread while the UI thread queries the active model's
+    // context), so the map is mutex-guarded.
+    mutable std::mutex context_cache_mu_;
     mutable std::map<std::string, int> context_cache_;
 };
 

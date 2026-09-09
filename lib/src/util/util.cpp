@@ -1,4 +1,5 @@
 #include <haicode/util.h>
+#include <atomic>
 #include <chrono>
 #include <sstream>
 #include <iomanip>
@@ -32,16 +33,17 @@ std::string make_id(const std::string& prefix) {
 // ---- HttpClient ----
 
 struct HttpClient::State {
-    CURL* curl = nullptr;
-    std::string buffer;
-    // event_type/event_data must persist across write_cb invocations: a single
-    // SSE event (event:/data:/blank line) can straddle libcurl chunk boundaries
-    // when the data line is large (e.g. propose_plan markdown). Local vars here
+    // Set from cancel() on the UI thread, read from write_cb on the request
+    // thread — atomic to avoid a torn flag.
+    std::atomic<bool> cancelled{false};
+    // SSE parse state lives per client (not per request): a single SSE event
+    // (event:/data:/blank line) can straddle libcurl chunk boundaries when the
+    // data line is large (e.g. propose_plan markdown). Local vars here
     // silently dropped in-progress events, truncating tool input JSON.
+    std::string buffer;
     std::string event_type;
     std::string event_data;
     SSECallback callback;
-    bool cancelled = false;
 
     static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
         auto* s = static_cast<State*>(userdata);
@@ -93,29 +95,35 @@ struct HttpClient::State {
 
 HttpClient::HttpClient() : state_(std::make_unique<State>()) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
-    state_->curl = curl_easy_init();
 }
 
-HttpClient::~HttpClient() {
-    if (state_->curl) curl_easy_cleanup(state_->curl);
-}
+HttpClient::~HttpClient() = default;
 
 void HttpClient::cancel() {
     state_->cancelled = true;
+}
+
+// Easy handles are not thread-safe, and a single provider client can serve
+// concurrent requests (e.g. the settings-save flow fires list_models on a
+// detached thread while the UI thread fetches the model context). A shared
+// handle raced inside Curl_checkheaders and crashed the app — so each request
+// gets its own handle, initialized and cleaned up around perform.
+static CURL* fresh_handle() {
+    return curl_easy_init();
 }
 
 void HttpClient::post_sse(const std::string& url,
                            const std::map<std::string, std::string>& headers,
                            const std::string& body,
                            SSECallback callback) {
-    CURL* curl = state_->curl;
     state_->callback = callback;
     state_->cancelled = false;
     state_->buffer.clear();
     state_->event_type.clear();
     state_->event_data.clear();
 
-    curl_easy_reset(curl);
+    CURL* curl = fresh_handle();
+    if (!curl) return;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -132,14 +140,13 @@ void HttpClient::post_sse(const std::string& url,
 
     curl_easy_perform(curl);
     curl_slist_free_all(hlist);
+    curl_easy_cleanup(curl);
 }
 
 std::string HttpClient::get(const std::string& url,
                              const std::map<std::string, std::string>& headers,
                              long timeout_seconds,
                              long* response_code) {
-    CURL* curl = state_->curl;
-    state_->cancelled = false;
     std::string result;
 
     auto write_fn = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
@@ -148,7 +155,11 @@ std::string HttpClient::get(const std::string& url,
         return size * nmemb;
     };
 
-    curl_easy_reset(curl);
+    CURL* curl = fresh_handle();
+    if (!curl) {
+        if (response_code) *response_code = -1;
+        return result;
+    }
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_fn);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
@@ -171,6 +182,7 @@ std::string HttpClient::get(const std::string& url,
         }
     }
     if (hlist) curl_slist_free_all(hlist);
+    curl_easy_cleanup(curl);
     return result;
 }
 
@@ -179,8 +191,6 @@ std::string HttpClient::post_json(const std::string& url,
                                   const std::string& body,
                                   long timeout_seconds,
                                   long* response_code) {
-    CURL* curl = state_->curl;
-    state_->cancelled = false;
     std::string result;
 
     auto write_fn = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
@@ -189,7 +199,11 @@ std::string HttpClient::post_json(const std::string& url,
         return size * nmemb;
     };
 
-    curl_easy_reset(curl);
+    CURL* curl = fresh_handle();
+    if (!curl) {
+        if (response_code) *response_code = -1;
+        return result;
+    }
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -215,6 +229,7 @@ std::string HttpClient::post_json(const std::string& url,
         }
     }
     if (hlist) curl_slist_free_all(hlist);
+    curl_easy_cleanup(curl);
     return result;
 }
 
