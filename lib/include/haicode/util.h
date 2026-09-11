@@ -14,6 +14,9 @@ std::string make_id(const std::string& prefix);
 // Current time in milliseconds since epoch
 int64_t now_ms();
 
+// Base64-encode raw bytes (standard alphabet with padding).
+std::string base64_encode(const std::string& raw);
+
 } // namespace util
 
 // libcurl-based HTTP client with SSE support

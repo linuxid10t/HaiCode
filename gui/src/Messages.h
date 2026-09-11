@@ -51,6 +51,11 @@ static const uint32 MSG_MODEL_SELECTED  = 'MDsl';  // model menu item → MainWi
 static const uint32 MSG_CHOOSE_DIR      = 'CHdr';  // dir button pressed → open BFilePanel
 static const uint32 MSG_DIR_CHANGED     = 'DChr';  // MainWindow → be_app; "path" string
 
+// Image attachments
+static const uint32 MSG_ATTACH          = 'ATch';  // "+" button pressed → open image BFilePanel
+static const uint32 MSG_ATTACH_REFS     = 'ATrf';  // refs forwarded from the attachment panel
+static const uint32 MSG_REMOVE_ATTACHMENT = 'RMat'; // chip "×" pressed; "index" int32
+
 // Permission management
 static const uint32 MSG_ADD_PERMISSION  = 'ADpm';  // MainWindow → be_app; "action"+"resource" strings
 static const uint32 MSG_AUTO_ALLOW_EDITS = 'AAed'; // checkbox → be_app; "be:value" int32

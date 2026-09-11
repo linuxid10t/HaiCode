@@ -28,6 +28,37 @@ std::string make_id(const std::string& prefix) {
     return ss.str();
 }
 
+std::string base64_encode(const std::string& raw) {
+    static const char table[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((raw.size() + 2) / 3 * 4);
+    size_t i = 0;
+    while (i + 2 < raw.size()) {
+        uint32_t n = (uint8_t)raw[i] << 16 | (uint8_t)raw[i + 1] << 8
+                   | (uint8_t)raw[i + 2];
+        out += table[(n >> 18) & 63];
+        out += table[(n >> 12) & 63];
+        out += table[(n >> 6) & 63];
+        out += table[n & 63];
+        i += 3;
+    }
+    size_t rem = raw.size() - i;
+    if (rem == 1) {
+        uint32_t n = (uint8_t)raw[i] << 16;
+        out += table[(n >> 18) & 63];
+        out += table[(n >> 12) & 63];
+        out += "==";
+    } else if (rem == 2) {
+        uint32_t n = (uint8_t)raw[i] << 16 | (uint8_t)raw[i + 1] << 8;
+        out += table[(n >> 18) & 63];
+        out += table[(n >> 12) & 63];
+        out += table[(n >> 6) & 63];
+        out += '=';
+    }
+    return out;
+}
+
 } // namespace util
 
 // ---- HttpClient ----

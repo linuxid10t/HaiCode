@@ -28,22 +28,18 @@ namespace haicode {
 // We convert on the fly, dropping any message we can't translate cleanly.
 // ---------------------------------------------------------------------------
 
-static std::vector<nlohmann::json>
-translate_messages(const std::string& system,
+std::vector<nlohmann::json> translate_messages(
+    const std::string& system,
                    const std::string& system_dynamic,
                    const std::vector<nlohmann::json>& src)
 {
     std::vector<nlohmann::json> out;
 
-    // Concatenate stable + dynamic system content. OpenAI caches
-    // automatically; no cache_control markers needed.
-    std::string joined = system;
-    if (!system_dynamic.empty()) {
-        if (!joined.empty()) joined += "\n\n";
-        joined += system_dynamic;
-    }
-    if (!joined.empty())
-        out.push_back({ {"role", "system"}, {"content", joined} });
+    // Message[0] is the cacheable prefix. llama.cpp matches the KV cache on
+    // the longest common token prefix, so the stable `system` prompt must
+    // lead the conversation and stay byte-identical across turns.
+    if (!system.empty())
+        out.push_back({ {"role", "system"}, {"content", system} });
 
     for (auto& m : src) {
         std::string role = m.value("role", "");
@@ -106,6 +102,7 @@ translate_messages(const std::string& system,
                 // messages (flow: assistant tool_calls → tool responses →
                 // user follow-up). Unknown block types warn but don't fail.
                 std::string user_text;
+                nlohmann::json image_parts = nlohmann::json::array();
                 for (auto& block : content) {
                     std::string btype = block.value("type", "");
                     if (btype == "tool_result") {
@@ -140,20 +137,39 @@ translate_messages(const std::string& system,
                     } else if (btype == "text") {
                         user_text += block.value("text", "");
                     } else if (btype == "image") {
-                        // OpenAI vision uses {type:"image_url", image_url:{...}}
-                        // but the Anthropic source shape {type:"image",
-                        // source:{...}} differs. Warn until that mapping
-                        // is implemented — don't silently drop.
-                        fprintf(stderr, "openai: image block in user content "
-                                "not yet translated (needs Anthropic source "
-                                "→ image_url conversion)\n");
+                        // Anthropic shape {type:"image", source:{media_type,data}}
+                        // → OpenAI vision {type:"image_url", image_url:{url:...}}
+                        // as a data: URL inside array content.
+                        auto src_it = block.find("source");
+                        if (src_it != block.end() && src_it->is_object()) {
+                            nlohmann::json ip;
+                            ip["type"] = "image_url";
+                            ip["image_url"] = {
+                                {"url", "data:" + src_it->value("media_type",
+                                                                "image/png")
+                                      + ";base64,"
+                                      + src_it->value("data", "")}
+                            };
+                            image_parts.push_back(ip);
+                        } else {
+                            fprintf(stderr, "openai: image block without "
+                                    "source object, dropping\n");
+                        }
                     } else {
                         fprintf(stderr, "openai: dropping unknown user "
                                 "content block type '%s'\n",
                                 btype.c_str());
                     }
                 }
-                if (!user_text.empty()) {
+                if (!image_parts.empty()) {
+                    // Mixed content must stay an array (text + image_url
+                    // parts); a bare string would collapse the images away.
+                    nlohmann::json uc = nlohmann::json::array();
+                    if (!user_text.empty())
+                        uc.push_back({{"type", "text"}, {"text", user_text}});
+                    for (auto& ip : image_parts) uc.push_back(ip);
+                    out.push_back({{"role", "user"}, {"content", uc}});
+                } else if (!user_text.empty()) {
                     out.push_back({
                         {"role", "user"}, {"content", user_text}
                     });
@@ -161,6 +177,33 @@ translate_messages(const std::string& system,
             }
             continue;
         }
+    }
+
+    // The dynamic system tail ({{STEPS_LEFT}} budget warnings, todo list)
+    // changes every step, so it must go at the END of the message list.
+    // Everything before it (system + full history) then stays byte-identical
+    // across steps and llama.cpp's prefix KV cache keeps hitting.
+    //
+    // Alternation rules require care:
+    // - last message user   → append the dynamic text to its content. Two
+    //   consecutive "user" messages break templates that enforce strict
+    //   role alternation (Llama-3.x, Gemma).
+    // - last message tool/assistant (mid agent loop) → append as its own
+    //   final "user" message. tool → user is alternation-legal.
+    // - empty history       → separate "user" message right after system.
+    if (!system_dynamic.empty()) {
+        if (!out.empty() && out.back().at("role") == "user") {
+            auto& content = out.back().at("content");
+            // String user content (always the case after translation) can
+            // absorb the tail inline. Array content would need block surgery;
+            // it never survives the loop above, but if it ever did, a
+            // separate message keeps it correct.
+            if (content.is_string()) {
+                content.get_ref<std::string&>() += "\n\n" + system_dynamic;
+                return out;
+            }
+        }
+        out.push_back({ {"role", "user"}, {"content", system_dynamic} });
     }
     return out;
 }
@@ -347,6 +390,13 @@ public:
 
         // Include usage in stream_options (supported by OpenAI and most compat endpoints)
         body["stream_options"] = { {"include_usage", true} };
+
+        // llama.cpp only populates/uses the KV cache when explicitly asked.
+        // Other OpenAI-compatible flavors (vLLM/Ollama/LM Studio/OpenRouter)
+        // ignore unknown fields, but gate on flavor so we never change their
+        // contract — e.g. OpenAI's endpoint rejects `cache_prompt`.
+        if (flavor_ == ServerFlavor::LlamaCpp)
+            body["cache_prompt"] = true;
 
         // Translate messages (system is prepended inside)
         body["messages"] = translate_messages(request.system, request.system_dynamic,

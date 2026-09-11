@@ -53,3 +53,6 @@ target_link_libraries(test_compaction haicode)
 
 add_executable(test_model_context tests/test_model_context.cpp)
 target_link_libraries(test_model_context haicode)
+
+add_executable(test_openai_translate tests/test_openai_translate.cpp)
+target_link_libraries(test_openai_translate haicode)

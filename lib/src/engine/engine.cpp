@@ -106,6 +106,16 @@ std::string render_dynamic_prompt(const std::string& model,
 // callers can blindly concatenate. Capped at 20 items.
 static std::string render_todos_block(const std::vector<Todo>& todos) {
     if (todos.empty()) return {};
+    // A fully-completed list must carry an explicit stop signal — rendering
+    // bare [x] items gives weaker models no cue to wrap up.
+    bool all_complete = true;
+    for (const auto& t : todos) {
+        if (t.status != "completed") { all_complete = false; break; }
+    }
+    if (all_complete) {
+        return "\n\n# Active todos\n\nAll items complete. Wrap up and report "
+               "the outcome to the user — do not start unlisted work.\n";
+    }
     std::string out = "\n\n# Active todos\n\n";
     const size_t cap = 20;
     size_t shown = 0;
@@ -179,9 +189,25 @@ static int estimate_request_tokens(const std::string& system,
                                     const std::string& system_dynamic,
                                     const std::vector<nlohmann::json>& messages)
 {
+    // Base64 image payloads are megabytes of characters but a bounded number
+    // of vision tokens once the provider decodes and tiles the image (~1600
+    // max per image on Anthropic). Counting raw chars would trip
+    // auto-compaction on the first attached photo.
+    const size_t IMAGE_CHARS = 1600 * 4;
     size_t chars = system.size() + system_dynamic.size();
-    for (auto& m : messages)
-        chars += m.dump().size();
+    for (auto& m : messages) {
+        auto cit = m.find("content");
+        if (cit != m.end() && cit->is_array()) {
+            for (const auto& block : *cit) {
+                if (block.value("type", "") == "image")
+                    chars += IMAGE_CHARS;
+                else
+                    chars += block.dump().size();
+            }
+        } else {
+            chars += m.dump().size();
+        }
+    }
     return static_cast<int>(chars / 4);
 }
 
@@ -264,7 +290,29 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
             if (msg.type == "user_prompted") {
                 nlohmann::json m;
                 m["role"] = "user";
-                m["content"] = data.value("text", "");
+                if (data.contains("attachments") && data["attachments"].is_array()
+                        && !data["attachments"].empty()) {
+                    // Mixed text + image content — Anthropic block style.
+                    // OpenAI's translate_messages maps image blocks to
+                    // image_url entries on the fly.
+                    nlohmann::json content = nlohmann::json::array();
+                    std::string text = data.value("text", "");
+                    if (!text.empty())
+                        content.push_back({{"type", "text"}, {"text", text}});
+                    for (const auto& att : data["attachments"]) {
+                        content.push_back({
+                            {"type", "image"},
+                            {"source", {
+                                {"type", "base64"},
+                                {"media_type", att.value("media_type", "image/png")},
+                                {"data", att.value("data_b64", "")}
+                            }}
+                        });
+                    }
+                    m["content"] = content;
+                } else {
+                    m["content"] = data.value("text", "");
+                }
                 result.push_back(m);
             } else if (msg.type == "assistant_text") {
                 nlohmann::json m;
@@ -421,10 +469,41 @@ std::string SessionEngine::create_session(const std::string& project_dir,
 
 void SessionEngine::submit_prompt(const std::string& session_id,
                                    const std::string& text) {
+    submit_prompt(session_id, text, {});
+}
+
+void SessionEngine::submit_prompt(const std::string& session_id,
+                                   const std::string& text,
+                                   const std::vector<Attachment>& attachments) {
     // Persist the user message
     nlohmann::json data;
     data["role"] = "user";
     data["text"] = text;
+    if (!attachments.empty()) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& att : attachments) {
+            std::string b64 = att.data_b64;
+            if (b64.empty() && !att.path.empty()) {
+                std::ifstream f(att.path, std::ios::binary);
+                if (!f) {
+                    fprintf(stderr, "haicode: attachment unreadable, skipping: %s\n",
+                            att.path.c_str());
+                    continue;
+                }
+                std::ostringstream ss;
+                ss << f.rdbuf();
+                b64 = util::base64_encode(ss.str());
+            }
+            if (b64.empty()) continue;
+            arr.push_back({
+                {"media_type", att.media_type},
+                {"path",       att.path},
+                {"data_b64",   b64}
+            });
+        }
+        if (!arr.empty())
+            data["attachments"] = arr;
+    }
     store_.append_message(session_id, "user_prompted", data.dump());
 
     // Immediate heuristic autonaming: if the session still has no title, derive
@@ -455,6 +534,15 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     nlohmann::json ev;
     ev["session_id"] = session_id;
     ev["text"] = text;
+    if (data.contains("attachments")) {
+        nlohmann::json names = nlohmann::json::array();
+        for (const auto& a : data["attachments"]) {
+            std::string p = a.value("path", "");
+            size_t slash = p.find_last_of('/');
+            names.push_back(slash == std::string::npos ? p : p.substr(slash + 1));
+        }
+        ev["attachments"] = names;
+    }
     bus_.publish(events::EventType::Prompted, ev);
 
     // Start runner thread if not already running for this session
@@ -1455,6 +1543,17 @@ bool SessionEngine::compact_history(const std::string& session_id,
     // verbatim under "## Segment 1" instead of paraphrasing it again.
     ContextBuilder builder;
     auto assembled = builder.assemble_messages(head);
+    // The summarizer works from the text — strip base64 image payloads so
+    // the compaction request doesn't balloon to megabytes per attachment.
+    for (auto& m : assembled) {
+        auto cit = m.find("content");
+        if (cit == m.end() || !cit->is_array()) continue;
+        for (auto& block : *cit) {
+            if (block.value("type", "") != "image") continue;
+            block = nlohmann::json{{"type", "text"},
+                    {"text", "[image attachment omitted during compaction]"}};
+        }
+    }
     nlohmann::json instr;
     instr["role"] = "user";
     instr["content"] = select_summary_prompt(head);

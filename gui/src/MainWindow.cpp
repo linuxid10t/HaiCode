@@ -30,6 +30,10 @@
 #include <FilePanel.h>
 #include <Entry.h>
 #include <Path.h>
+#include <Node.h>
+#include <MimeType.h>
+#include <sys/stat.h>
+#include <cstring>
 #include <StringView.h>
 #include <Alert.h>
 
@@ -125,6 +129,44 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// Image attachment support
+// ---------------------------------------------------------------------------
+
+// File-panel filter: show directories (for navigation) and image files only.
+class ImageRefFilter : public BRefFilter {
+public:
+    bool Filter(const entry_ref* ref, BNode* node,
+                struct stat_beos* st, const char* mimeType) override
+    {
+        (void)ref; (void)st;
+        if (node && node->IsDirectory()) return true;
+        return mimeType && strncmp(mimeType, "image/", 6) == 0;
+    }
+};
+
+// Dedicated target for the attachment panel's B_REFS_RECEIVED, so it can't
+// collide with the directory panel's handler. Re-wraps the refs into
+// MSG_ATTACH_REFS and forwards them to the window.
+class AttachmentPanelTarget : public BHandler {
+public:
+    explicit AttachmentPanelTarget(BMessenger owner) : owner_(owner) {}
+
+    void MessageReceived(BMessage* msg) override
+    {
+        if (msg->what == B_REFS_RECEIVED) {
+            BMessage fwd(MSG_ATTACH_REFS);
+            entry_ref ref;
+            for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; i++)
+                fwd.AddRef("refs", &ref);
+            owner_.SendMessage(&fwd);
+        }
+    }
+
+private:
+    BMessenger owner_;
+};
+
+// ---------------------------------------------------------------------------
 // MainWindow
 // ---------------------------------------------------------------------------
 
@@ -209,6 +251,12 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     send_btn_ = new BButton("send", "Send \xe2\x96\xb6", new BMessage(MSG_SUBMIT_PROMPT));
     send_btn_->MakeDefault(false);
 
+    attach_btn_ = new BButton("attach", "+", new BMessage(MSG_ATTACH));
+
+    // Chip container for staged attachments; embedded in the prompt label
+    // row so chips never add or remove a row from the vertical layout.
+    attach_row_ = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
+
     // ---- Status strip (engine state, token counts, context size) ----
     status_strip_ = new BStringView("status_strip", "[BUILD] \xe2\x9c\x93 idle");
     BFont status_font(*be_plain_font);
@@ -239,9 +287,10 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .AddGlue()
     .End();
 
-    // Input group (label + text + send button)
+    // Input group (attach "+" + text + send button)
     BGroupView* input_group = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
     BLayoutBuilder::Group<>(input_group)
+        .Add(attach_btn_)
         .Add(input_scroll)
         .Add(send_btn_)
     .End();
@@ -341,6 +390,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                     .Add(chat_view_->ScrollContainer())
                     .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
                         .Add(prompt_label)
+                        .Add(attach_row_)
                         .AddGlue()
                         .Add(auto_edits_chk_)
                         .Add(yolo_chk_)
@@ -369,6 +419,8 @@ MainWindow::QuitRequested()
 {
     delete dir_panel_;
     dir_panel_ = nullptr;
+    delete attach_panel_;
+    attach_panel_ = nullptr;
     delete chat_view_;
     chat_view_ = nullptr;
     be_app->PostMessage(B_QUIT_REQUESTED);
@@ -449,6 +501,21 @@ MainWindow::MessageReceived(BMessage* msg)
             if (entry.GetRef(&ref) == B_OK)
                 dir_panel_->SetPanelDirectory(&ref);
             dir_panel_->Show();
+            break;
+        }
+        case MSG_ATTACH:
+            _OpenAttachPanel();
+            break;
+        case MSG_ATTACH_REFS:
+            _HandleAttachRefs(msg);
+            break;
+        case MSG_REMOVE_ATTACHMENT: {
+            int32 idx = -1;
+            if (msg->FindInt32("index", &idx) == B_OK && idx >= 0
+                    && idx < (int32)pending_attachments_.size()) {
+                pending_attachments_.erase(pending_attachments_.begin() + idx);
+                _RebuildAttachRow();
+            }
             break;
         }
         case B_REFS_RECEIVED: {
@@ -926,6 +993,98 @@ MainWindow::_SwitchToSession(int idx)
 }
 
 void
+MainWindow::_OpenAttachPanel()
+{
+    if (!attach_panel_) {
+        auto* target = new AttachmentPanelTarget(BMessenger(this));
+        AddHandler(target);
+        attach_panel_ = new BFilePanel(B_OPEN_PANEL, new BMessenger(target),
+                                       nullptr, B_FILE_NODE, true,
+                                       nullptr, new ImageRefFilter());
+        attach_panel_->SetButtonLabel(B_DEFAULT_BUTTON, "Attach");
+        attach_panel_->Window()->SetTitle("Attach Images");
+    }
+    BEntry entry(project_dir_.c_str());
+    entry_ref ref;
+    if (entry.GetRef(&ref) == B_OK)
+        attach_panel_->SetPanelDirectory(&ref);
+    attach_panel_->Show();
+}
+
+void
+MainWindow::_HandleAttachRefs(BMessage* msg)
+{
+    static const size_t MAX_ATTACHMENTS = 4;
+    static const off_t MAX_BYTES = 4 * 1024 * 1024;  // under Anthropic's 5 MB cap
+
+    entry_ref ref;
+    for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; i++) {
+        if (pending_attachments_.size() >= MAX_ATTACHMENTS) {
+            _NotifyAttachmentLimit("at most 4 images per prompt");
+            break;
+        }
+        BEntry entry(&ref, true);
+        BPath path;
+        if (entry.GetPath(&path) != B_OK) continue;
+
+        struct stat st;
+        if (entry.GetStat(&st) == B_OK && st.st_size > MAX_BYTES) {
+            _NotifyAttachmentLimit(path.Leaf() + std::string(" is over 4 MB"));
+            continue;
+        }
+
+        BMimeType type;
+        std::string mime;
+        if (BMimeType::GuessMimeType(&ref, &type) == B_OK)
+            mime = type.Type();
+        const char* ok[] = {"image/png", "image/jpeg", "image/gif", "image/webp"};
+        bool supported = false;
+        for (const char* m : ok) supported = supported || mime == m;
+        if (!supported) {
+            _NotifyAttachmentLimit(path.Leaf() + std::string(" is not a supported image"));
+            continue;
+        }
+
+        pending_attachments_.push_back({path.Path(), mime});
+    }
+    _RebuildAttachRow();
+}
+
+void
+MainWindow::_NotifyAttachmentLimit(const std::string& note)
+{
+    BString text(status_strip_->Text());
+    text << "   |   " << note.c_str();
+    status_strip_->SetText(text);
+}
+
+void
+MainWindow::_RemoveAttachment(int32 index)
+{
+    if (index < 0 || index >= (int32)pending_attachments_.size()) return;
+    pending_attachments_.erase(pending_attachments_.begin() + index);
+    _RebuildAttachRow();
+}
+
+void
+MainWindow::_RebuildAttachRow()
+{
+    while (attach_row_->CountChildren() > 0) {
+        BView* child = attach_row_->ChildAt(0);
+        attach_row_->RemoveChild(child);
+        delete child;
+    }
+
+    for (int32 i = 0; i < (int32)pending_attachments_.size(); i++) {
+        BPath path(pending_attachments_[i].first.c_str());
+        std::string label = std::string("\xc3\x97 ") + path.Leaf();
+        BMessage* m = new BMessage(MSG_REMOVE_ATTACHMENT);
+        m->AddInt32("index", i);
+        attach_row_->AddChild(new BButton("chip", label.c_str(), m));
+    }
+}
+
+void
 MainWindow::_SubmitPrompt()
 {
     if (active_session_id_.empty()) {
@@ -935,13 +1094,26 @@ MainWindow::_SubmitPrompt()
     // Get text from input
     BString input_text = input_view_->Text();
     input_text.Trim();
-    if (input_text.Length() == 0) return;
+    if (input_text.Length() == 0 && pending_attachments_.empty()) return;
 
     std::string text(input_text.String());
     input_view_->SetText("");
     input_view_->MakeFocus(true);
 
-    chat_view_->AppendUserText(text);
+    std::vector<std::string> names;
+    std::vector<haicode::Attachment> attachments;
+    for (const auto& [path, mime] : pending_attachments_) {
+        haicode::Attachment a;
+        a.path       = path;
+        a.media_type = mime;
+        attachments.push_back(a);
+        BPath p(path.c_str());
+        names.push_back(p.Leaf());
+    }
+    pending_attachments_.clear();
+    _RebuildAttachRow();
+
+    chat_view_->AppendUserText(text, names);
     interrupt_btn_->SetEnabled(true);
 
     // Reset per-prompt token counters; engine_running_ flips true on first
@@ -967,7 +1139,7 @@ MainWindow::_SubmitPrompt()
     }
 
     // Submit to engine (runs on engine thread)
-    engine_->submit_prompt(active_session_id_, text);
+    engine_->submit_prompt(active_session_id_, text, attachments);
 }
 
 void
@@ -979,7 +1151,17 @@ MainWindow::_LoadHistory(const std::string& session_id)
             json data = json::parse(sm.data_json);
             if (sm.type == "user_prompted") {
                 std::string text = data.value("text", "");
-                if (!text.empty()) chat_view_->AppendUserText(text);
+                std::vector<std::string> names;
+                if (data.contains("attachments") && data["attachments"].is_array()) {
+                    for (auto& a : data["attachments"]) {
+                        std::string p = a.value("path", "");
+                        auto slash = p.find_last_of('/');
+                        names.push_back(slash == std::string::npos
+                                        ? p : p.substr(slash + 1));
+                    }
+                }
+                if (!text.empty() || !names.empty())
+                    chat_view_->AppendUserText(text, names);
             } else if (sm.type == "assistant_text") {
                 if (data.contains("reasoning") && data["reasoning"].is_string()) {
                     std::string reasoning = data.value("reasoning", "");

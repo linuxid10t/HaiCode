@@ -30,6 +30,15 @@ struct ModelRef {
     std::string provider_id; // e.g. "anthropic"
 };
 
+// An image attached to a user prompt. `data_b64` is filled by the engine at
+// submit time (the GUI/TUI only supply path + media_type) and persisted so
+// session replay survives the source file being moved or deleted.
+struct Attachment {
+    std::string media_type;  // "image/png", "image/jpeg", "image/gif", "image/webp"
+    std::string path;        // source file path (display + provenance)
+    std::string data_b64;    // base64 payload
+};
+
 // Per-session inference parameters, persisted in the session's model_json.
 // Optional fields use a has_* flag so "unset" (provider/model default) is
 // distinguishable from an explicit zero.

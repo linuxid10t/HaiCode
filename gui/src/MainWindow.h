@@ -102,6 +102,13 @@ private:
     void _RestoreInference();     // read model_json → fill inference fields
     void _RestoreInferenceFrom(const haicode::InferenceParams& p);
 
+    // Attachments
+    void _OpenAttachPanel();
+    void _HandleAttachRefs(BMessage* msg);
+    void _NotifyAttachmentLimit(const std::string& note);
+    void _RemoveAttachment(int32 index);
+    void _RebuildAttachRow();
+
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change
     haicode::SessionStore&  store_;
@@ -121,6 +128,7 @@ private:
     ChatView*      chat_view_       = nullptr;
     InputTextView* input_view_      = nullptr;
     BButton*       send_btn_        = nullptr;
+    BButton*       attach_btn_      = nullptr;
     BButton*       interrupt_btn_   = nullptr;
     BButton*       new_session_btn_ = nullptr;
     BButton*       dir_btn_         = nullptr;
@@ -129,6 +137,11 @@ private:
     BCheckBox*     auto_edits_chk_  = nullptr;
     BCheckBox*     yolo_chk_        = nullptr;
     BFilePanel*    dir_panel_       = nullptr;
+    BFilePanel*    attach_panel_    = nullptr;
+    BGroupView*    attach_row_      = nullptr;   // removable attachment chips
+    // path + media_type of images staged for the next prompt (engine reads
+    // and base64-encodes the files at submit time)
+    std::vector<std::pair<std::string, std::string>> pending_attachments_;
     BMenuField*    model_field_     = nullptr;
     BPopUpMenu*    model_menu_      = nullptr;
     BMenuField*    provider_field_  = nullptr;

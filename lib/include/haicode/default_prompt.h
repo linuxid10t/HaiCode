@@ -36,7 +36,11 @@ This is the Haiku operating system (a BeOS descendant). Default to C++ unless th
 - System headers: `/boot/system/develop/headers` (BeAPI under `os/`, POSIX under `posix/`).
 - System libraries: `/boot/system/develop/lib` (link-time) and `/boot/system/lib` (runtime).
 - For native UI, prefer the Haiku Application Server (BeAPI): `BApplication`, `BWindow`, `BView`, `BMessage`, `BLooper`, `BMessenger`. Use BLayoutBuilder for layout-managed views. Reach for POSIX only when BeAPI doesn't cover the use case.
-- Official Haiku API documentation ("The Haiku Book"): https://www.haiku-os.org/docs/api/ — the reference for all BeAPI kits (Application, Interface, Storage, etc.). When you need an accurate class/method signature, use `web_extract` on the relevant class page rather than guessing.
+- Online Haiku API docs ("The Haiku Book"): https://www.haiku-os.org/docs/api/ — the primary, complete reference for all BeAPI kits, including Haiku-era additions such as the Layout API. Use `web_extract` on the relevant class page rather than guessing.
+- Local API docs (offline): the Be Book at `/boot/system/documentation/BeBook/` has per-class HTML pages (`ClassIndex.html`, `BWindow.html`, ...). It is the legacy BeOS edition — it does NOT cover Haiku-era additions such as the Layout API; for those read the Haiku Book or the headers.
+- Headers are ground truth for signatures: grep the header under `/boot/system/develop/headers/os/` (e.g. `os/interface/LayoutBuilder.h`) before writing code against an API you are unsure of.
+- `man <topic>` works for POSIX and third-party APIs (curl, OpenSSL, ncurses, gcc); man pages do not cover BeAPI.
+- More package docs: `/boot/system/documentation/packages/` (gcc, cmake, bash, git, ...).
 - Haiku coding guidelines: https://www.haiku-os.org/development/coding-guidelines/ — the official code style (tabs, 4-space tab width, 100-column limit, operator spacing, BeAPI naming). Follow it when editing Haiku's own system source (headers under `/boot/system/develop/headers` or contributions to the Haiku tree), not for general BeAPI apps.
 - CMake `find_library` with HINTS pointing at the Haiku paths is the established pattern in this repo (see root CMakeLists.txt).
 - File paths use `/boot/home/...` for user files (not `/home/user`).
@@ -154,7 +158,7 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 //   steps_left 5–14  → "Budget is getting tight"
 //   steps_left 1–4   → "CRITICAL"
 constexpr const char* kDynamicSystemPromptNeutral = R"HPCODE(
-You have a per-session step budget (configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each model turn counts as one step, no matter how many tool calls it contains; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration.
+You have a per-session step budget (configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each model turn counts as one step, no matter how many tool calls it contains; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration. Work the active todo list top-down; when it is empty or fully complete, wrap up the current turn by reporting the outcome to the user instead of starting new work.
 )HPCODE";
 
 // Lowercase filenames auto-discovered at the project root.

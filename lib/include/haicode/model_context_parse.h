@@ -31,4 +31,13 @@ int parse_llamacpp_props(const nlohmann::json& j);
 int parse_lmstudio_native_models(const nlohmann::json& j,
                                  const std::string& model_id);
 
+// Translate Anthropic-shaped messages (see openai.cpp block comment) to the
+// OpenAI chat format. The stable `system` prompt becomes message[0] (the
+// cacheable prefix); `system_dynamic` is appended at the tail so it never
+// disturbs the prefix. Pure function, unit-testable.
+std::vector<nlohmann::json> translate_messages(
+    const std::string& system,
+    const std::string& system_dynamic,
+    const std::vector<nlohmann::json>& src);
+
 } // namespace haicode

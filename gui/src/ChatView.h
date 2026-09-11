@@ -37,8 +37,11 @@ class ChatView {
 public:
     explicit ChatView(const char* name);
 
-    // Called from MainWindow::MessageReceived (BLooper thread only)
-    void AppendUserText(const std::string& text);
+    // Called from MainWindow::MessageReceived (BLooper thread only).
+    // attachment_names: image files attached to this prompt, rendered as a
+    // "[image: …]" line after the text (may be empty).
+    void AppendUserText(const std::string& text,
+                        const std::vector<std::string>& attachment_names = {});
     void AppendTextDelta(const std::string& delta);
     void AppendReasoningDelta(const std::string& delta);
     void EndReasoningStreaming();

@@ -125,6 +125,8 @@ ChatView::_Rebuild()
         case ChatEntry::UserText:
             AppendStyled("\nYou: ", kColorUser, true);
             AppendStyled(e.text + "\n", kColorUser, false);
+            if (!e.name.empty())
+                AppendStyled("[image: " + e.name + "]\n", kColorUser, false);
             break;
 
         case ChatEntry::AssistantText:
@@ -181,13 +183,21 @@ ChatView::_Rebuild()
 }
 
 void
-ChatView::AppendUserText(const std::string& text)
+ChatView::AppendUserText(const std::string& text,
+                         const std::vector<std::string>& attachment_names)
 {
     EndReasoningStreaming();
     streaming_ = false;
-    model_.push_back({ChatEntry::UserText, text, "", true, false});
+    std::string names;
+    for (size_t i = 0; i < attachment_names.size(); ++i) {
+        if (i) names += ", ";
+        names += attachment_names[i];
+    }
+    model_.push_back({ChatEntry::UserText, text, names, true, false});
     AppendStyled("\nYou: ", kColorUser, true);
     AppendStyled(text + "\n", kColorUser, false);
+    if (!names.empty())
+        AppendStyled("[image: " + names + "]\n", kColorUser, false);
 }
 
 void

@@ -44,6 +44,12 @@ public:
                                 const std::string& provider_id = "");
 
     void submit_prompt(const std::string& session_id, const std::string& text);
+    // Submit with image attachments. The engine reads each file, base64-
+    // encodes it, and persists the payload inside the user_prompted row so
+    // session replay survives the source file being moved or deleted.
+    // Unreadable attachments are skipped (logged to stderr).
+    void submit_prompt(const std::string& session_id, const std::string& text,
+                       const std::vector<Attachment>& attachments);
     // Resume the agentic loop without adding a new user message (used after plan approval).
     void continue_session(const std::string& session_id);
     // Append a user_prompted message + publish Prompted event without starting
