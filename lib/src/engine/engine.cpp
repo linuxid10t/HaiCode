@@ -836,11 +836,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // request. Disabled when the window is unknown (0) or auto_compact is off.
         //
         // Token count source: prefer the provider's reported usage from the
-        // previous step (prev_total_input) since it's exact. It starts at 0 and
-        // is set after each step — it is NOT reset between turns, so on step 0
-        // of any turn after the first it still holds the previous turn's final
-        // usage, which is accurate enough. The estimate fallback only fires on
-        // the very first step of the very first turn, where no usage exists.
+        // previous step (prev_total_input) since it's exact. It is a local
+        // reset to 0 at the start of every turn, so step 0 of each turn falls
+        // back to the chars/4 estimate (system + tools + messages); from
+        // step 1 onward the real usage takes over.
         if (config_.auto_compact) {
             int window = haicode::get_context_window(provider_id, model_id,
                                                      config_.model_contexts,
@@ -1564,6 +1563,9 @@ bool SessionEngine::compact_history(const std::string& session_id,
         cbs.on_text_delta = [&](const std::string&, const std::string& d) {
             out += d;
         };
+        // Providers invoke on_finish unconditionally; leaving it unset makes
+        // an empty std::function call (std::bad_function_call → abort).
+        cbs.on_finish = [](FinishReason, TokenUsage, std::vector<ToolCall>) {};
         cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
         provider.stream(r, cbs);
         return !failed;

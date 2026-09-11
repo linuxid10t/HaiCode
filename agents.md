@@ -59,6 +59,12 @@ Rules:
   providers (e.g. `"my-proxy"`) do not match the built-in
   `"anthropic:claude-..."` entries; the `pricing` config override is the escape
   hatch until pricing is keyed on type instead of id.
+- **Compaction never deletes rows.** Context compaction is checkpoint-based:
+  `compaction_checkpoint` rows record `through_seq` boundaries; the full
+  conversation stays in `session_message`. Context assembly goes through
+  `SessionEngine::load_context_messages` → `apply_checkpoint` (slice
+  `seq > through_seq`, prepend the rendered checkpoint block). Pure logic
+  lives in `lib/src/compaction/compaction.cpp`.
 - Style: minimal comments (only for non-obvious why), 4-space indent, Haiku
   BeAPI naming (`BWindow`, `BMessage`, `BMessenger`). See `CLAUDE.md` for the
   deeper engine/pricing/permission walkthrough.

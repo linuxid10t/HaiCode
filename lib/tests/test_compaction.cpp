@@ -91,7 +91,11 @@ static bool test_end_to_end_checkpoint() {
     cfg.provider = "fake";
     cfg.autoname_sessions = false;
     cfg.default_mode = "build";
-    cfg.model_contexts["fake-model"] = 16000;
+    // Small window so the usage-driven trigger actually fires: the fake
+    // conversation is tiny, and prev_total_input resets to 0 at the start of
+    // each turn (it is a loop-local), so turn 1's 999999 usage must be
+    // compared against a threshold the estimate path can also reach.
+    cfg.model_contexts["fake-model"] = 2000;
 
     haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
     std::string sid = engine.create_session("/tmp/proj", "build",
