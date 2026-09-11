@@ -3,6 +3,7 @@
 #include <haicode/default_prompt.h>
 #include <haicode/pricing.h>
 #include <haicode/model_info.h>
+#include <haicode/compaction.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <thread>

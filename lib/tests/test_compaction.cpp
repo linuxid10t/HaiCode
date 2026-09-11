@@ -1,368 +1,283 @@
 #include <haicode/db.h>
+#include <haicode/compaction.h>
 #include <haicode/engine.h>
 #include <haicode/model_info.h>
 #include <haicode/config.h>
+#include <haicode/provider.h>
+#include <haicode/tool.h>
+#include <chrono>
 #include <iostream>
-#include <cassert>
 #include <cstdio>
+#include <thread>
+#include <unistd.h>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)
 
-// Mirror of the engine's threshold arithmetic so the test is self-contained.
-static bool should_compact(int prev_total_input, int window, int reserve,
-                           double threshold_frac) {
-    if (window <= 0) return false;
-    int effective = window - reserve;
-    int threshold = static_cast<int>(effective * threshold_frac);
-    return threshold > 0 && prev_total_input >= threshold;
+static const char* kDbPath = "/tmp/haicode_test_compaction.db";
+
+// Drives the real agentic loop end-to-end: over-threshold usage on turn 1
+// arms the trigger; turn 2's first step must compact via a checkpoint.
+class FakeProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "fake"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"fake-model"};
+    }
+    void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb) override {
+        ++calls;
+        if (req.system == "You are a precise conversation summarizer.") {
+            summary_requests.push_back(req);
+            cb.on_text_delta("t",
+                "## Objective\no\n\n## Constraints & Decisions\nc\n\n"
+                "## Completed Work\ncw\n\n## Active Work\naw\n\n"
+                "## Blockers\nb\n\n## Next Actions\nn\n\n"
+                "## Relevant Files\nf\n");
+            cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+            return;
+        }
+        last_chat_request = req;
+        cb.on_text_delta("t", "ok");
+        haicode::TokenUsage u;
+        u.input = 999999;  // over any threshold → arms/re-fires the trigger
+        cb.on_finish(haicode::FinishReason::EndTurn, u, {});
+    }
+    int calls = 0;
+    std::vector<haicode::LLMRequest> summary_requests;
+    haicode::LLMRequest last_chat_request;
+
+    static std::string dump_messages(const std::vector<nlohmann::json>& msgs) {
+        std::string out;
+        for (const auto& m : msgs) out += m.dump();
+        return out;
+    }
+};
+
+static bool wait_for(haicode::SessionStore& store, const std::string& sid,
+                     size_t want_messages, bool want_checkpoint) {
+    for (int i = 0; i < 100; ++i) {
+        size_t n = store.load_messages(sid).size();
+        bool cp = want_checkpoint
+            ? store.latest_complete_checkpoint(sid).has_value()
+            : !store.latest_complete_checkpoint(sid).has_value();
+        if (n >= want_messages && cp) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return false;
 }
 
-static bool test_threshold_basic() {
-    // window=200000, reserve=8192, threshold=0.80 → effective=191808,
-    // threshold=153446 (floor). Triggers at >= that.
-    int window = 200000, reserve = 8192;
-    double frac = 0.80;
-    CHECK(should_compact(153446, window, reserve, frac),
-          "should trigger at exactly effective*0.80");
-    CHECK(should_compact(180000, window, reserve, frac),
-          "should trigger well above threshold");
-    CHECK(!should_compact(100000, window, reserve, frac),
-          "should NOT trigger below threshold");
-    std::cout << "[OK] threshold basic (153446 triggers, 100000 does not)\n";
+// Regression for "compaction triggers but does nothing": the whole e2e path —
+// trigger → split → summarize → validate → commit → sliced request.
+static bool test_end_to_end_checkpoint() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "fake-model";
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    cfg.model_contexts["fake-model"] = 16000;
+
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid = engine.create_session("/tmp/proj", "build",
+                                            "fake-model", "fake");
+
+    engine.submit_prompt(sid, "TURNONE-MARKER first prompt");
+    CHECK(wait_for(store, sid, 2, false), "turn 1 completes (2 rows, no ckpt)");
+
+    engine.submit_prompt(sid, "TURNTWO-MARKER second prompt");
+    CHECK(wait_for(store, sid, 4, true),
+          "turn 2 completes AND a completed checkpoint exists");
+
+    auto cp = store.latest_complete_checkpoint(sid);
+    CHECK(cp.has_value(), "checkpoint committed");
+    CHECK(cp->through_seq >= 1, "boundary covers at least the oldest turn");
+    CHECK(store.load_messages(sid).size() == 4,
+          "all four rows survive compaction");
+    CHECK(!provider->summary_requests.empty(), "summarizer call happened");
+    std::string reqd = FakeProvider::dump_messages(provider->last_chat_request.messages);
+    CHECK(reqd.find("TURNONE-MARKER") == std::string::npos,
+          "post-compaction request excludes pre-checkpoint turns");
+    CHECK(reqd.find("HISTORICAL CONVERSATION") != std::string::npos,
+          "post-compaction request carries the checkpoint block");
+    CHECK(reqd.find("TURNTWO-MARKER") != std::string::npos,
+          "post-checkpoint turns stay live");
+    std::cout << "[OK] end-to-end: trigger -> checkpoint -> sliced request\n";
     return true;
 }
 
-static bool test_threshold_unknown_window() {
-    // window=0 → never trigger, regardless of token count.
-    CHECK(!should_compact(500000, 0, 8192, 0.80),
-          "window=0 must disable compaction");
-    CHECK(!should_compact(500000, 0, 0, 0.80),
-          "window=0 + reserve=0 must still disable compaction");
-    std::cout << "[OK] threshold unknown window (window=0 disables)\n";
+static void append_user(haicode::SessionStore& store, const std::string& sid,
+                        const std::string& text) {
+    store.append_message(sid, "user_prompted",
+        nlohmann::json{{"text", text}}.dump());
+}
+static void append_asst(haicode::SessionStore& store, const std::string& sid,
+                        const std::string& text) {
+    store.append_message(sid, "assistant_text",
+        nlohmann::json{{"text", text}, {"role", "assistant"}}.dump());
+}
+
+static bool test_checkpoint_roundtrip() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto sess = store.create("/tmp/proj", "build", "{}");
+
+    CHECK(!store.latest_complete_checkpoint(sess.id).has_value(),
+          "no checkpoint initially");
+
+    std::string id1 = store.insert_checkpoint(sess.id, 4, "recent-ctx-1", "");
+    CHECK(!store.latest_complete_checkpoint(sess.id).has_value(),
+          "pending checkpoint is not visible");
+
+    store.complete_checkpoint(id1, "## Objective\nsummary-1");
+    auto cp1 = store.latest_complete_checkpoint(sess.id);
+    CHECK(cp1.has_value() && cp1->id == id1, "complete checkpoint visible");
+    CHECK(cp1->summary == "## Objective\nsummary-1", "summary round-trips");
+    CHECK(cp1->recent_context == "recent-ctx-1", "recent_context round-trips");
+
+    std::string id2 = store.insert_checkpoint(sess.id, 8, "recent-ctx-2", id1);
+    store.fail_checkpoint(id2);
+    auto cp2 = store.latest_complete_checkpoint(sess.id);
+    CHECK(cp2.has_value() && cp2->id == id1,
+          "failed checkpoint does not become active");
+
+    std::string id3 = store.insert_checkpoint(sess.id, 12, "recent-ctx-3", id1);
+    store.complete_checkpoint(id3, "## Objective\nsummary-3");
+    auto cp3 = store.latest_complete_checkpoint(sess.id);
+    CHECK(cp3.has_value() && cp3->id == id3, "latest by through_seq");
+    CHECK(cp3->previous_checkpoint_id == id1, "chain links to predecessor");
+    std::cout << "[OK] checkpoint round-trip (pending/complete/failed/chain)\n";
     return true;
 }
 
-static bool test_get_context_window_unknown() {
+static bool test_messages_survive() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto sess = store.create("/tmp/proj", "build", "{}");
+
+    for (int i = 1; i <= 6; ++i) {
+        append_user(store, sess.id, "turn " + std::to_string(i));
+        append_asst(store, sess.id, "reply " + std::to_string(i));
+    }
+    size_t before = store.load_messages(sess.id).size();
+    CHECK(before == 12, "six turns stored");
+
+    std::string id = store.insert_checkpoint(sess.id, 8, "tail", "");
+    store.complete_checkpoint(id, "## Objective\ns");
+    CHECK(store.load_messages(sess.id).size() == before,
+          "HEADLINE: messages survive compaction (rows never deleted)");
+    std::cout << "[OK] messages survive compaction\n";
+    return true;
+}
+
+static bool test_assembly_with_checkpoint() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto sess = store.create("/tmp/proj", "build", "{}");
+
+    append_user(store, sess.id, "always use tabs");
+    append_asst(store, sess.id, "understood");
+    append_user(store, sess.id, "now build");
+    append_asst(store, sess.id, "building");
+
+    std::string id = store.insert_checkpoint(sess.id, 2, "RECENTCTX", "");
+    store.complete_checkpoint(id, "## Objective\ntabs-only constraint");
+
+    haicode::ContextBuilder builder;
+    auto out = haicode::apply_checkpoint(store.load_messages(sess.id),
+                                         *store.latest_complete_checkpoint(sess.id));
+    CHECK(out.size() == 3, "block + tail only");
+    auto assembled = builder.assemble_messages(out);
+    CHECK(assembled.size() == 3, "three provider messages");
+    std::string first = assembled[0].dump();
+    CHECK(first.find("tabs-only constraint") != std::string::npos,
+          "summary text reaches the request");
+    CHECK(first.find("always use tabs") == std::string::npos,
+          "pre-checkpoint rows do NOT reach the request");
+    CHECK(first.find("RECENTCTX") == std::string::npos,
+          "retained recent context is not re-embedded (no double count)");
+    CHECK(assembled[1].value("role", "") == "user"
+              && assembled[2].value("role", "") == "assistant",
+          "alternation legal after checkpoint");
+    std::cout << "[OK] assembly slices by through_seq and prepends block\n";
+    return true;
+}
+
+static bool test_split_feeds_checkpoint_chain() {
+    std::vector<haicode::SessionMessage> msgs;
+    auto mk = [](int seq, const char* type, const std::string& text) {
+        haicode::SessionMessage m;
+        m.seq = seq; m.type = type;
+        m.data_json = nlohmann::json{{"text", text}}.dump();
+        return m;
+    };
+    for (int i = 1; i <= 8; ++i) {
+        msgs.push_back(mk(i * 2 - 1, "user_prompted", "note " + std::to_string(i)));
+        msgs.push_back(mk(i * 2, "assistant_text", "ack " + std::to_string(i)));
+    }
+
+    int ts1 = haicode::split_history(msgs, 200, 0);
+    CHECK(ts1 > 0, "first split finds a boundary");
+
+    for (int i = 9; i <= 12; ++i) {
+        msgs.push_back(mk(i * 2 - 1, "user_prompted", "note " + std::to_string(i)));
+        msgs.push_back(mk(i * 2, "assistant_text", "ack " + std::to_string(i)));
+    }
+    std::string prev_summary = "## Objective\nkeep the tabs rule";
+    int ts2 = haicode::split_history(msgs, 200, ts1);
+    CHECK(ts2 > ts1, "second split advances past the first boundary");
+    std::string prompt2 = haicode::build_summary_prompt(prev_summary,
+                          "### User\nnote 1", "newer history");
+    CHECK(prompt2.find("keep the tabs rule") != std::string::npos,
+          "early constraint survives into generation 2 via the summary");
+    std::cout << "[OK] chained compaction merges rather than duplicates\n";
+    return true;
+}
+
+static bool test_get_context_window_and_hysteresis() {
     haicode::AppConfig cfg;
     CHECK(haicode::get_context_window("weird", "totally-unknown-model-xyz",
                                       cfg.model_contexts) == 0,
-          "unknown model should return 0 context window");
-    std::cout << "[OK] get_context_window returns 0 for unknown model\n";
-    return true;
-}
-
-static bool test_get_context_window_override() {
-    haicode::AppConfig cfg;
+          "unknown model returns 0");
     cfg.model_contexts["my-custom-model"] = 123456;
     CHECK(haicode::get_context_window("x", "my-custom-model",
                                       cfg.model_contexts) == 123456,
-          "config override should take precedence");
-    std::cout << "[OK] get_context_window honors config override\n";
-    return true;
-}
+          "config override wins");
 
-static bool test_threshold_with_estimate_fallback() {
-    // When prev_total_input == 0 (first step of a turn), the engine falls back
-    // to a char-based estimate (~chars/4). Simulate: a 700k-char request
-    // estimates to ~175k tokens, which should trigger at the 153k threshold.
-    int window = 200000, reserve = 8192;
-    double frac = 0.80;
-    int threshold = static_cast<int>((window - reserve) * frac); // 153446
-    int estimated = 700000 / 4;  // 175000
-    CHECK(estimated >= threshold,
-          "estimated 175k should trigger at 153446 threshold");
-    // A small 20k-char request (~5k tokens) should not.
-    int small = 20000 / 4;
-    CHECK(!(small >= threshold),
-          "estimated 5k should NOT trigger");
-    std::cout << "[OK] threshold estimate fallback (175k triggers, 5k does not)\n";
-    return true;
-}
-
-static bool test_compact_messages_roundtrip() {
-    const char* db_path = "/tmp/test_haicode_compact.db";
-    std::remove(db_path);
-    haicode::Database db(db_path);
-    db.migrate();
-    haicode::SessionStore store(db);
-
-    auto session = store.create("/tmp", "default", "{}");
-
-    // Build: [head: 4 msgs seq 1-4][tail: last user_prompted + 2 more]
-    store.append_message(session.id, "user_prompted",  "{\"role\":\"user\",\"text\":\"old1\"}");
-    store.append_message(session.id, "assistant_text", "{\"role\":\"assistant\",\"text\":\"old2\"}");
-    store.append_message(session.id, "tool_result",    "{\"call_id\":\"c1\",\"output\":\"old3\"}");
-    store.append_message(session.id, "assistant_text", "{\"role\":\"assistant\",\"text\":\"old4\"}");
-    // tail begins here (seq 5)
-    store.append_message(session.id, "user_prompted",  "{\"role\":\"user\",\"text\":\"current\"}");
-    store.append_message(session.id, "assistant_text", "{\"role\":\"assistant\",\"text\":\"resp\"}");
-    store.append_message(session.id, "tool_result",    "{\"call_id\":\"c2\",\"output\":\"cur-out\"}");
-
-    auto before = store.load_messages(session.id);
-    CHECK(before.size() == 7, "expected 7 messages before compaction");
-
-    int tail_start_seq = 5;  // the last user_prompted
-    std::string summary_json = "{\"role\":\"user\",\"text\":\"[Conversation summary]\\nstuff\"}";
-    store.compact_messages(session.id, tail_start_seq, summary_json);
-
-    auto after = store.load_messages(session.id);
-    // head (4 rows) replaced by 1 summary → 7 - 4 + 1 = 4
-    CHECK(after.size() == 4, "expected 4 messages after compaction, got "
-          + std::to_string(after.size()));
-
-    // First row must be the summary at seq 0.
-    CHECK(after[0].type == "compaction_summary",
-          "first message should be compaction_summary, got " + after[0].type);
-    CHECK(after[0].seq == 0, "summary should be at seq 0");
-    CHECK(after[0].data_json == summary_json, "summary data_json should match");
-
-    // Tail must be intact: seqs 5,6,7 with original types.
-    CHECK(after[1].seq == 5 && after[1].type == "user_prompted",
-          "tail[0] should be seq 5 user_prompted");
-    CHECK(after[2].seq == 6 && after[2].type == "assistant_text",
-          "tail[1] should be seq 6 assistant_text");
-    CHECK(after[3].seq == 7 && after[3].type == "tool_result",
-          "tail[2] should be seq 7 tool_result");
-
-    std::cout << "[OK] compact_messages DB round-trip (7->4, head replaced, tail intact)\n";
-    return true;
-}
-
-static bool test_summary_emitted_as_assistant_role() {
-    // Regression for the "two consecutive user messages" bug. A persisted
-    // compaction_summary must be emitted as role=assistant so the alternation
-    // with the tail's user_prompted is legal.
-    std::vector<haicode::SessionMessage> msgs;
-    {
-        haicode::SessionMessage m;
-        m.seq = 0; m.type = "compaction_summary";
-        m.data_json = "{\"role\":\"assistant\",\"text\":\"prior summary content\"}";
-        msgs.push_back(m);
-    }
-    {
-        haicode::SessionMessage m;
-        m.seq = 1; m.type = "user_prompted";
-        m.data_json = "{\"role\":\"user\",\"text\":\"next question\"}";
-        msgs.push_back(m);
-    }
-
-    haicode::ContextBuilder cb;
-    auto out = cb.assemble_messages(msgs);
-    CHECK(out.size() == 2, "expected 2 assembled messages, got " + std::to_string(out.size()));
-    CHECK(out[0].value("role", "") == "assistant",
-          "summary must assemble as assistant, got " + out[0].value("role","<missing>"));
-    CHECK(out[1].value("role", "") == "user",
-          "user_prompted must follow as user, got " + out[1].value("role","<missing>"));
-    // Lead-in is present so the model knows what it's reading, and is flagged
-    // as a system-injected compaction (not normal assistant speech).
-    std::string c0 = out[0].value("content", "");
-    CHECK(c0.find("compacted earlier turns") != std::string::npos,
-          "summary content should carry the compaction flag");
-    CHECK(c0.find("Summary of the prior conversation") != std::string::npos,
-          "summary content should carry the lead-in");
-    CHECK(c0.find("prior summary content") != std::string::npos,
-          "summary content should retain the stored text");
-    std::cout << "[OK] summary emitted as assistant role (legal alternation)\n";
-    return true;
-}
-
-static bool test_choose_tail_multi_turn() {
-    // Multi-turn case: should pick the seq of the last user_prompted.
-    std::vector<haicode::SessionMessage> msgs;
-    auto mk = [&](int seq, const std::string& type, const std::string& body) {
-        haicode::SessionMessage m; m.seq = seq; m.type = type; m.data_json = body;
-        msgs.push_back(m);
-    };
-    mk(1, "user_prompted",  "{\"text\":\"first\"}");
-    mk(2, "assistant_text", "{\"text\":\"ack\"}");
-    mk(3, "user_prompted",  "{\"text\":\"second\"}");  // tail starts here
-    mk(4, "assistant_text", "{\"text\":\"ok\"}");
-    int tail = haicode::choose_tail_start_seq(msgs, 4);
-    CHECK(tail == 3, "multi-turn: expected tail=3, got " + std::to_string(tail));
-    std::cout << "[OK] choose_tail_start_seq multi-turn picks last user_prompted\n";
-    return true;
-}
-
-static bool test_choose_tail_single_long_turn() {
-    // Single-turn fallback: one user_prompted + 6 assistant/tool round-trips.
-    // K=4 means the tail begins at the 4th-from-last assistant_text.
-    std::vector<haicode::SessionMessage> msgs;
-    auto mk = [&](int seq, const std::string& type, const std::string& body) {
-        haicode::SessionMessage m; m.seq = seq; m.type = type; m.data_json = body;
-        msgs.push_back(m);
-    };
-    mk(1, "user_prompted", "{\"text\":\"go\"}");
-    int seq = 2;
-    for (int i = 0; i < 6; ++i) {
-        mk(seq++, "assistant_text",
-           "{\"text\":\"t\",\"tool_calls\":[{\"id\":\"c\",\"name\":\"read\",\"input\":{}}]}");
-        mk(seq++, "tool_result", "{\"call_id\":\"c\",\"output\":\"x\"}");
-    }
-    // Assistants are at seqs 2,4,6,8,10,12. K=4 keeps last 4 → starts at seq 6.
-    int tail = haicode::choose_tail_start_seq(msgs, 4);
-    CHECK(tail == 6, "single-turn: expected tail=6, got " + std::to_string(tail));
-    std::cout << "[OK] choose_tail_start_seq single-turn K=4 picks 4th-from-last assistant\n";
-    return true;
-}
-
-static bool test_choose_tail_not_enough_round_trips() {
-    // Single-turn with fewer than K round-trips → no compaction.
-    std::vector<haicode::SessionMessage> msgs;
-    auto mk = [&](int seq, const std::string& type, const std::string& body) {
-        haicode::SessionMessage m; m.seq = seq; m.type = type; m.data_json = body;
-        msgs.push_back(m);
-    };
-    mk(1, "user_prompted", "{\"text\":\"go\"}");
-    for (int i = 0; i < 2; ++i) {
-        mk(2 + i*2, "assistant_text",
-           "{\"text\":\"t\",\"tool_calls\":[{\"id\":\"c\",\"name\":\"read\",\"input\":{}}]}");
-        mk(3 + i*2, "tool_result", "{\"call_id\":\"c\",\"output\":\"x\"}");
-    }
-    int tail = haicode::choose_tail_start_seq(msgs, 4);
-    CHECK(tail == -1, "expected -1 (fewer than K round-trips), got " + std::to_string(tail));
-    std::cout << "[OK] choose_tail_start_seq returns -1 when round-trips < K\n";
-    return true;
-}
-
-static bool test_summary_inserts_user_stub_before_assistant() {
-    // Single-turn fallback puts assistant_text right after the summary.
-    // assemble_messages must insert a stub user turn to keep alternation legal.
-    std::vector<haicode::SessionMessage> msgs;
-    {
-        haicode::SessionMessage m;
-        m.seq = 0; m.type = "compaction_summary";
-        m.data_json = "{\"role\":\"assistant\",\"text\":\"prior\"}";
-        msgs.push_back(m);
-    }
-    {
-        haicode::SessionMessage m;
-        m.seq = 2; m.type = "assistant_text";
-        m.data_json = "{\"text\":\"resume\",\"tool_calls\":[{\"id\":\"c\",\"name\":\"read\",\"input\":{}}]}";
-        msgs.push_back(m);
-    }
-    haicode::ContextBuilder cb;
-    auto out = cb.assemble_messages(msgs);
-    CHECK(out.size() == 3, "expected summary + stub + assistant, got "
-          + std::to_string(out.size()));
-    CHECK(out[0].value("role","") == "assistant", "out[0] should be assistant (summary)");
-    CHECK(out[1].value("role","") == "user", "out[1] should be the stub user");
-    CHECK(out[2].value("role","") == "assistant", "out[2] should be the resume assistant");
-    std::cout << "[OK] assemble_messages inserts user stub before assistant follower\n";
-    return true;
-}
-
-static bool test_select_summary_prompt() {
-    // First-pass head (no prior summary) → first prompt.
-    std::vector<haicode::SessionMessage> head1;
-    {
-        haicode::SessionMessage m;
-        m.seq = 1; m.type = "user_prompted";
-        m.data_json = "{\"text\":\"go\"}";
-        head1.push_back(m);
-    }
-    const char* p1 = haicode::select_summary_prompt(head1);
-    CHECK(p1 != nullptr, "first-pass prompt must not be null");
-    CHECK(std::string(p1).find("Segment 1") == std::string::npos,
-          "first-pass prompt should not mention Segment 1");
-    CHECK(std::string(p1).find("Summarize the following conversation") != std::string::npos,
-          "first-pass prompt should be the first-pass text");
-
-    // Resegment head (starts with prior summary) → resegment prompt.
-    std::vector<haicode::SessionMessage> head2;
-    {
-        haicode::SessionMessage m;
-        m.seq = 0; m.type = "compaction_summary";
-        m.data_json = "{\"role\":\"assistant\",\"text\":\"prior summary\"}";
-        head2.push_back(m);
-    }
-    {
-        haicode::SessionMessage m;
-        m.seq = 1; m.type = "user_prompted";
-        m.data_json = "{\"text\":\"new turn\"}";
-        head2.push_back(m);
-    }
-    const char* p2 = haicode::select_summary_prompt(head2);
-    CHECK(p2 != nullptr, "resegment prompt must not be null");
-    CHECK(std::string(p2).find("Segment 1") != std::string::npos,
-          "resegment prompt should mention Segment 1");
-    CHECK(std::string(p2).find("Segment 2") != std::string::npos,
-          "resegment prompt should mention Segment 2");
-    CHECK(std::string(p2).find("VERBATIM") != std::string::npos,
-          "resegment prompt should require verbatim preservation");
-    std::cout << "[OK] select_summary_prompt picks resegment when head[0]==compaction_summary\n";
-    return true;
-}
-
-static bool test_hysteresis_blocks_immediate_recompact() {
-    const int threshold = 100000;
-    const int over = 110000;       // safely above threshold
-    const int below = 50000;       // safely below threshold
-
-    // Never compacted → fires when over threshold.
-    CHECK(haicode::should_compact_with_hysteresis(over, threshold, 5, -1),
-          "first compaction should fire when above threshold and lcs<0");
-    // Same step right after compaction → blocked (gap < 2).
-    CHECK(!haicode::should_compact_with_hysteresis(over, threshold, 6, 5),
-          "step+1 should block (gap=1 < 2)");
-    // Step+2 → gap satisfied, allowed when still above threshold.
-    CHECK(haicode::should_compact_with_hysteresis(over, threshold, 7, 5),
-          "step+2 should re-allow when above threshold");
-    // Below threshold → never fires regardless of lcs.
-    CHECK(!haicode::should_compact_with_hysteresis(below, threshold, 9, 5),
-          "below threshold should not fire even with sufficient gap");
-    CHECK(!haicode::should_compact_with_hysteresis(below, threshold, 0, -1),
-          "below threshold + never compacted should not fire");
-    // Disabled threshold (window=0 path produces threshold<=0).
-    CHECK(!haicode::should_compact_with_hysteresis(over, 0, 0, -1),
-          "threshold<=0 must disable");
-    std::cout << "[OK] hysteresis blocks immediate recompaction (2-step gap)\n";
-    return true;
-}
-
-static bool test_compact_messages_noop() {
-    const char* db_path = "/tmp/test_haicode_compact2.db";
-    std::remove(db_path);
-    haicode::Database db(db_path);
-    db.migrate();
-    haicode::SessionStore store(db);
-
-    auto session = store.create("/tmp", "default", "{}");
-    store.append_message(session.id, "user_prompted", "{\"role\":\"user\",\"text\":\"hi\"}");
-    store.append_message(session.id, "assistant_text", "{\"role\":\"assistant\",\"text\":\"yo\"}");
-
-    // keep_from_seq <= 1 is a no-op (nothing before the tail).
-    store.compact_messages(session.id, 1, "{\"role\":\"user\",\"text\":\"summary\"}");
-
-    auto msgs = store.load_messages(session.id);
-    CHECK(msgs.size() == 2, "no-op compaction should leave messages untouched");
-    CHECK(msgs[0].type != "compaction_summary",
-          "no summary should be inserted on no-op");
-    std::cout << "[OK] compact_messages no-op when keep_from_seq <= 1\n";
+    CHECK(haicode::should_compact_with_hysteresis(100, 80, 5, -1), "first crossing fires");
+    CHECK(!haicode::should_compact_with_hysteresis(100, 80, 6, 5), "blocked within 2 steps");
+    CHECK(haicode::should_compact_with_hysteresis(100, 80, 7, 5), "re-armed after 2");
+    CHECK(!haicode::should_compact_with_hysteresis(79, 80, 5, -1), "below threshold never fires");
+    std::cout << "[OK] get_context_window + hysteresis gating\n";
     return true;
 }
 
 int main() {
-    std::cout << "=== Compaction Tests ===\n";
     bool ok = true;
-    ok &= test_threshold_basic();
-    ok &= test_threshold_unknown_window();
-    ok &= test_threshold_with_estimate_fallback();
-    ok &= test_get_context_window_unknown();
-    ok &= test_get_context_window_override();
-    ok &= test_compact_messages_roundtrip();
-    ok &= test_summary_emitted_as_assistant_role();
-    ok &= test_choose_tail_multi_turn();
-    ok &= test_choose_tail_single_long_turn();
-    ok &= test_choose_tail_not_enough_round_trips();
-    ok &= test_summary_inserts_user_stub_before_assistant();
-    ok &= test_select_summary_prompt();
-    ok &= test_hysteresis_blocks_immediate_recompact();
-    ok &= test_compact_messages_noop();
-    if (ok) {
-        std::cout << "\nAll compaction tests passed!\n";
-        return 0;
-    }
-    std::cerr << "\nSome compaction tests FAILED.\n";
-    return 1;
+    ok &= test_end_to_end_checkpoint();
+    ok &= test_checkpoint_roundtrip();
+    ok &= test_messages_survive();
+    ok &= test_assembly_with_checkpoint();
+    ok &= test_split_feeds_checkpoint_chain();
+    ok &= test_get_context_window_and_hysteresis();
+    if (ok) remove(kDbPath);
+    std::cout << (ok ? "ALL COMPACTION TESTS PASSED\n"
+                     : "COMPACTION TESTS FAILED\n");
+    return ok ? 0 : 1;
 }

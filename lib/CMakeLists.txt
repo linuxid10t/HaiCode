@@ -6,6 +6,7 @@ file(GLOB_RECURSE HAICODE_SOURCES
     "src/db/*.cpp"
     "src/session/*.cpp"
     "src/engine/*.cpp"
+    "src/compaction/*.cpp"
     "src/provider/*.cpp"
     "src/tool/*.cpp"
     "src/permission/*.cpp"
@@ -50,6 +51,9 @@ target_link_libraries(test_step_budget haicode)
 
 add_executable(test_compaction tests/test_compaction.cpp)
 target_link_libraries(test_compaction haicode)
+
+add_executable(test_checkpoint tests/test_checkpoint.cpp)
+target_link_libraries(test_checkpoint haicode)
 
 add_executable(test_model_context tests/test_model_context.cpp)
 target_link_libraries(test_model_context haicode)
