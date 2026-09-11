@@ -193,6 +193,18 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             int r = j["auto_compact_reserve"].get<int>();
             if (r > 0) cfg.auto_compact_reserve = r;
         }
+        if (j.contains("compaction_buffer") && j["compaction_buffer"].is_number_integer()) {
+            int v = j["compaction_buffer"].get<int>();
+            if (v > 0) cfg.compaction_buffer = v;
+        }
+        if (j.contains("compaction_recent_context") && j["compaction_recent_context"].is_number_integer()) {
+            int v = j["compaction_recent_context"].get<int>();
+            if (v > 0) cfg.compaction_recent_context = v;
+        }
+        if (j.contains("compaction_summary_max_tokens") && j["compaction_summary_max_tokens"].is_number_integer()) {
+            int v = j["compaction_summary_max_tokens"].get<int>();
+            if (v > 0) cfg.compaction_summary_max_tokens = v;
+        }
 
         // Session autonaming: master toggle + LLM refine sub-flag.
         if (j.contains("autoname_sessions") && j["autoname_sessions"].is_boolean())
@@ -260,6 +272,12 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.auto_compact_threshold = overlay.auto_compact_threshold;
     if (overlay.auto_compact_reserve != 8192)
         result.auto_compact_reserve = overlay.auto_compact_reserve;
+    if (overlay.compaction_buffer != 8192)
+        result.compaction_buffer = overlay.compaction_buffer;
+    if (overlay.compaction_recent_context != 10240)
+        result.compaction_recent_context = overlay.compaction_recent_context;
+    if (overlay.compaction_summary_max_tokens != 4096)
+        result.compaction_summary_max_tokens = overlay.compaction_summary_max_tokens;
 
     // Booleans: overlay only wins if it explicitly disables (false). A missing
     // key parses to the struct default (true), so we must not let it clobber a
