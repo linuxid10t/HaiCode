@@ -536,15 +536,19 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_SELECT_SESSION: {
-            if (suppress_next_select_ > 0) {
-                --suppress_next_select_;
+            // Prefer the live selection: BListView's selection message may not
+            // carry an index, and programmatic Select() echoes land here too.
+            // An echo targets the already-active session — clicking the
+            // selected item produces no notification — so skip it instead of
+            // counting suppressions (a stale count swallowed real clicks).
+            int32 idx = session_list_->CurrentSelection();
+            if (idx < 0)
+                msg->FindInt32("index", &idx);
+            if (idx < 0 || idx >= (int32)session_ids_.size())
                 break;
-            }
-            int32 idx = -1;
-            if (msg->FindInt32("index", &idx) != B_OK)
-                idx = session_list_->CurrentSelection();
-            if (idx >= 0)
-                _SelectSession(static_cast<int>(idx));
+            if (session_ids_[idx] == active_session_id_)
+                break;
+            _SelectSession(static_cast<int>(idx));
             break;
         }
         case MSG_DELETE_SESSION: {
@@ -605,9 +609,19 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_COMPACTION:
             _HandleCompaction(msg);
             break;
-        case MSG_SESSION_RENAMED:
+        case MSG_SESSION_RENAMED: {
             _RefreshSessionList();
+            // MakeEmpty() cleared the highlight; restore it for the active
+            // session. The resulting Select() echo is skipped by the equality
+            // check in MSG_SELECT_SESSION.
+            for (int i = 0; i < (int)session_ids_.size(); ++i) {
+                if (session_ids_[i] == active_session_id_) {
+                    session_list_->Select(i);
+                    break;
+                }
+            }
             break;
+        }
         case MSG_PLAN_DECISION:
             _HandlePlanDecision(msg);
             break;
@@ -845,14 +859,11 @@ MainWindow::_NewSession()
     notify.AddString("session_id", sid.c_str());
     be_app->PostMessage(&notify);
 
-    // Refresh list and select new item. BListView may emit 1 or 2 selection
-    // notifications on Select() (deselect previous + select new) — bump the
-    // suppress counter high enough to swallow all of them so a stray
-    // MSG_SELECT_SESSION doesn't run _SelectSession on the wrong session.
+    // Refresh list and select the new item. The Select() echo is skipped by
+    // the active-session equality check in the MSG_SELECT_SESSION handler.
     _RefreshSessionList();
     for (int i = 0; i < (int)session_ids_.size(); ++i) {
         if (session_ids_[i] == sid) {
-            suppress_next_select_ = 2;
             session_list_->Select(i);
             break;
         }
@@ -895,6 +906,9 @@ void
 MainWindow::_SelectSession(int idx)
 {
     if (idx < 0 || idx >= (int)session_ids_.size()) return;
+    // Already active: nothing to reload, and any residual programmatic
+    // Select() echo becomes a cheap no-op.
+    if (session_ids_[idx] == active_session_id_) return;
 
     _SaveActiveDraft();
     active_session_id_ = session_ids_[idx];
@@ -992,8 +1006,8 @@ void
 MainWindow::_SwitchToSession(int idx)
 {
     _SelectSession(idx);
-    // See _NewSession: Select() may emit multiple notifications.
-    suppress_next_select_ = 2;
+    // The Select() echo is skipped by the equality checks in the
+    // MSG_SELECT_SESSION handler and _SelectSession.
     session_list_->Select(idx);
 }
 
@@ -1175,6 +1189,9 @@ void
 MainWindow::_LoadHistory(const std::string& session_id)
 {
     auto messages = store_.load_messages(session_id);
+    // Batch the replay: per-message rebuilds are quadratic in session length;
+    // EndBatch re-renders once.
+    chat_view_->BeginBatch();
     for (auto& sm : messages) {
         try {
             json data = json::parse(sm.data_json);
@@ -1230,6 +1247,7 @@ MainWindow::_LoadHistory(const std::string& session_id)
             // Skip malformed messages
         }
     }
+    chat_view_->EndBatch();
 }
 
 void

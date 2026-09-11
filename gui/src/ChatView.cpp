@@ -243,7 +243,8 @@ ChatView::EndReasoningStreaming()
         if (!model_.empty() && model_.back().kind == ChatEntry::Reasoning) {
             model_.back().collapsed = true;
             AppendStyled("\n", kColorThinkingBody, false);
-            _Rebuild();
+            if (!defer_rebuild_)
+                _Rebuild();
         }
     }
 }
@@ -279,7 +280,8 @@ ChatView::AppendToolResult(const std::string& output, bool success)
     }
 
     model_.push_back({ChatEntry::ToolResult, output, "", success, false});
-    _Rebuild();
+    if (!defer_rebuild_)
+        _Rebuild();
 }
 
 void
@@ -300,6 +302,22 @@ ChatView::Clear()
     model_.clear();
     header_ranges_.clear();
     text_view_->SetText("");
+}
+
+void
+ChatView::BeginBatch()
+{
+    defer_rebuild_  = true;
+    inhibit_scroll_ = true;
+}
+
+void
+ChatView::EndBatch()
+{
+    if (!defer_rebuild_) return;
+    defer_rebuild_ = false;
+    // _Rebuild() resets inhibit_scroll_ and ends with a single ScrollToBottom.
+    _Rebuild();
 }
 
 int

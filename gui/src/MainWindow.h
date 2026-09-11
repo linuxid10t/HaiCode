@@ -131,7 +131,6 @@ private:
 
     // Session list (parallel to UI list)
     std::vector<std::string> session_ids_;  // indexed to match BListView
-    int suppress_next_select_ = 0;     // suppress MSG_SELECT_SESSION from programmatic Select() — counter because Select() may fire multiple notifications
 
     // UI widgets (owned by BLooper)
     BListView*     session_list_    = nullptr;

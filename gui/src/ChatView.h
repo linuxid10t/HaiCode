@@ -51,6 +51,11 @@ public:
     void AppendSystem(const std::string& text);
     void Clear();
 
+    // History replay: defer per-message rebuilds and auto-scroll until
+    // EndBatch re-renders everything in a single pass.
+    void BeginBatch();
+    void EndBatch();
+
     BScrollView* ScrollContainer() const { return scroll_; }
 
     // Called by ClickableTextView::MouseDown
@@ -67,6 +72,7 @@ private:
     bool               streaming_       = false;
     bool               reasoning_streaming_ = false;
     bool               inhibit_scroll_  = false;
+    bool               defer_rebuild_   = false;
 
     std::vector<ChatEntry>       model_;
     std::vector<ToolHeaderRange> header_ranges_;
