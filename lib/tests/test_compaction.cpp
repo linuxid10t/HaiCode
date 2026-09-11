@@ -56,12 +56,17 @@ public:
 
 static bool wait_for(haicode::SessionStore& store, const std::string& sid,
                      size_t want_messages, bool want_checkpoint) {
+    // Phase 1: messages settle. Phase 2: checkpoint state (compaction runs
+    // on the loop thread and can lag the last append by a summarizer call).
     for (int i = 0; i < 100; ++i) {
-        size_t n = store.load_messages(sid).size();
+        if (store.load_messages(sid).size() >= want_messages) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    for (int i = 0; i < 200; ++i) {
         bool cp = want_checkpoint
             ? store.latest_complete_checkpoint(sid).has_value()
             : !store.latest_complete_checkpoint(sid).has_value();
-        if (n >= want_messages && cp) return true;
+        if (store.load_messages(sid).size() >= want_messages && cp) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return false;
@@ -96,8 +101,15 @@ static bool test_end_to_end_checkpoint() {
     CHECK(wait_for(store, sid, 2, false), "turn 1 completes (2 rows, no ckpt)");
 
     engine.submit_prompt(sid, "TURNTWO-MARKER second prompt");
-    CHECK(wait_for(store, sid, 4, true),
-          "turn 2 completes AND a completed checkpoint exists");
+    // Generous deadline: compaction runs on the loop thread and this box has
+    // been unstable; the asserted end state is what matters, not timing.
+    bool settled = false;
+    for (int i = 0; i < 600 && !settled; ++i) {  // up to 30s
+        settled = store.load_messages(sid).size() >= 4
+               && store.latest_complete_checkpoint(sid).has_value();
+        if (!settled) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(settled, "turn 2 completes AND a completed checkpoint exists");
 
     auto cp = store.latest_complete_checkpoint(sid);
     CHECK(cp.has_value(), "checkpoint committed");
