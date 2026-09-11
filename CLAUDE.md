@@ -5,8 +5,8 @@ This file provides guidance to AI coding assistants (Claude Code, HaiCode itself
 ## Build
 
 ```bash
+# All commands run from the repo root.
 # Configure (only needed once, or when adding new source files)
-cd /boot/home/haicode
 cmake -B build -S .
 
 # Build everything
