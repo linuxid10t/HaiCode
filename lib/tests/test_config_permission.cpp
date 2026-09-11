@@ -6,6 +6,8 @@
 #include <cassert>
 #include <cstdio>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // ---- Helpers ----
 
@@ -447,6 +449,107 @@ static bool registry_unknown_tool() {
     return true;
 }
 
+// Gate that denies everything: deny rules plus a deny-callback fallback.
+static haicode::PermissionGate make_deny_all_gate() {
+    haicode::PermissionGate gate;
+    gate.set_rules({
+        {"read", "*", haicode::PermissionEffect::Deny},
+        {"grep", "*", haicode::PermissionEffect::Deny},
+        {"glob", "*", haicode::PermissionEffect::Deny},
+    });
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                              const nlohmann::json&) {
+        return haicode::PermissionEffect::Deny;
+    });
+    return gate;
+}
+
+// First existing file among candidates, or "" if none (skip the test).
+static std::string first_existing(const std::vector<std::string>& candidates) {
+    struct stat st;
+    for (const auto& p : candidates)
+        if (::stat(p.c_str(), &st) == 0) return p;
+    return "";
+}
+
+static bool registry_read_system_headers_bypasses_gate() {
+    std::string header = first_existing({
+        "/boot/system/develop/headers/os/App.h",
+        "/boot/system/develop/headers/curl/curl.h",
+        "/boot/system/develop/headers/gnu/pthread.h",
+        "/boot/system/documentation/BeBook/BWindow.html",
+    });
+    if (header.empty()) {
+        std::cout << "[SKIP] registry read system headers (no haiku_devel)\n";
+        return true;
+    }
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+    auto r = reg.execute("read", {{"path", header}}, ctx, gate);
+    CHECK(r.success, "read of system header should bypass deny-all gate");
+    CHECK(!r.denied, "denied flag should not be set for system header read");
+
+    auto g = reg.execute("grep", {{"pattern", "include"}, {"path", header}},
+                         ctx, gate);
+    CHECK(g.success, "grep of system header should bypass deny-all gate");
+    CHECK(!g.denied, "denied flag should not be set for system header grep");
+    std::cout << "[OK] registry read/grep system headers bypass gate (" << header << ")\n";
+    return true;
+}
+
+static bool registry_glob_system_headers_bypasses_gate() {
+    std::string header = first_existing({
+        "/boot/system/develop/headers/os/Interface2.h",
+        "/boot/system/develop/headers/curl/curl.h",
+        "/boot/system/develop/headers/gnu/pthread.h",
+    });
+    if (header.empty()) {
+        std::cout << "[SKIP] registry glob system headers (no haiku_devel)\n";
+        return true;
+    }
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+    auto r = reg.execute("glob", {{"pattern", header}}, ctx, gate);
+    CHECK(r.success, "absolute glob under system headers should bypass deny-all gate");
+    CHECK(!r.denied, "denied flag should not be set for system header glob");
+    std::cout << "[OK] registry glob system headers bypasses gate\n";
+    return true;
+}
+
+static bool registry_read_outside_still_denied() {
+    // Hermetic negative control: the probe file lives outside both the
+    // working dir and the always-readable roots, so it must stay gated.
+    const std::string wd = "/tmp/tfc_reg_wd";
+    const std::string outside = "/tmp/tfc_reg_outside.txt";
+    ::mkdir(wd.c_str(), 0755);
+    write_file(outside, "outside\n");
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = wd;
+    auto r = reg.execute("read", {{"path", outside}}, ctx, gate);
+    CHECK(!r.success, "read outside workdir and header roots should be denied");
+    CHECK(r.denied,   "denied flag should be set for gated read");
+
+    std::remove(outside.c_str());
+    ::rmdir(wd.c_str());
+    std::cout << "[OK] registry read outside roots still denied\n";
+    return true;
+}
+
 // ============================================================
 
 int main() {
@@ -491,6 +594,9 @@ int main() {
 
     std::cout << "\n-- ToolRegistry + gate integration --\n";
     ok &= registry_read_inside_workdir_bypasses_gate();
+    ok &= registry_read_system_headers_bypasses_gate();
+    ok &= registry_glob_system_headers_bypasses_gate();
+    ok &= registry_read_outside_still_denied();
     ok &= registry_write_denied_sets_flag();
     ok &= registry_unknown_tool();
 

@@ -60,6 +60,21 @@ static bool is_path_within(const std::string& path, const std::string& base) {
         && npath.compare(0, nbase.size(), nbase) == 0;
 }
 
+// Roots that read-only tools may always access regardless of config/session
+// rules: Haiku's system headers and documentation are ground truth for BeAPI
+// work and live outside every project directory.
+static bool is_within_always_readable_root(const std::string& path) {
+    static const std::vector<std::string> roots = {
+        "/boot/system/develop/headers",
+        "/boot/system/non-packaged/develop/headers",
+        "/boot/system/documentation",
+    };
+    for (const auto& root : roots) {
+        if (is_path_within(path, root)) return true;
+    }
+    return false;
+}
+
 void PermissionGate::set_rules(const std::vector<PermissionRule>& rules) {
     rules_ = rules;
 }
@@ -158,12 +173,15 @@ ToolResult ToolRegistry::execute(const std::string& name,
         // read, ls, grep, diff, find: resource() returns a resolved absolute path.
         if (name == "read" || name == "ls" || name == "grep" ||
             name == "diff" || name == "find" || name == "symbols") {
-            if (is_path_within(tool->resource(input, ctx), ctx.working_dir))
+            std::string path = tool->resource(input, ctx);
+            if (is_path_within(path, ctx.working_dir) ||
+                is_within_always_readable_root(path))
                 return tool->execute(input, ctx);
         }
         // glob: resource() returns the raw pattern. Relative patterns always
         // expand under working_dir. For absolute patterns, extract the
-        // literal prefix before any wildcard and verify it's inside the tree.
+        // literal prefix before any wildcard and verify it's inside the tree
+        // (or an always-readable root).
         if (name == "glob") {
             std::string pattern = input.value("pattern", "");
             if (pattern.empty() || pattern[0] != '/') {
@@ -173,7 +191,9 @@ ToolResult ToolRegistry::execute(const std::string& name,
             std::string prefix = (wild == std::string::npos)
                                     ? pattern
                                     : pattern.substr(0, wild);
-            if (is_path_within(normalize_path(prefix), ctx.working_dir))
+            std::string base = normalize_path(prefix);
+            if (is_path_within(base, ctx.working_dir) ||
+                is_within_always_readable_root(base))
                 return tool->execute(input, ctx);
         }
         // git read-only subcommands never modify the repo — always allow.
