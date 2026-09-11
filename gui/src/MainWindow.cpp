@@ -553,6 +553,7 @@ MainWindow::MessageReceived(BMessage* msg)
             if (idx >= 0 && idx < (int32)session_ids_.size()) {
                 std::string sid = session_ids_[idx];
                 store_.delete_session(sid);
+                session_drafts_.erase(sid);
                 if (active_session_id_ == sid)
                     active_session_id_.clear();
                 _RefreshSessionList();
@@ -836,6 +837,7 @@ MainWindow::_NewSession()
     std::string model = default_model_;
     std::string provider = default_provider_;
     std::string sid = engine_->create_session(project_dir_, "", model, provider);
+    _SaveActiveDraft();
     active_session_id_ = sid;
 
     // Notify relay of new active session
@@ -858,6 +860,7 @@ MainWindow::_NewSession()
 
     chat_view_->Clear();
     chat_view_->AppendSystem("New session started.");
+    _RestoreDraft(sid);
     interrupt_btn_->SetEnabled(false);
     _RestoreSessionTotals(active_session_id_);
     engine_running_ = false;
@@ -893,6 +896,7 @@ MainWindow::_SelectSession(int idx)
 {
     if (idx < 0 || idx >= (int)session_ids_.size()) return;
 
+    _SaveActiveDraft();
     active_session_id_ = session_ids_[idx];
 
     // Notify relay of newly active session
@@ -951,6 +955,7 @@ MainWindow::_SelectSession(int idx)
 
     chat_view_->Clear();
     _LoadHistory(active_session_id_);
+    _RestoreDraft(active_session_id_);
     interrupt_btn_->SetEnabled(false);
     _RestoreSessionTotals(active_session_id_);
     engine_running_ = false;
@@ -1085,6 +1090,29 @@ MainWindow::_RebuildAttachRow()
 }
 
 void
+MainWindow::_SaveActiveDraft()
+{
+    if (active_session_id_.empty()) return;
+    SessionDraft& d = session_drafts_[active_session_id_];
+    d.input_text   = input_view_->Text();
+    d.attachments  = pending_attachments_;
+}
+
+void
+MainWindow::_RestoreDraft(const std::string& session_id)
+{
+    pending_attachments_.clear();
+    auto it = session_drafts_.find(session_id);
+    if (it != session_drafts_.end()) {
+        pending_attachments_ = it->second.attachments;
+        input_view_->SetText(it->second.input_text.c_str());
+    } else {
+        input_view_->SetText("");
+    }
+    _RebuildAttachRow();
+}
+
+void
 MainWindow::_SubmitPrompt()
 {
     if (active_session_id_.empty()) {
@@ -1112,6 +1140,7 @@ MainWindow::_SubmitPrompt()
     }
     pending_attachments_.clear();
     _RebuildAttachRow();
+    _SaveActiveDraft();
 
     chat_view_->AppendUserText(text, names);
     interrupt_btn_->SetEnabled(true);

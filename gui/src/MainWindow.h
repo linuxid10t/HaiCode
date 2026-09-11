@@ -24,6 +24,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <future>
 #include <memory>
 
@@ -108,6 +109,16 @@ private:
     void _NotifyAttachmentLimit(const std::string& note);
     void _RemoveAttachment(int32 index);
     void _RebuildAttachRow();
+
+    // Per-session drafts: input text + staged attachments travel with their
+    // session across switches.
+    void _SaveActiveDraft();
+    void _RestoreDraft(const std::string& session_id);
+    struct SessionDraft {
+        std::string input_text;
+        std::vector<std::pair<std::string, std::string>> attachments;
+    };
+    std::map<std::string, SessionDraft> session_drafts_;
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change
