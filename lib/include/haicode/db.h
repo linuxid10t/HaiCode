@@ -53,6 +53,22 @@ struct SessionMessage {
     int64_t time_updated = 0;
 };
 
+// A compaction checkpoint records that every conversation record with
+// seq <= through_seq has been folded into `summary`. The underlying rows are
+// never deleted; context assembly slices seq > through_seq and prepends the
+// rendered checkpoint block instead.
+struct CompactionCheckpoint {
+    std::string id;
+    std::string session_id;
+    int through_seq = 0;
+    std::string summary;          // Markdown with the required sections
+    std::string recent_context;   // serialized retained tail at checkpoint time
+    std::string previous_checkpoint_id;
+    std::string status;           // "pending" | "complete" | "failed"
+    int64_t time_created = 0;
+    int64_t time_updated = 0;
+};
+
 class SessionStore {
 public:
     explicit SessionStore(Database& db);
@@ -91,14 +107,22 @@ public:
                         const std::string& data_json);
     std::vector<SessionMessage> load_messages(const std::string& session_id);
 
-    // Replace the conversation head (everything with seq < keep_from_seq)
-    // with a single compaction_summary message. Runs inside one transaction.
-    // The summary row takes seq 0 (always free after the head delete, since
-    // seqs start at 1) so it precedes the untouched tail and load_messages'
-    // ORDER BY seq ASC keeps it first. keep_from_seq <= 1 is a no-op.
-    void compact_messages(const std::string& session_id,
-                          int keep_from_seq,
-                          const std::string& summary_data_json);
+    // ---- Compaction checkpoints (non-destructive compaction) ----
+    // Create a pending checkpoint row (visible crash marker) and return its
+    // id. Messages arriving afterward get higher seqs and stay after the
+    // boundary by construction.
+    std::string insert_checkpoint(const std::string& session_id,
+                                  int through_seq,
+                                  const std::string& recent_context,
+                                  const std::string& previous_checkpoint_id);
+    // Atomically commit: set summary + status="complete" in one UPDATE.
+    void complete_checkpoint(const std::string& checkpoint_id,
+                             const std::string& summary);
+    // Mark failed; the previous checkpoint and boundary stay active.
+    void fail_checkpoint(const std::string& checkpoint_id);
+    // Latest checkpoint with status="complete" (highest through_seq), if any.
+    std::optional<CompactionCheckpoint> latest_complete_checkpoint(
+        const std::string& session_id);
 
     // Atomic whole-list replace for the todo_write tool. Deletes every
     // existing row for the session and inserts the new list in one

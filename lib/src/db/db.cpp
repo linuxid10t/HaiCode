@@ -55,6 +55,21 @@ CREATE TABLE IF NOT EXISTS session_todo (
     time_updated INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS compaction_checkpoint (
+    id                     TEXT PRIMARY KEY,
+    session_id             TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE,
+    through_seq            INTEGER NOT NULL,
+    summary                TEXT NOT NULL DEFAULT '',
+    recent_context         TEXT NOT NULL DEFAULT '',
+    previous_checkpoint_id TEXT NOT NULL DEFAULT '',
+    status                 TEXT NOT NULL DEFAULT 'pending',
+    time_created           INTEGER NOT NULL,
+    time_updated           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkpoint_session
+    ON compaction_checkpoint(session_id, through_seq DESC);
+
 CREATE INDEX IF NOT EXISTS idx_session_updated ON session(time_updated DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_session_seq ON session_message(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_todo_session_pos ON session_todo(session_id, position);
@@ -493,56 +508,84 @@ std::vector<SessionMessage> SessionStore::load_messages(const std::string& sessi
     return results;
 }
 
-void SessionStore::compact_messages(const std::string& session_id,
-                                     int keep_from_seq,
-                                     const std::string& summary_data_json) {
-    if (keep_from_seq <= 1) return;  // nothing before the tail to compact
-
-    sqlite3_exec(db_.handle(), "BEGIN;", nullptr, nullptr, nullptr);
-
-    // Delete the head: every message with seq < keep_from_seq.
-    {
-        const char* del =
-            "DELETE FROM session_message WHERE session_id=? AND seq<?";
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_.handle(), del, -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 2, keep_from_seq);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-    }
-
-    // Insert the summary at seq 0 — now free since all deleted rows had
-    // seq >= 1. This keeps it ordered before the intact tail.
-    {
-        int64_t now = util::now_ms();
-        std::string id = util::make_id("msg");
-        const char* ins =
-            "INSERT INTO session_message (id, session_id, type, seq, data_json,"
-            " time_created, time_updated) VALUES (?,?,?,?,?,?,?)";
-        sqlite3_stmt* stmt = nullptr;
-        sqlite3_prepare_v2(db_.handle(), ins, -1, &stmt, nullptr);
-        sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, "compaction_summary", -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int(stmt, 4, 0);
-        sqlite3_bind_text(stmt, 5, summary_data_json.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 6, now);
-        sqlite3_bind_int64(stmt, 7, now);
-        sqlite3_step(stmt);
-        sqlite3_finalize(stmt);
-    }
-
-    sqlite3_exec(db_.handle(), "COMMIT;", nullptr, nullptr, nullptr);
-
+std::string SessionStore::insert_checkpoint(const std::string& session_id,
+                                            int through_seq,
+                                            const std::string& recent_context,
+                                            const std::string& previous_checkpoint_id) {
     int64_t now = util::now_ms();
-    const char* upd = "UPDATE session SET time_updated=? WHERE id=?";
+    std::string id = util::make_id("ckpt");
+    const char* ins =
+        "INSERT INTO compaction_checkpoint (id, session_id, through_seq,"
+        " summary, recent_context, previous_checkpoint_id, status,"
+        " time_created, time_updated) VALUES (?,?,?,?,?,?,?,?,?)";
     sqlite3_stmt* stmt = nullptr;
-    sqlite3_prepare_v2(db_.handle(), upd, -1, &stmt, nullptr);
-    sqlite3_bind_int64(stmt, 1, now);
+    sqlite3_prepare_v2(db_.handle(), ins, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 3, through_seq);
+    sqlite3_bind_text(stmt, 4, "", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, recent_context.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 6, previous_checkpoint_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 7, "pending", -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 8, now);
+    sqlite3_bind_int64(stmt, 9, now);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
+    return id;
+}
+
+void SessionStore::complete_checkpoint(const std::string& checkpoint_id,
+                                       const std::string& summary) {
+    const char* upd =
+        "UPDATE compaction_checkpoint SET summary=?, status='complete',"
+        " time_updated=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), upd, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, summary.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, util::now_ms());
+    sqlite3_bind_text(stmt, 3, checkpoint_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+void SessionStore::fail_checkpoint(const std::string& checkpoint_id) {
+    const char* upd =
+        "UPDATE compaction_checkpoint SET status='failed', time_updated=?"
+        " WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), upd, -1, &stmt, nullptr);
+    sqlite3_bind_int64(stmt, 1, util::now_ms());
+    sqlite3_bind_text(stmt, 2, checkpoint_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+std::optional<CompactionCheckpoint> SessionStore::latest_complete_checkpoint(
+    const std::string& session_id) {
+    const char* sel =
+        "SELECT id, session_id, through_seq, summary, recent_context,"
+        " previous_checkpoint_id, status, time_created, time_updated"
+        " FROM compaction_checkpoint WHERE session_id=? AND status='complete'"
+        " ORDER BY through_seq DESC LIMIT 1";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), sel, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    std::optional<CompactionCheckpoint> out;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        CompactionCheckpoint cp;
+        cp.id                     = (const char*)sqlite3_column_text(stmt, 0);
+        cp.session_id             = (const char*)sqlite3_column_text(stmt, 1);
+        cp.through_seq            = sqlite3_column_int(stmt, 2);
+        cp.summary                = (const char*)sqlite3_column_text(stmt, 3);
+        cp.recent_context         = (const char*)sqlite3_column_text(stmt, 4);
+        cp.previous_checkpoint_id = (const char*)sqlite3_column_text(stmt, 5);
+        cp.status                 = (const char*)sqlite3_column_text(stmt, 6);
+        cp.time_created           = sqlite3_column_int64(stmt, 7);
+        cp.time_updated           = sqlite3_column_int64(stmt, 8);
+        out = std::move(cp);
+    }
+    sqlite3_finalize(stmt);
+    return out;
 }
 
 void SessionStore::replace_todos(const std::string& session_id,
