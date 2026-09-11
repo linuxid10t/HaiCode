@@ -25,6 +25,11 @@ public:
     std::vector<std::string> list_models(std::string&) override {
         return {"fake-model"};
     }
+    int get_model_context(const std::string& mid) const override {
+        auto it = context_override.find(mid);
+        return it == context_override.end() ? 0 : it->second;
+    }
+    std::map<std::string, int> context_override;
     void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb) override {
         ++calls;
         if (req.system == "You are a precise conversation summarizer.") {
@@ -129,6 +134,72 @@ static bool test_end_to_end_checkpoint() {
     CHECK(reqd.find("TURNTWO-MARKER") != std::string::npos,
           "post-checkpoint turns stay live");
     std::cout << "[OK] end-to-end: trigger -> checkpoint -> sliced request\n";
+    return true;
+}
+
+// Regression: live provider discovery must outrank the hardcoded prefix
+// table (a local server may be configured with a smaller window than the
+// model's nominal size), while the prefix table still wins when discovery
+// has nothing to say.
+static bool test_discovery_outranks_prefix() {
+    FakeProvider p;
+    p.context_override["gpt-4o"] = 60000;   // prefix table says 128000
+    CHECK(haicode::get_context_window("x", "gpt-4o", {}, &p) == 60000,
+          "discovered window must beat the prefix table");
+    CHECK(haicode::get_context_window("x", "gpt-4o", {}) == 128000,
+          "prefix table still applies when discovery returns nothing");
+    haicode::AppConfig cfg;
+    cfg.model_contexts["gpt-4o"] = 96000;
+    CHECK(haicode::get_context_window("x", "gpt-4o", cfg.model_contexts, &p) == 96000,
+          "config override beats everything");
+    std::cout << "[OK] window resolution order: override > discovery > prefix\n";
+    return true;
+}
+
+// Regression for the manual-Compact-with-unknown-window bug: no config
+// override, no prefix match, provider reports nothing — compact_now() must
+// still commit a checkpoint using the context+20% estimated window.
+static bool test_manual_compact_unknown_window() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "mystery-model-xyz";   // no prefix-table match
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    // NOTE: no model_contexts entry — window resolution returns 0.
+
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid = engine.create_session("/tmp/proj", "build",
+                                            "mystery-model-xyz", "fake");
+    for (int i = 1; i <= 3; ++i) {
+        store.append_message(sid, "user_prompted",
+            nlohmann::json{{"text", "turn " + std::to_string(i)}}.dump());
+        store.append_message(sid, "assistant_text",
+            nlohmann::json{{"text", "reply " + std::to_string(i)}}.dump());
+    }
+
+    engine.compact_now(sid);
+    bool committed = false;
+    for (int i = 0; i < 200 && !committed; ++i) {  // up to 10s
+        committed = store.latest_complete_checkpoint(sid).has_value();
+        if (!committed) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(committed,
+          "manual compact commits a checkpoint even with unknown window");
+    CHECK(store.load_messages(sid).size() == 6,
+          "all rows survive the windowless compaction");
+    CHECK(!provider->summary_requests.empty(), "summarizer actually ran");
+    std::cout << "[OK] manual compact works with unknown context window\n";
     return true;
 }
 
@@ -286,6 +357,8 @@ static bool test_get_context_window_and_hysteresis() {
 
 int main() {
     bool ok = true;
+    ok &= test_discovery_outranks_prefix();
+    ok &= test_manual_compact_unknown_window();
     ok &= test_end_to_end_checkpoint();
     ok &= test_checkpoint_roundtrip();
     ok &= test_messages_survive();

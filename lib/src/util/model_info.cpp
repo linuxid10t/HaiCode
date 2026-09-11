@@ -73,11 +73,25 @@ int get_context_window(const std::string& provider_id,
                        const std::string& model_id,
                        const std::map<std::string, int>& config_overrides,
                        const Provider* provider) {
-    int window = get_context_window(provider_id, model_id, config_overrides);
-    if (window > 0) return window;
-    if (provider)
-        return provider->get_model_context(model_id);
-    return 0;
+    // 1. Exact-match config override wins over everything.
+    auto it = config_overrides.find(model_id);
+    if (it != config_overrides.end() && it->second > 0)
+        return it->second;
+
+    // 2. Live provider discovery outranks the hardcoded prefix table: the
+    // server's reported window is authoritative when available (a local
+    // vLLM/Ollama instance may be configured with a smaller max_model_len
+    // than the model's nominal size). Discovery is cached inside the
+    // provider after the first fetch, and providers without an override
+    // (e.g. Anthropic) return 0 immediately with no network I/O.
+    if (provider) {
+        int discovered = provider->get_model_context(model_id);
+        if (discovered > 0) return discovered;
+    }
+
+    // 3. Hardcoded prefix-table match. Reuse the 3-arg overload with an
+    // empty override map (the override was already checked in step 1).
+    return get_context_window(provider_id, model_id, {});
 }
 
 } // namespace haicode

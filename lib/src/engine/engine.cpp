@@ -1587,8 +1587,16 @@ bool SessionEngine::compact_history(const std::string& session_id,
 
     int window = haicode::get_context_window(provider_id, model_id,
                                              config_.model_contexts, &provider);
-    int room = (window > 0)
-        ? window - std::max(summary_cap, config_.compaction_buffer) : 0;
+    if (window <= 0) {
+        // Manual compaction (and overflow recovery) must work even when the
+        // window is unknown: estimate it from the current context size + 20%.
+        // The auto-trigger is NOT affected — it stays gated on a known window.
+        size_t chars = 0;
+        for (const auto& m : messages) chars += m.data_json.size();
+        int base = static_cast<int>(chars / 4) + 8192;  // + system/tools overhead
+        window = base + base / 5;
+    }
+    int room = window - std::max(summary_cap, config_.compaction_buffer);
 
     auto fit_serialized = [&](const std::string& prev,
                               const std::string& serialized) {
