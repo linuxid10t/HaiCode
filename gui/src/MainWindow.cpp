@@ -1268,12 +1268,10 @@ MainWindow::_RestoreSessionTotals(const std::string& session_id)
         session_output_total_     = 0;
         session_cost_             = 0.0;
     }
-    // current_context_tokens_ is the live per-request size, NOT the cumulative
-    // session total. On load we have no accurate provider-reported value, and a
-    // byte-based estimate of raw data_json is unreliable (no truncation, JSON
-    // envelope overhead). Leave it 0 so the meter shows "context: — / max"
-    // until the first real StepEnded reports the exact value.
-    current_context_tokens_ = 0;
+    // Seed the context meter with the last provider-reported per-request size
+    // so a freshly reopened session shows a real number instead of "—". The
+    // next live StepEnded replaces the seed with the exact current value.
+    current_context_tokens_ = si ? si->last_input_tokens : 0;
 }
 
 void

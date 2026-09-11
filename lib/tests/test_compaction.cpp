@@ -355,8 +355,42 @@ static bool test_get_context_window_and_hysteresis() {
     return true;
 }
 
+static bool test_last_input_tokens_roundtrip() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto sess = store.create("/tmp/proj", "build", "{}");
+
+    CHECK(store.get(sess.id)->last_input_tokens == 0,
+          "fresh session has no last-input seed");
+
+    // Two update_cost calls: the seed must hold the LAST per-request size,
+    // not the cumulative sum.
+    haicode::TokenUsage u1;
+    u1.input = 1000; u1.cache_read = 500; u1.cache_write = 2000;
+    store.update_cost(sess.id, 0.0, u1);
+    haicode::TokenUsage u2;
+    u2.input = 1200; u2.cache_read = 3400; u2.cache_write = 0;
+    store.update_cost(sess.id, 0.0, u2);
+
+    auto si = store.get(sess.id);
+    CHECK(si->last_input_tokens == 4600,
+          "last_input_tokens = input+cache_read+cache_write of the LAST step");
+    CHECK(si->tokens.input == 2200, "cumulative input still accumulates");
+
+    auto listed = store.list();
+    bool found = false;
+    for (auto& s : listed)
+        if (s.id == sess.id) { found = s.last_input_tokens == 4600; break; }
+    CHECK(found, "list() also returns the seed");
+    std::cout << "[OK] tok_last_input round-trip (last, not cumulative)\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
+    ok &= test_last_input_tokens_roundtrip();
     ok &= test_discovery_outranks_prefix();
     ok &= test_manual_compact_unknown_window();
     ok &= test_end_to_end_checkpoint();

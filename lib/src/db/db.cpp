@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS session (
     tok_reasoning   INTEGER NOT NULL DEFAULT 0,
     tok_cache_read  INTEGER NOT NULL DEFAULT 0,
     tok_cache_write INTEGER NOT NULL DEFAULT 0,
+    tok_last_input  INTEGER NOT NULL DEFAULT 0,
     time_created    INTEGER NOT NULL,
     time_updated    INTEGER NOT NULL
 );
@@ -117,6 +118,22 @@ void Database::exec(const std::string& sql) {
 
 void Database::migrate() {
     exec(kSchema);
+    // Column additions for pre-existing databases. SQLite has no ADD COLUMN
+    // IF NOT EXISTS, so check pragma table_info first.
+    auto has_column = [&](const char* table, const char* col) {
+        std::string q = std::string("PRAGMA table_info(") + table + ")";
+        sqlite3_stmt* st = nullptr;
+        sqlite3_prepare_v2(db_, q.c_str(), -1, &st, nullptr);
+        bool found = false;
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            const char* name = (const char*)sqlite3_column_text(st, 1);
+            if (name && strcmp(name, col) == 0) { found = true; break; }
+        }
+        sqlite3_finalize(st);
+        return found;
+    };
+    if (!has_column("session", "tok_last_input"))
+        exec("ALTER TABLE session ADD COLUMN tok_last_input INTEGER NOT NULL DEFAULT 0");
 }
 
 // ---- SessionStore ----
@@ -161,7 +178,7 @@ std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
     const char* sql =
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
-        " time_created, time_updated"
+        " tok_last_input, time_created, time_updated"
         " FROM session WHERE id=?";
 
     sqlite3_stmt* stmt = nullptr;
@@ -184,8 +201,9 @@ std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
         s.tokens.reasoning    = sqlite3_column_int(stmt, 9);
         s.tokens.cache_read   = sqlite3_column_int(stmt, 10);
         s.tokens.cache_write  = sqlite3_column_int(stmt, 11);
-        s.time_created        = sqlite3_column_int64(stmt, 12);
-        s.time_updated        = sqlite3_column_int64(stmt, 13);
+        s.last_input_tokens   = sqlite3_column_int(stmt, 12);
+        s.time_created        = sqlite3_column_int64(stmt, 13);
+        s.time_updated        = sqlite3_column_int64(stmt, 14);
     }
     sqlite3_finalize(stmt);
     if (!found) return std::nullopt;
@@ -196,7 +214,7 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
     const char* sql =
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
-        " time_created, time_updated"
+        " tok_last_input, time_created, time_updated"
         " FROM session ORDER BY time_updated DESC LIMIT ?";
 
     sqlite3_stmt* stmt = nullptr;
@@ -218,8 +236,9 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
         s.tokens.reasoning    = sqlite3_column_int(stmt, 9);
         s.tokens.cache_read   = sqlite3_column_int(stmt, 10);
         s.tokens.cache_write  = sqlite3_column_int(stmt, 11);
-        s.time_created        = sqlite3_column_int64(stmt, 12);
-        s.time_updated        = sqlite3_column_int64(stmt, 13);
+        s.last_input_tokens   = sqlite3_column_int(stmt, 12);
+        s.time_created        = sqlite3_column_int64(stmt, 13);
+        s.time_updated        = sqlite3_column_int64(stmt, 14);
         results.push_back(s);
     }
     sqlite3_finalize(stmt);
@@ -254,7 +273,8 @@ void SessionStore::update_cost(const std::string& session_id, double cost,
     const char* sql =
         "UPDATE session SET cost=cost+?, tok_input=tok_input+?, tok_output=tok_output+?,"
         " tok_reasoning=tok_reasoning+?, tok_cache_read=tok_cache_read+?,"
-        " tok_cache_write=tok_cache_write+?, time_updated=? WHERE id=?";
+        " tok_cache_write=tok_cache_write+?,"
+        " tok_last_input=?, time_updated=? WHERE id=?";
 
     sqlite3_stmt* stmt = nullptr;
     sqlite3_prepare_v2(db_.handle(), sql, -1, &stmt, nullptr);
@@ -264,8 +284,11 @@ void SessionStore::update_cost(const std::string& session_id, double cost,
     sqlite3_bind_int(stmt, 4, tokens.reasoning);
     sqlite3_bind_int(stmt, 5, tokens.cache_read);
     sqlite3_bind_int(stmt, 6, tokens.cache_write);
-    sqlite3_bind_int64(stmt, 7, util::now_ms());
-    sqlite3_bind_text(stmt, 8, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    // Per-request input size (not cumulative) — seeds the context meter on
+    // session reopen. Matches the engine's prev_total_input arithmetic.
+    sqlite3_bind_int(stmt, 7, tokens.input + tokens.cache_read + tokens.cache_write);
+    sqlite3_bind_int64(stmt, 8, util::now_ms());
+    sqlite3_bind_text(stmt, 9, session_id.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_step(stmt);
     sqlite3_finalize(stmt);
 }

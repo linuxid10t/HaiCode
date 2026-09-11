@@ -80,7 +80,7 @@ Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
 | `provider.h` | `Provider` ABC, `LLMRequest`, `StreamCallbacks`, `ProviderRegistry` |
 | `tool.h` | `Tool` ABC, `ToolContext`, `ToolResult`, `ToolRegistry`, `PermissionGate` |
 | `events.h` | Event structs, `SessionEventBus` |
-| `db.h` | `Database` (SQLite RAII), `SessionStore`, `SessionInfo`, `SessionMessage` |
+| `db.h` | `Database` (SQLite RAII), `SessionStore`, `SessionInfo` (incl. `last_input_tokens` — last per-request input size, seeds the context meter on reopen), `SessionMessage` |
 | `config.h` | `AppConfig`, `ConfigLoader` (merges global + project JSON) |
 | `util.h` | `HttpClient` (libcurl SSE + GET), `make_id()`, `now_ms()` |
 | `pricing.h` | `ModelPricing`, `TokenUsage`, `lookup_pricing`, `compute_cost` |

@@ -39,6 +39,9 @@ struct SessionInfo {
     std::string model_json;   // serialized ModelRef
     double cost = 0.0;
     TokenUsage tokens;
+    // Last provider-reported per-request input size (input + cache_read +
+    // cache_write). Seeds the context meter when a session is reopened.
+    int last_input_tokens = 0;
     int64_t time_created = 0;
     int64_t time_updated = 0;
 };

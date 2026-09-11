@@ -491,7 +491,10 @@ void TuiApp::select_session(int idx) {
     session_input_total_   = sessions_[idx].tokens.input;
     session_output_total_  = sessions_[idx].tokens.output;
     session_cost_          = sessions_[idx].cost;
-    current_context_tokens_ = 0;
+    // Seed the context meter with the last provider-reported per-request size
+    // so a freshly reopened session shows a real number instead of "—". The
+    // next live StepEnded replaces the seed with the exact current value.
+    current_context_tokens_ = sessions_[idx].last_input_tokens;
     compacting_ = false;
     current_todos_  = engine_.get_todos(active_session_id_);
     todos_scroll_   = 0;
