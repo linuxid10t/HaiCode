@@ -180,70 +180,8 @@ static std::string derive_heuristic_title(const std::string& text) {
     return collapsed.substr(0, cut) + "…";
 }
 
-// Rough token estimate: ~4 characters per token (the common BPE average for
-// English/code). Used only as a pre-flight compaction trigger before any
-// provider usage is available; once a step reports real usage, that value
-// takes over. Slightly over-estimates JSON/whitespace-heavy content, which is
-// the safe direction (trigger a touch early rather than a touch late).
-static int estimate_request_tokens(const std::string& system,
-                                    const std::string& system_dynamic,
-                                    const std::vector<nlohmann::json>& messages)
-{
-    // Base64 image payloads are megabytes of characters but a bounded number
-    // of vision tokens once the provider decodes and tiles the image (~1600
-    // max per image on Anthropic). Counting raw chars would trip
-    // auto-compaction on the first attached photo.
-    const size_t IMAGE_CHARS = 1600 * 4;
-    size_t chars = system.size() + system_dynamic.size();
-    for (auto& m : messages) {
-        auto cit = m.find("content");
-        if (cit != m.end() && cit->is_array()) {
-            for (const auto& block : *cit) {
-                if (block.value("type", "") == "image")
-                    chars += IMAGE_CHARS;
-                else
-                    chars += block.dump().size();
-            }
-        } else {
-            chars += m.dump().size();
-        }
-    }
-    return static_cast<int>(chars / 4);
-}
-
-int choose_tail_start_seq(const std::vector<SessionMessage>& msgs, int K) {
-    if (msgs.empty()) return -1;
-
-    // Multi-turn case: tail starts at the most recent user_prompted, provided
-    // it is not the very first message (otherwise the head would be empty).
-    for (size_t i = msgs.size(); i-- > 0; ) {
-        if (msgs[i].type == "user_prompted") {
-            if (i > 0) return msgs[i].seq;
-            break;  // only user_prompted is at index 0 — fall through
-        }
-    }
-
-    // Single-turn fallback: keep the last K assistant_text-with-tool_calls
-    // round-trips intact and summarize everything before them.
-    int count = 0;
-    int boundary_idx = -1;
-    for (size_t i = msgs.size(); i-- > 0; ) {
-        if (msgs[i].type != "assistant_text") continue;
-        bool has_tools = false;
-        try {
-            auto d = nlohmann::json::parse(msgs[i].data_json);
-            has_tools = d.contains("tool_calls")
-                     && d["tool_calls"].is_array()
-                     && !d["tool_calls"].empty();
-        } catch (...) {}
-        if (!has_tools) continue;
-        ++count;
-        if (count >= K) { boundary_idx = static_cast<int>(i); break; }
-    }
-    // Need something before the boundary to summarize.
-    if (boundary_idx <= 0) return -1;
-    return msgs[boundary_idx].seq;
-}
+// Rough token estimate lives in compaction.cpp (estimate_request_tokens) so
+// the engine, compaction, and tests share one arithmetic.
 
 LLMRequest ContextBuilder::build(
     const std::vector<SessionMessage>& messages,
@@ -871,7 +809,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             system_dynamic += render_todos_block(todos_now);
         }
 
-        auto messages = store_.load_messages(session_id);
+        auto messages = load_context_messages(session_id);
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
@@ -907,21 +845,27 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                      config_.model_contexts,
                                                      provider.get());
             if (window > 0) {
-                int effective = window - config_.auto_compact_reserve;
-                int threshold = static_cast<int>(effective * config_.auto_compact_threshold);
+                int threshold = usable_input_tokens(window, req.max_tokens,
+                                                    config_.compaction_buffer,
+                                                    config_.auto_compact_threshold);
                 int current_tokens = prev_total_input;
                 if (current_tokens == 0) {
                     current_tokens = estimate_request_tokens(system, system_dynamic,
-                                                             req.messages);
+                                                             req.messages,
+                                                             tool_defs);
                 }
                 int lcs;
+                bool already_compacting;
                 {
                     std::lock_guard<std::mutex> lock(mu_);
                     auto it = last_compaction_step_.find(session_id);
                     lcs = (it != last_compaction_step_.end()) ? it->second : -1;
+                    already_compacting =
+                        compaction_in_progress_.count(session_id) > 0;
                 }
-                if (should_compact_with_hysteresis(current_tokens, threshold,
-                                                   step, lcs)) {
+                if (!already_compacting
+                        && should_compact_with_hysteresis(current_tokens, threshold,
+                                                          step, lcs)) {
                     if (compact_history(session_id, *provider, model_id,
                                         provider_id, interrupt_flag,
                                         current_tokens, threshold)) {
@@ -929,8 +873,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                             std::lock_guard<std::mutex> lock(mu_);
                             last_compaction_step_[session_id] = step;
                         }
-                        // Reload + rebuild so the compacted history is sent.
-                        messages = store_.load_messages(session_id);
+                        messages = load_context_messages(session_id);
                         req = builder.build(messages, system, system_dynamic,
                                             tool_defs, model_id, provider_id);
                     }
@@ -1050,6 +993,47 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 bus_.publish(events::EventType::StepStarted, ev);
             }
             provider->stream(req, cbs);
+        }
+
+        // Context-overflow recovery: if the provider rejected the request as
+        // too large AND nothing streamed (no side effects), compact once
+        // through the same checkpoint path and retry once. No loop — a second
+        // overflow falls through to StepFailed.
+        auto is_overflow_err = [](const std::string& err) {
+            std::string lo = err;
+            std::transform(lo.begin(), lo.end(), lo.begin(),
+                           [](unsigned char c){ return std::tolower(c); });
+            static const char* hits[] = {
+                "context", "too long", "token limit", "context_length",
+                "maximum context", "exceeds",
+            };
+            for (const char* h : hits) {
+                if (lo.find(h) != std::string::npos) return true;
+            }
+            return false;
+        };
+        if (step_failed && is_overflow_err(step_error)
+                && full_text.empty() && full_reasoning.empty()
+                && tool_calls.empty()
+                && !(interrupt_flag && interrupt_flag->load())) {
+            fprintf(stderr, "[engine] context overflow: %s — compacting and "
+                    "retrying once\n", step_error.c_str());
+            if (compact_history(session_id, *provider, model_id, provider_id,
+                                interrupt_flag, prev_total_input, 0)) {
+                messages = load_context_messages(session_id);
+                req = builder.build(messages, system, system_dynamic,
+                                    tool_defs, model_id, provider_id);
+                step_failed = false;
+                step_error.clear();
+                {
+                    nlohmann::json ev;
+                    ev["session_id"] = session_id;
+                    ev["assistant_message_id"] = assistant_msg_id;
+                    ev["model_id"] = model_id;
+                    bus_.publish(events::EventType::StepStarted, ev);
+                }
+                provider->stream(req, cbs);
+            }
         }
 
         if (step_failed) {
@@ -1464,27 +1448,6 @@ void SessionEngine::reply_to_ask(const std::string& session_id,
     }
 }
 
-// First-pass summarization instruction. Prepended to the head slice as a user
-// turn; the model returns the summary text.
-static const char* kCompactionSummaryPromptFirst =
-    "Summarize the following conversation between a user and a coding assistant. "
-    "Preserve: the user's goals and key decisions, file paths and identifiers "
-    "mentioned, tool outcomes that affected the solution, any unresolved problems, "
-    "and the current state of any work in progress. Be concise — aim for under "
-    "1500 tokens. Write only the summary prose, no preamble.";
-
-// Resegment prompt — used when the head already begins with a prior
-// compaction summary. Tells the model to keep the old summary verbatim under
-// "## Segment 1" and add a "## Segment 2" for the new messages.
-static const char* kCompactionSummaryPromptResegment =
-    "The conversation history below begins with a prior summary written during "
-    "an earlier compaction. Preserve that prior summary VERBATIM under a "
-    "`## Segment 1` heading. Then summarize the remaining new messages under a "
-    "`## Segment 2` heading, following the same preservation rules: user goals "
-    "and decisions, file paths and identifiers, tool outcomes, unresolved "
-    "problems, current state. Be concise — aim for under 1500 tokens total. "
-    "Write only the two-segment summary, no preamble.";
-
 bool should_compact_with_hysteresis(int prev_total_input,
                                     int threshold_tokens,
                                     int step,
@@ -1499,123 +1462,195 @@ bool should_compact_with_hysteresis(int prev_total_input,
     return true;
 }
 
-const char* select_summary_prompt(const std::vector<SessionMessage>& head) {
-    if (!head.empty() && head.front().type == "compaction_summary")
-        return kCompactionSummaryPromptResegment;
-    return kCompactionSummaryPromptFirst;
+std::vector<SessionMessage> SessionEngine::load_context_messages(
+    const std::string& session_id)
+{
+    auto msgs = store_.load_messages(session_id);
+    auto cp = store_.latest_complete_checkpoint(session_id);
+    if (!cp) return msgs;
+    return apply_checkpoint(msgs, *cp);
 }
 
 bool SessionEngine::compact_history(const std::string& session_id,
                                      Provider& provider,
                                      const std::string& model_id,
-                                     const std::string& /*provider_id*/,
+                                     const std::string& provider_id,
                                      std::atomic<bool>* interrupt_flag,
                                      int prev_input_tokens,
                                      int threshold_tokens)
 {
-    auto messages = store_.load_messages(session_id);
-    if (messages.size() < 4) return false;  // too little to compact
-
-    // Pick the boundary. Multi-turn: at the last user_prompted (if any). Else:
-    // single-turn fallback that keeps the last K round-trips intact.
-    int tail_start_seq = choose_tail_start_seq(messages);
-    if (tail_start_seq < 0) return false;
-
-    std::vector<SessionMessage> head;
-    int messages_before = 0;
-    for (auto& m : messages) {
-        if (m.seq < tail_start_seq) { head.push_back(m); ++messages_before; }
+    // Single-flight: the auto path (agentic loop thread) and compact_now
+    // (background worker) both check/set this under mu_.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (compaction_in_progress_.count(session_id)) return false;
+        compaction_in_progress_.insert(session_id);
     }
-    if (head.empty()) return false;
+    auto clear_guard = [this, &session_id]() {
+        std::lock_guard<std::mutex> lock(mu_);
+        compaction_in_progress_.erase(session_id);
+    };
+
+    auto prev_cp_opt = store_.latest_complete_checkpoint(session_id);
+    int prev_through_seq = prev_cp_opt ? prev_cp_opt->through_seq : 0;
+
+    auto messages = store_.load_messages(session_id);
+    int through_seq = split_history(messages, config_.compaction_recent_context,
+                                    prev_through_seq);
+    if (through_seq < 0) { clear_guard(); return false; }
+
+    std::vector<SessionMessage> older, recent;
+    for (auto& m : messages) {
+        if (m.seq <= 0) continue;                      // legacy summary rows
+        if (m.seq <= prev_through_seq) continue;       // already summarized
+        (m.seq <= through_seq ? older : recent).push_back(m);
+    }
+    if (older.empty()) { clear_guard(); return false; }
 
     {
         nlohmann::json ev;
-        ev["session_id"]         = session_id;
-        ev["prev_input_tokens"]  = prev_input_tokens;
-        ev["threshold"]          = threshold_tokens;
-        ev["messages_before"]    = messages_before;
+        ev["session_id"]        = session_id;
+        ev["prev_input_tokens"] = prev_input_tokens;
+        ev["threshold"]         = threshold_tokens;
+        ev["messages_before"]   = older.size();
+        ev["through_seq"]       = through_seq;
         bus_.publish(events::EventType::CompactionStarted, ev);
     }
 
-    // Build the head into provider messages and prepend the summarization
-    // instruction as the first user turn. Pick the resegment prompt if the
-    // head already starts with a prior summary, so the model preserves it
-    // verbatim under "## Segment 1" instead of paraphrasing it again.
-    ContextBuilder builder;
-    auto assembled = builder.assemble_messages(head);
-    // The summarizer works from the text — strip base64 image payloads so
-    // the compaction request doesn't balloon to megabytes per attachment.
-    for (auto& m : assembled) {
-        auto cit = m.find("content");
-        if (cit == m.end() || !cit->is_array()) continue;
-        for (auto& block : *cit) {
-            if (block.value("type", "") != "image") continue;
-            block = nlohmann::json{{"type", "text"},
-                    {"text", "[image attachment omitted during compaction]"}};
+    std::string checkpoint_id;  // set once the pending row exists
+
+    auto fail = [&](const char* why, const std::string& err) {
+        fprintf(stderr, "[engine] compaction failed: %s (%s)\n", why, err.c_str());
+        if (!checkpoint_id.empty()) store_.fail_checkpoint(checkpoint_id);
+        nlohmann::json ev;
+        ev["session_id"]      = session_id;
+        ev["status"]          = "failed";
+        ev["messages_before"] = older.size();
+        ev["messages_after"]  = older.size();
+        ev["through_seq"]     = through_seq;
+        bus_.publish(events::EventType::CompactionEnded, ev);
+        clear_guard();
+        return false;
+    };
+
+    const size_t max_tool_out = 10 * 1024;
+    std::string serialized_older = serialize_history(older, max_tool_out);
+    std::string recent_context   = serialize_history(recent, max_tool_out);
+    std::string previous_summary = prev_cp_opt ? prev_cp_opt->summary : "";
+    std::string aged_context     = prev_cp_opt ? prev_cp_opt->recent_context : "";
+
+    // Pending row first — the visible crash marker. Messages arriving during
+    // summarization get higher seqs and stay after the boundary.
+    checkpoint_id = store_.insert_checkpoint(
+        session_id, through_seq, recent_context,
+        prev_cp_opt ? prev_cp_opt->id : "");
+
+    const int summary_cap = config_.compaction_summary_max_tokens;
+
+    auto run_summary = [&](const std::string& prompt, std::string& out,
+                           std::string& err) -> bool {
+        LLMRequest r;
+        r.model_id   = model_id;
+        r.system     = "You are a precise conversation summarizer.";
+        r.max_tokens = summary_cap;
+        nlohmann::json m;
+        m["role"] = "user";
+        m["content"] = prompt;
+        r.messages = {m};
+        out.clear();
+        bool failed = false;
+        StreamCallbacks cbs;
+        cbs.on_text_delta = [&](const std::string&, const std::string& d) {
+            out += d;
+        };
+        cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
+        provider.stream(r, cbs);
+        return !failed;
+    };
+
+    // Generate + validate, with one corrective retry re-sending the template
+    // plus the invalid draft.
+    auto summarize_validated = [&](const std::string& prompt, std::string& out,
+                                   std::string& err) -> bool {
+        if (!run_summary(prompt, out, err)) return false;
+        if (validate_summary(out, summary_cap)) return true;
+        fprintf(stderr, "[engine] summary failed validation; retrying once\n");
+        std::string retry = prompt +
+            "\n\n--- YOUR PREVIOUS ATTEMPT (invalid — fix its structure, keep "
+            "its content) ---\n" + out;
+        if (!run_summary(retry, out, err)) return false;
+        return validate_summary(out, summary_cap);
+    };
+
+    int window = haicode::get_context_window(provider_id, model_id,
+                                             config_.model_contexts, &provider);
+    int room = (window > 0)
+        ? window - std::max(summary_cap, config_.compaction_buffer) : 0;
+
+    auto fit_serialized = [&](const std::string& prev,
+                              const std::string& serialized) {
+        if (room <= 0) return serialized;
+        size_t overhead = 1600 + prev.size();
+        size_t allowed  = static_cast<size_t>(room) * 4;
+        if (overhead >= allowed) allowed = overhead + 1;
+        if (serialized.size() + overhead <= allowed) return serialized;
+        std::string t = serialized.substr(0, allowed - overhead);
+        t += "\n[truncated: " + std::to_string(serialized.size() - t.size())
+           + " more bytes — older content omitted]";
+        return t;
+    };
+
+    std::string summary, err;
+    bool generated = false;
+    {
+        std::string prompt = build_summary_prompt(previous_summary, aged_context,
+                                                  serialized_older);
+        if (room <= 0 || estimate_text_tokens(prompt) < room) {
+            generated = summarize_validated(prompt, summary, err);
+        } else {
+            // Bounded two-pass chunked merge, each pass clamped to fit.
+            size_t mid = older.size() / 2;
+            while (mid < older.size() - 1 && older[mid].type == "tool_result")
+                ++mid;  // don't split an assistant from its tool results
+            std::vector<SessionMessage> first(older.begin(), older.begin() + mid),
+                                        second(older.begin() + mid, older.end());
+            std::string pass1, p1 = build_summary_prompt(
+                previous_summary, aged_context,
+                fit_serialized(previous_summary + aged_context,
+                               serialize_history(first, max_tool_out)));
+            if (!summarize_validated(p1, pass1, err))
+                return fail("chunked pass 1 failed", err);
+            if (interrupt_flag && interrupt_flag->load())
+                return fail("interrupted", "");
+            std::string p2 = build_summary_prompt(
+                pass1, "",
+                fit_serialized(pass1, serialize_history(second, max_tool_out)));
+            generated = summarize_validated(p2, summary, err);
         }
     }
-    nlohmann::json instr;
-    instr["role"] = "user";
-    instr["content"] = select_summary_prompt(head);
-    assembled.insert(assembled.begin(), instr);
 
-    LLMRequest req;
-    req.model_id    = model_id;
-    req.system      = "You are a precise conversation summarizer.";
-    req.messages    = std::move(assembled);
-    req.max_tokens  = 2048;
+    if (interrupt_flag && interrupt_flag->load())
+        return fail("interrupted", "");
+    if (!generated)
+        return fail("summarizer call failed", err);
+    if (!validate_summary(summary, summary_cap))
+        return fail("summary still invalid after retry", "");
 
-    std::string summary;
-    TokenUsage sum_usage;
-    bool summary_failed = false;
-    std::string summary_error;
-
-    StreamCallbacks cbs;
-    cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
-        summary += delta;
-    };
-    cbs.on_finish = [&](FinishReason /*reason*/, TokenUsage tok,
-                        std::vector<ToolCall> /*calls*/) {
-        sum_usage = tok;
-    };
-    cbs.on_error = [&](const std::string& error) {
-        summary_failed = true;
-        summary_error = error;
-    };
-
-    provider.stream(req, cbs);
-
-    // If the user interrupted mid-summary, abort without persisting.
-    if (interrupt_flag && interrupt_flag->load()) return false;
-
-    // If summarization failed, don't compact — better to fail open and let the
-    // next step's request proceed (the provider will reject it if truly over
-    // the limit, surfacing a StepFailed the user can act on).
-    if (summary_failed || summary.empty()) {
-        fprintf(stderr, "[engine] compaction skipped: summary %s (error=%s)\n",
-                summary.empty() ? "was empty" : "failed",
-                summary_error.c_str());
-        return false;
-    }
-
-    // Persist: stored as raw summary text. `assemble_messages` wraps it as an
-    // assistant turn with a fixed "Here is a summary of the prior conversation:"
-    // lead-in when sending to the provider, so the on-disk text stays clean
-    // for resegmentation (Fix 4) and scrollback rendering.
-    nlohmann::json data;
-    data["role"] = "assistant";
-    data["text"] = summary;
-    store_.compact_messages(session_id, tail_start_seq, data.dump());
+    // Atomic commit: one UPDATE flips pending → complete.
+    store_.complete_checkpoint(checkpoint_id, summary);
 
     {
         nlohmann::json ev;
         ev["session_id"]      = session_id;
-        ev["summary_tokens"]  = sum_usage.output;
-        ev["messages_before"] = messages.size();
-        ev["messages_after"]  = (messages.size() - messages_before) + 1;
+        ev["status"]          = "complete";
+        ev["checkpoint_id"]   = checkpoint_id;
+        ev["through_seq"]     = through_seq;
+        ev["messages_before"] = older.size() + recent.size();
+        ev["messages_after"]  = recent.size() + 1;
         bus_.publish(events::EventType::CompactionEnded, ev);
     }
 
+    clear_guard();
     return true;
 }
 
@@ -1779,8 +1814,19 @@ void SessionEngine::compact_now(const std::string& session_id) {
         [this, session_id, provider, model_id, provider_id]() {
             // Sentinel threshold of 0 — compact_history only echoes it in the
             // CompactionStarted payload, not in the decision logic.
-            compact_history(session_id, *provider, model_id, provider_id,
-                            nullptr, 0, 0);
+            bool committed = compact_history(session_id, *provider, model_id,
+                                             provider_id, nullptr, 0, 0);
+            if (!committed) {
+                // Manual compactions must not fail silently: the user pressed
+                // a button. Explain why nothing changed.
+                auto cp = store_.latest_complete_checkpoint(session_id);
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["status"]     = "skipped";
+                ev["messages_before"] = store_.load_messages(session_id).size();
+                ev["messages_after"]  = ev["messages_before"];
+                bus_.publish(events::EventType::CompactionEnded, ev);
+            }
             std::lock_guard<std::mutex> g(mu_);
             session_running_[session_id] = false;
         });

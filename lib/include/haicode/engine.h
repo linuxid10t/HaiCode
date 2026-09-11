@@ -6,6 +6,7 @@
 #include "config.h"
 #include <string>
 #include <map>
+#include <set>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -104,10 +105,17 @@ public:
 private:
     void agentic_loop(const std::string& session_id);
 
-    // Summarize the conversation head (everything before the last user turn)
-    // into a single compaction_summary row, replacing the head in the DB.
-    // Returns true if compaction occurred (caller must reload messages).
-    // Honors the interrupt flag: aborts and returns false if set mid-summary.
+    // Load the provider-facing message list through the single checkpoint-
+    // aware path: full stored history, then — if a completed checkpoint
+    // exists — sliced to seq > through_seq with the rendered checkpoint
+    // block prepended as a synthetic compaction_summary row.
+    std::vector<SessionMessage> load_context_messages(const std::string& session_id);
+
+    // Checkpoint compaction: summarize records seq <= split_history(...) into
+    // a new checkpoint (pending → complete). Non-destructive — rows stay in
+    // the DB; only context assembly changes. Returns true when a checkpoint
+    // was committed (caller must rebuild the request). On failure/interrupt
+    // the checkpoint is marked failed and the previous boundary stays active.
     bool compact_history(const std::string& session_id,
                          Provider& provider,
                          const std::string& model_id,
@@ -139,6 +147,8 @@ private:
     std::map<std::string, bool> session_running_;  // true while agentic_loop is executing
     std::map<std::string, SessionMode> session_modes_;
     std::map<std::string, std::shared_ptr<Provider>> session_providers_;
+    // Single-flight guard: ids with a compaction attempt in flight.
+    std::set<std::string> compaction_in_progress_;
     // Step number at which the most recent successful compaction fired, per
     // session. Negative = "never compacted this turn". Reset to -1 in
     // submit_prompt so each new user turn rearms the trigger. Guarded by mu_.
@@ -174,22 +184,6 @@ bool should_compact_with_hysteresis(int prev_total_input,
                                     int threshold_tokens,
                                     int step,
                                     int last_compaction_step);
-
-// Pick the summarization system instruction to send to the model. First-pass
-// summarization uses one prompt; if the head already begins with a prior
-// compaction_summary (re-compaction), uses the resegment prompt that tells the
-// model to preserve the prior summary verbatim and add a second segment.
-const char* select_summary_prompt(const std::vector<SessionMessage>& head);
-
-// Pick the seq at which the compaction tail begins. Two modes:
-//   1. Multi-turn (preferred): tail starts at the most recent user_prompted,
-//      provided it has at least one message before it to summarize.
-//   2. Single-turn fallback: when the only user_prompted is the very first
-//      message (long agentic loop with one prompt), keep the last K
-//      assistant_text-with-tool_calls round-trips intact and return the seq
-//      of the K-th most recent such assistant.
-// Returns -1 if there is nothing worth compacting (caller treats as no-op).
-int choose_tail_start_seq(const std::vector<SessionMessage>& msgs, int K = 4);
 
 // Tiered dynamic system block: wording escalates as the step budget depletes
 // so the model reprioritizes before running out. The stable cached body is
