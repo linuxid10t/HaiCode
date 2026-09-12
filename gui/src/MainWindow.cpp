@@ -1195,6 +1195,18 @@ MainWindow::_SubmitPrompt()
     current_tool_name_.clear();
     _UpdateStatusStrip();
 
+    // A fully completed todo list describes the previous task; clear it once
+    // the user moves on so the panel doesn't keep showing stale items.
+    // seed_todos({}) publishes TodoUpdated, which empties the Todos tab.
+    if (engine_ && !active_session_id_.empty()) {
+        auto todos = engine_->get_todos(active_session_id_);
+        if (!todos.empty() &&
+            std::all_of(todos.begin(), todos.end(),
+                        [](const auto& t) { return t.status == "completed"; })) {
+            engine_->seed_todos(active_session_id_, {});
+        }
+    }
+
     // Submit to engine (runs on engine thread)
     engine_->submit_prompt(active_session_id_, text, attachments);
 }
