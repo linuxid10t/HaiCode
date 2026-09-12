@@ -85,6 +85,9 @@ private:
     BTextControl* ws_max_field_      = nullptr;
     // Shown only when the selected engine needs an API key (exa/zai).
     BTextControl* ws_key_field_      = nullptr;
+    // Hint below the key field, visible when the marked engine has a key
+    // stored in config (provider-editor "key already set" pattern).
+    BStringView* ws_key_hint_        = nullptr;
     // Key already stored in config for the engine currently shown in the
     // field (not shown in the field itself, which starts empty and is
     // masked); empty field at save time means "keep existing".

@@ -362,6 +362,12 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     ws_key_field_->TextView()->HideTyping(true);
     ws_key_field_->SetDivider(130.0f);
 
+    // Same hint as the provider editor: tells the user a key is stored even
+    // though the masked field looks empty. Toggled in
+    // _UpdateKeyFieldVisibility().
+    ws_key_hint_ = new BStringView("ws_key_hint",
+        "(key already set — leave blank to keep, or enter a new one)");
+
     char maxbuf[16];
     snprintf(maxbuf, sizeof(maxbuf), "%d", config_.web_search_max_results);
     ws_max_field_ = new BTextControl("ws_max", "Max results:",
@@ -377,6 +383,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         .Add(new BSeparatorView(B_HORIZONTAL))
         .Add(ws_engine_field_)
         .Add(ws_key_field_)
+        .Add(ws_key_hint_)
         .Add(ws_max_field_)
         .AddGlue();
 
@@ -711,15 +718,29 @@ SettingsWindow::_UpdateKeyFieldVisibility()
     if (!ws_key_field_) return;
     const std::string& engine = ws_current_engine_;
     bool needs_key = (engine == "exa" || engine == "zai");
-    if (needs_key) {
-        if (!ws_key_field_->IsHidden()) return;  // already visible
-        ws_key_field_->Show();
-    } else {
-        if (ws_key_field_->IsHidden()) return;   // already hidden
-        ws_key_field_->Hide();
+    // Provider-editor pattern: hint appears under the field only when a key
+    // is already stored for the displayed engine.
+    bool show_hint = (needs_key && !ws_existing_key_.empty());
+
+    // Apply Show()/Hide() only on state changes so the hide count stays
+    // balanced, and invalidate the layout once if anything flipped. This
+    // must not early-return when the field stays visible (exa→zai switch):
+    // the hint can still change.
+    bool changed = false;
+    if (needs_key == ws_key_field_->IsHidden()) {
+        if (needs_key) ws_key_field_->Show();
+        else           ws_key_field_->Hide();
+        changed = true;
     }
-    if (BView* parent = ws_key_field_->Parent())
-        parent->InvalidateLayout();
+    if (ws_key_hint_ && show_hint == ws_key_hint_->IsHidden()) {
+        if (show_hint) ws_key_hint_->Show();
+        else           ws_key_hint_->Hide();
+        changed = true;
+    }
+    if (changed) {
+        if (BView* parent = ws_key_field_->Parent())
+            parent->InvalidateLayout();
+    }
 }
 
 void
