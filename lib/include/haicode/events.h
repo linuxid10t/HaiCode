@@ -29,6 +29,7 @@ enum class EventType {
     ToolSuccess,
     ToolFailed,
     CompactionStarted,
+    CompactionProgress,
     CompactionEnded,
     InterruptRequested,
     Interrupted,

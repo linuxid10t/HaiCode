@@ -20,10 +20,10 @@ private:
 };
 
 struct ChatEntry {
-    enum Kind { UserText, AssistantText, ToolCalled, ToolResult, System, Reasoning };
+    enum Kind { UserText, AssistantText, ToolCalled, ToolResult, System, Reasoning, CompactionSummary };
     Kind        kind;
     std::string text;       // content, input_json for ToolCalled
-    std::string name;       // tool name for ToolCalled
+    std::string name;       // tool name for ToolCalled, header for CompactionSummary
     bool        success   = true;
     bool        collapsed = false;  // meaningful for ToolCalled and Reasoning
 };
@@ -49,6 +49,10 @@ public:
     void AppendToolCalled(const std::string& tool_name, const std::string& input_json);
     void AppendToolResult(const std::string& output, bool success);
     void AppendSystem(const std::string& text);
+    // Collapsible [context compacted] transcript entry: header line plus the
+    // checkpoint summary body (collapsed by default, click to expand).
+    void AppendCompactionSummary(const std::string& header,
+                                 const std::string& summary);
     void Clear();
 
     // History replay: defer per-message rebuilds and auto-scroll until

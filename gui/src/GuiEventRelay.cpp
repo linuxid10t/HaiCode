@@ -190,7 +190,7 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
-    // CompactionStarted/CompactionEnded → MSG_COMPACTION
+    // CompactionStarted/CompactionProgress/CompactionEnded → MSG_COMPACTION
     bus_.subscribe(EventType::CompactionStarted, [this](const json& data) {
         std::string sid = data.value("session_id", "");
         if (!is_active_session(sid)) return;
@@ -201,12 +201,23 @@ GuiEventRelay::attach()
         msg.AddInt32("threshold", data.value("threshold", 0));
         main_window_.SendMessage(&msg);
     });
+    bus_.subscribe(EventType::CompactionProgress, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_COMPACTION);
+        msg.AddString("phase", "progress");
+        msg.AddInt32("percent", data.value("percent", 0));
+        main_window_.SendMessage(&msg);
+    });
     bus_.subscribe(EventType::CompactionEnded, [this](const json& data) {
         std::string sid = data.value("session_id", "");
         if (!is_active_session(sid)) return;
 
         BMessage msg(MSG_COMPACTION);
         msg.AddString("phase", "end");
+        msg.AddString("status", data.value("status", "").c_str());
+        msg.AddString("summary", data.value("summary", "").c_str());
         msg.AddInt32("messages_before", data.value("messages_before", 0));
         msg.AddInt32("messages_after",  data.value("messages_after",  0));
         main_window_.SendMessage(&msg);

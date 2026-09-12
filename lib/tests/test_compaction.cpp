@@ -8,8 +8,10 @@
 #include <chrono>
 #include <iostream>
 #include <cstdio>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)
@@ -106,6 +108,22 @@ static bool test_end_to_end_checkpoint() {
     std::string sid = engine.create_session("/tmp/proj", "build",
                                             "fake-model", "fake");
 
+    // Capture CompactionEnded payloads so we can assert the transcript-entry
+    // contract: a complete compaction must carry the committed summary.
+    std::mutex ev_mu;
+    std::vector<nlohmann::json> ended_events;
+    bus.subscribe(haicode::events::EventType::CompactionEnded,
+                  [&](const nlohmann::json& j) {
+                      std::lock_guard<std::mutex> lock(ev_mu);
+                      ended_events.push_back(j);
+                  });
+    std::vector<nlohmann::json> progress_events;
+    bus.subscribe(haicode::events::EventType::CompactionProgress,
+                  [&](const nlohmann::json& j) {
+                      std::lock_guard<std::mutex> lock(ev_mu);
+                      progress_events.push_back(j);
+                  });
+
     engine.submit_prompt(sid, "TURNONE-MARKER first prompt");
     CHECK(wait_for(store, sid, 2, false), "turn 1 completes (2 rows, no ckpt)");
 
@@ -133,6 +151,35 @@ static bool test_end_to_end_checkpoint() {
           "post-compaction request carries the checkpoint block");
     CHECK(reqd.find("TURNTWO-MARKER") != std::string::npos,
           "post-checkpoint turns stay live");
+
+    // The event may publish a beat after the checkpoint row becomes visible.
+    bool got_summary_event = false;
+    for (int i = 0; i < 100 && !got_summary_event; ++i) {
+        std::lock_guard<std::mutex> lock(ev_mu);
+        for (const auto& j : ended_events) {
+            if (j.value("status", "") == "complete"
+                && !j.value("summary", "").empty()
+                && j.value("summary", "") == cp->summary) {
+                got_summary_event = true;
+            }
+        }
+        if (!got_summary_event)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    CHECK(got_summary_event,
+          "CompactionEnded carries the committed summary for the UI");
+
+    // Progress events stream during summarization, i.e. before CompactionEnded
+    // completed above, so no extra wait is needed.
+    bool got_progress = false;
+    {
+        std::lock_guard<std::mutex> lock(ev_mu);
+        for (const auto& j : progress_events) {
+            int p = j.value("percent", -1);
+            if (p >= 0 && p <= 100) got_progress = true;
+        }
+    }
+    CHECK(got_progress, "CompactionProgress fired during summarization");
     std::cout << "[OK] end-to-end: trigger -> checkpoint -> sliced request\n";
     return true;
 }
@@ -246,6 +293,41 @@ static bool test_checkpoint_roundtrip() {
     CHECK(cp3.has_value() && cp3->id == id3, "latest by through_seq");
     CHECK(cp3->previous_checkpoint_id == id1, "chain links to predecessor");
     std::cout << "[OK] checkpoint round-trip (pending/complete/failed/chain)\n";
+    return true;
+}
+
+// The frontends replay [context compacted] entries from the checkpoint table;
+// this is the contract that replay depends on: complete-only, ascending
+// through_seq, summaries intact.
+static bool test_list_complete_checkpoints() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto sess = store.create("/tmp/proj", "build", "{}");
+
+    for (int i = 1; i <= 6; ++i) {
+        append_user(store, sess.id, "turn " + std::to_string(i));
+        append_asst(store, sess.id, "reply " + std::to_string(i));
+    }
+
+    std::string id1 = store.insert_checkpoint(sess.id, 4, "tail-1", "");
+    store.complete_checkpoint(id1, "## Objective\nsummary-1");
+    std::string id2 = store.insert_checkpoint(sess.id, 8, "tail-2", id1);
+    store.complete_checkpoint(id2, "## Objective\nsummary-2");
+    std::string idf = store.insert_checkpoint(sess.id, 12, "tail-f", id2);
+    store.fail_checkpoint(idf);
+
+    auto cps = store.list_complete_checkpoints(sess.id);
+    CHECK(cps.size() == 2, "two complete checkpoints listed (failed excluded)");
+    CHECK(cps[0].through_seq < cps[1].through_seq, "ascending through_seq");
+    CHECK(cps[0].id == id1 && cps[1].id == id2, "order matches the chain");
+    CHECK(cps[0].status == "complete" && cps[1].status == "complete",
+          "both listed checkpoints are complete");
+    CHECK(cps[0].summary == "## Objective\nsummary-1"
+              && cps[1].summary == "## Objective\nsummary-2",
+          "summaries round-trip in order");
+    std::cout << "[OK] list_complete_checkpoints: ascending, complete-only\n";
     return true;
 }
 
@@ -395,6 +477,7 @@ int main() {
     ok &= test_manual_compact_unknown_window();
     ok &= test_end_to_end_checkpoint();
     ok &= test_checkpoint_roundtrip();
+    ok &= test_list_complete_checkpoints();
     ok &= test_messages_survive();
     ok &= test_assembly_with_checkpoint();
     ok &= test_split_feeds_checkpoint_chain();

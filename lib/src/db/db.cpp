@@ -611,6 +611,34 @@ std::optional<CompactionCheckpoint> SessionStore::latest_complete_checkpoint(
     return out;
 }
 
+std::vector<CompactionCheckpoint> SessionStore::list_complete_checkpoints(
+    const std::string& session_id) {
+    const char* sel =
+        "SELECT id, session_id, through_seq, summary, recent_context,"
+        " previous_checkpoint_id, status, time_created, time_updated"
+        " FROM compaction_checkpoint WHERE session_id=? AND status='complete'"
+        " ORDER BY through_seq ASC";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), sel, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    std::vector<CompactionCheckpoint> out;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        CompactionCheckpoint cp;
+        cp.id                     = (const char*)sqlite3_column_text(stmt, 0);
+        cp.session_id             = (const char*)sqlite3_column_text(stmt, 1);
+        cp.through_seq            = sqlite3_column_int(stmt, 2);
+        cp.summary                = (const char*)sqlite3_column_text(stmt, 3);
+        cp.recent_context         = (const char*)sqlite3_column_text(stmt, 4);
+        cp.previous_checkpoint_id = (const char*)sqlite3_column_text(stmt, 5);
+        cp.status                 = (const char*)sqlite3_column_text(stmt, 6);
+        cp.time_created           = sqlite3_column_int64(stmt, 7);
+        cp.time_updated           = sqlite3_column_int64(stmt, 8);
+        out.push_back(std::move(cp));
+    }
+    sqlite3_finalize(stmt);
+    return out;
+}
+
 void SessionStore::replace_todos(const std::string& session_id,
                                  const std::vector<Todo>& todos) {
     // Atomic whole-list replace: DELETE then INSERT each row inside one

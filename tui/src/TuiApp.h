@@ -22,7 +22,9 @@ enum class LineType {
     System,
     Separator,
     ThinkingHeader,
-    ThinkingText
+    ThinkingText,
+    CompactHeader,
+    CompactText
 };
 
 struct ChatLine {
@@ -196,6 +198,7 @@ private:
     bool engine_running_ = false;
     bool thinking_       = false;  // true between submit and first text delta
     bool compacting_     = false;  // true while summarizing the context head
+    int  compaction_progress_ = -1;  // 0-99 while compacting; -1 = unknown
     int  total_tokens_   = 0;
     int  last_prompt_input_  = 0;
     int  last_prompt_output_ = 0;

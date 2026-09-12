@@ -1547,6 +1547,26 @@ bool SessionEngine::compact_history(const std::string& session_id,
 
     const int summary_cap = config_.compaction_summary_max_tokens;
 
+    // Progress: map the summarizer's streamed output onto a percent of the
+    // output cap, rescaled into [lo, hi] so a chunked two-pass merge can give
+    // each pass its slice of the range. Published only when the percent
+    // changes, so a fast stream doesn't flood the bus.
+    int progress_lo = 0, progress_hi = 99;
+    int last_progress = -1;
+    auto emit_progress = [&](const std::string& acc) {
+        int tokens = estimate_text_tokens(acc);
+        int pct = summary_cap > 0 ? (tokens * 100) / summary_cap : 100;
+        if (pct > 100) pct = 100;
+        int scaled = progress_lo
+                   + (pct * (progress_hi - progress_lo) + 50) / 100;
+        if (scaled == last_progress) return;
+        last_progress = scaled;
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["percent"]    = scaled;
+        bus_.publish(events::EventType::CompactionProgress, ev);
+    };
+
     auto run_summary = [&](const std::string& prompt, std::string& out,
                            std::string& err) -> bool {
         LLMRequest r;
@@ -1562,6 +1582,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         StreamCallbacks cbs;
         cbs.on_text_delta = [&](const std::string&, const std::string& d) {
             out += d;
+            emit_progress(out);
         };
         // Providers invoke on_finish unconditionally; leaving it unset makes
         // an empty std::function call (std::bad_function_call → abort).
@@ -1578,6 +1599,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         if (!run_summary(prompt, out, err)) return false;
         if (validate_summary(out, summary_cap)) return true;
         fprintf(stderr, "[engine] summary failed validation; retrying once\n");
+        last_progress = -1;  // the retry restarts the stream; re-emit from low
         std::string retry = prompt +
             "\n\n--- YOUR PREVIOUS ATTEMPT (invalid — fix its structure, keep "
             "its content) ---\n" + out;
@@ -1625,6 +1647,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
                 ++mid;  // don't split an assistant from its tool results
             std::vector<SessionMessage> first(older.begin(), older.begin() + mid),
                                         second(older.begin() + mid, older.end());
+            progress_lo = 0;  progress_hi = 49;  last_progress = -1;
             std::string pass1, p1 = build_summary_prompt(
                 previous_summary, aged_context,
                 fit_serialized(previous_summary + aged_context,
@@ -1633,6 +1656,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
                 return fail("chunked pass 1 failed", err);
             if (interrupt_flag && interrupt_flag->load())
                 return fail("interrupted", "");
+            progress_lo = 50; progress_hi = 99;  last_progress = -1;
             std::string p2 = build_summary_prompt(
                 pass1, "",
                 fit_serialized(pass1, serialize_history(second, max_tool_out)));
@@ -1658,6 +1682,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         ev["through_seq"]     = through_seq;
         ev["messages_before"] = older.size() + recent.size();
         ev["messages_after"]  = recent.size() + 1;
+        ev["summary"]         = summary;
         bus_.publish(events::EventType::CompactionEnded, ev);
     }
 

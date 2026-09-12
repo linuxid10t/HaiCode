@@ -198,6 +198,11 @@ since the threshold cannot be sized safely. Set the window explicitly via the
 top-level `"models"` object (e.g. `"models": {"my-local-model": 131072}`) to
 enable compaction for models HaiCode doesn't recognize.
 
+After each compaction, a collapsible `[context compacted]` transcript entry
+shows the checkpoint summary in the chat scrollback (toggle with `'t'` in the
+TUI, click in the GUI). It is rendered from the checkpoint table, never stored
+as a message, so the model's context is unaffected.
+
 ### Session autonaming
 
 New sessions are created with an empty title and given a descriptive name

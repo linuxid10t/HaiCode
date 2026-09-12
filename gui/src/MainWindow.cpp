@@ -1189,6 +1189,11 @@ void
 MainWindow::_LoadHistory(const std::string& session_id)
 {
     auto messages = store_.load_messages(session_id);
+    // Replay [context compacted] entries at the point each compaction
+    // occurred — derived from the checkpoint table, never stored as rows
+    // (a stored row would ride every future request and double-count).
+    auto checkpoints = store_.list_complete_checkpoints(session_id);
+    size_t cp_idx = 0;
     // Batch the replay: per-message rebuilds are quadratic in session length;
     // EndBatch re-renders once.
     chat_view_->BeginBatch();
@@ -1245,6 +1250,13 @@ MainWindow::_LoadHistory(const std::string& session_id)
             }
         } catch (const std::exception&) {
             // Skip malformed messages
+        }
+        while (cp_idx < checkpoints.size()
+               && sm.seq >= checkpoints[cp_idx].through_seq) {
+            chat_view_->AppendCompactionSummary(
+                "[context compacted \xe2\x80\x94 earlier messages summarized]",
+                checkpoints[cp_idx].summary);
+            ++cp_idx;
         }
     }
     chat_view_->EndBatch();
@@ -1575,17 +1587,35 @@ MainWindow::_HandleCompaction(BMessage* msg)
 
     if (ph == "start") {
         compacting_ = true;
+        compaction_progress_ = -1;
         streaming_state_ = "compacting";
+    } else if (ph == "progress") {
+        // Progress can arrive on the heels of "start"; don't clobber state.
+        int32 pct = 0;
+        if (msg->FindInt32("percent", &pct) == B_OK)
+            compaction_progress_ = (int)pct;
+        if (!compacting_) {
+            compacting_ = true;
+            streaming_state_ = "compacting";
+        }
     } else if (ph == "end") {
         compacting_ = false;
+        compaction_progress_ = -1;
         streaming_state_ = engine_running_ ? "thinking" : "idle";
-        int32 before = 0, after = 0;
-        msg->FindInt32("messages_before", &before);
-        msg->FindInt32("messages_after",  &after);
-        char buf[80];
-        snprintf(buf, sizeof(buf), "Context compacted (%ld\xe2\x86\x92%ld messages).",
-                 (long)before, (long)after);
-        chat_view_->AppendSystem(buf);
+        const char* status = nullptr;
+        msg->FindString("status", &status);
+        std::string st = status ? status : "";
+        if (st == "complete") {
+            const char* summary = nullptr;
+            msg->FindString("summary", &summary);
+            std::string sum = summary ? summary : "";
+            chat_view_->AppendCompactionSummary(
+                "[context compacted \xe2\x80\x94 earlier messages summarized]",
+                sum);
+        } else {
+            chat_view_->AppendSystem(
+                "Compaction failed \xe2\x80\x94 full context retained.");
+        }
     }
     _UpdateStatusStrip();
 }
@@ -1840,6 +1870,11 @@ MainWindow::_UpdateStatusStrip()
     if (compacting_) {
         glyph = "\xe2\x9c\x8e";  // LOWER RIGHT PENCIL
         label = "compacting context\xe2\x80\xa6";
+        if (compaction_progress_ >= 0) {
+            char pct[8];
+            snprintf(pct, sizeof(pct), " %d%%", compaction_progress_);
+            label += pct;
+        }
     } else if (!engine_running_) {
         glyph = "\xe2\x9c\x93";  // CHECK MARK
         label = "idle";

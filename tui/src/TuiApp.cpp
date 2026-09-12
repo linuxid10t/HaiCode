@@ -261,11 +261,21 @@ void TuiApp::subscribe_events() {
         ev.str1       = "start";
         push_engine_event(std::move(ev));
     });
+    bus_.subscribe(events::EventType::CompactionProgress, [this](const json& j) {
+        EngineEvent ev;
+        ev.kind       = EngineEventKind::Compaction;
+        ev.session_id = j.value("session_id", "");
+        ev.str1       = "progress";
+        ev.int1       = j.value("percent", 0);
+        push_engine_event(std::move(ev));
+    });
     bus_.subscribe(events::EventType::CompactionEnded, [this](const json& j) {
         EngineEvent ev;
         ev.kind       = EngineEventKind::Compaction;
         ev.session_id = j.value("session_id", "");
         ev.str1       = "end";
+        ev.str2       = j.value("status", "");
+        ev.str3       = j.value("summary", "");
         ev.int1       = j.value("messages_before", 0);
         ev.int2       = j.value("messages_after",  0);
         push_engine_event(std::move(ev));
@@ -436,13 +446,24 @@ void TuiApp::process_engine_events() {
         case EngineEventKind::Compaction:
             if (ev.str1 == "start") {
                 compacting_ = true;
+                compaction_progress_ = 0;
+            } else if (ev.str1 == "progress") {
+                compacting_ = true;   // progress can beat the start event
+                compaction_progress_ = ev.int1;
             } else {
                 compacting_ = false;
-                char buf[80];
-                snprintf(buf, sizeof(buf),
-                         "Context compacted (%d\xe2\x86\x92%d messages).",
-                         ev.int1, ev.int2);
-                append_line({ LineType::System, buf });
+                compaction_progress_ = -1;
+                if (ev.str2 == "complete") {
+                    append_line({ LineType::CompactHeader,
+                                  "[context compacted \xe2\x80\x94 earlier "
+                                  "messages summarized]" });
+                    append_line({ LineType::CompactText, ev.str3 });
+                    append_line({ LineType::Separator, "" });
+                } else {
+                    append_line({ LineType::System,
+                                 "[compaction failed \xe2\x80\x94 full "
+                                 "context retained]" });
+                }
             }
             break;
 
@@ -485,6 +506,8 @@ void TuiApp::select_session(int idx) {
     reasoning_streaming_ = false;
     engine_running_ = false;
     thinking_       = false;
+    compacting_     = false;
+    compaction_progress_ = -1;
     total_tokens_   = sessions_[idx].tokens.input + sessions_[idx].tokens.output;
     last_prompt_input_  = 0;
     last_prompt_output_ = 0;
@@ -495,7 +518,6 @@ void TuiApp::select_session(int idx) {
     // so a freshly reopened session shows a real number instead of "—". The
     // next live StepEnded replaces the seed with the exact current value.
     current_context_tokens_ = sessions_[idx].last_input_tokens;
-    compacting_ = false;
     current_todos_  = engine_.get_todos(active_session_id_);
     todos_scroll_   = 0;
 
@@ -517,6 +539,11 @@ void TuiApp::select_session(int idx) {
 
 void TuiApp::load_history(const std::string& session_id) {
     auto messages = store_.load_messages(session_id);
+    // Replay [context compacted] entries at the point each compaction
+    // occurred — derived from the checkpoint table, never stored as rows
+    // (a stored row would ride every future request and double-count).
+    auto checkpoints = store_.list_complete_checkpoints(session_id);
+    size_t cp_idx = 0;
     for (auto& msg : messages) {
         try {
             auto j = json::parse(msg.data_json);
@@ -561,6 +588,16 @@ void TuiApp::load_history(const std::string& session_id) {
             }
         } catch (...) {
             // Ignore malformed history entries
+        }
+        while (cp_idx < checkpoints.size()
+               && msg.seq >= checkpoints[cp_idx].through_seq) {
+            append_line({ LineType::CompactHeader,
+                          "[context compacted \xe2\x80\x94 earlier messages "
+                          "summarized]" });
+            append_line({ LineType::CompactText,
+                          checkpoints[cp_idx].summary });
+            append_line({ LineType::Separator, "" });
+            ++cp_idx;
         }
     }
     chat_scroll_ = 0; // pin to bottom after loading history
@@ -1199,12 +1236,19 @@ void TuiApp::render_chat() {
         if (cl.type == LineType::ThinkingText && !thinking_expanded_) {
             continue;
         }
+        // Compaction summaries share the thinking toggle
+        if (cl.type == LineType::CompactText && !thinking_expanded_) {
+            continue;
+        }
         std::string display_text = cl.text;
         if (cl.type == LineType::ToolHeader) {
             // Format: ╔ <name> ▶/▼
             std::string indicator = tools_expanded_ ? " ▼" : " ▶";
             display_text = "╔ " + cl.text + indicator;
         } else if (cl.type == LineType::ThinkingHeader) {
+            std::string indicator = thinking_expanded_ ? " \xe2\x96\xbc" : " \xe2\x96\xb6";
+            display_text = ">> " + cl.text + indicator;
+        } else if (cl.type == LineType::CompactHeader) {
             std::string indicator = thinking_expanded_ ? " \xe2\x96\xbc" : " \xe2\x96\xb6";
             display_text = ">> " + cl.text + indicator;
         }
@@ -1268,6 +1312,18 @@ void TuiApp::render_chat() {
             ::wattroff(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
             break;
 
+        case LineType::CompactHeader:
+            ::wattron(win_chat_, COLOR_PAIR(CP_TOOL_HEADER) | A_BOLD);
+            mvwprintw(win_chat_, row, 0, "%s", dl.text.c_str());
+            ::wattroff(win_chat_, COLOR_PAIR(CP_TOOL_HEADER) | A_BOLD);
+            break;
+
+        case LineType::CompactText:
+            ::wattron(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
+            mvwprintw(win_chat_, row, 0, "%s", dl.text.c_str());
+            ::wattroff(win_chat_, COLOR_PAIR(CP_TOOL_BODY));
+            break;
+
         case LineType::ToolResult:
             ::wattron(win_chat_, COLOR_PAIR(CP_TOOL_OK));
             mvwprintw(win_chat_, row, 0, "%s", dl.text.c_str());
@@ -1317,6 +1373,11 @@ void TuiApp::render_input() {
     // Running indicator on the right of the input line
     if (compacting_) {
         std::string indicator = "[compacting context\xe2\x80\xa6]";
+        if (compaction_progress_ >= 0) {
+            char pct[8];
+            snprintf(pct, sizeof(pct), " %d%%", compaction_progress_);
+            indicator += pct;
+        }
         mvwaddstr(win_input_, 1, w - (int)indicator.size() - 1, indicator.c_str());
     } else if (engine_running_) {
         std::string indicator;

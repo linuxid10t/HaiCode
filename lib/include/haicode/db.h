@@ -126,6 +126,11 @@ public:
     // Latest checkpoint with status="complete" (highest through_seq), if any.
     std::optional<CompactionCheckpoint> latest_complete_checkpoint(
         const std::string& session_id);
+    // All complete checkpoints for the session, ascending through_seq. The
+    // frontends use this to replay [context compacted] transcript entries at
+    // the exact point each compaction occurred, without storing message rows.
+    std::vector<CompactionCheckpoint> list_complete_checkpoints(
+        const std::string& session_id);
 
     // Atomic whole-list replace for the todo_write tool. Deletes every
     // existing row for the session and inserts the new list in one

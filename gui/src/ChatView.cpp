@@ -172,6 +172,19 @@ ChatView::_Rebuild()
             break;
         }
 
+        case ChatEntry::CompactionSummary: {
+            std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
+            std::string header = "\n" + e.name + indicator + "\n";
+            int32 hstart = text_view_->TextLength();
+            AppendStyled(header, kColorThinkingHeader, true);
+            int32 hend = text_view_->TextLength();
+            header_ranges_.push_back({hstart, hend, i});
+            if (!e.collapsed && !e.text.empty()) {
+                AppendStyled(e.text + "\n", kColorThinkingBody, false);
+            }
+            break;
+        }
+
         case ChatEntry::System:
             AppendStyled("\n[System] " + e.text + "\n", kColorSystem, false);
             break;
@@ -294,6 +307,17 @@ ChatView::AppendSystem(const std::string& text)
 }
 
 void
+ChatView::AppendCompactionSummary(const std::string& header,
+                                  const std::string& summary)
+{
+    EndReasoningStreaming();
+    streaming_ = false;
+    model_.push_back({ChatEntry::CompactionSummary, summary, header, true, true});
+    if (!defer_rebuild_)
+        _Rebuild();
+}
+
+void
 ChatView::Clear()
 {
     streaming_            = false;
@@ -335,7 +359,8 @@ ChatView::ToggleBlock(int model_idx)
 {
     if (model_idx < 0 || model_idx >= (int)model_.size()) return;
     if (model_[model_idx].kind != ChatEntry::ToolCalled
-        && model_[model_idx].kind != ChatEntry::Reasoning) return;
+        && model_[model_idx].kind != ChatEntry::Reasoning
+        && model_[model_idx].kind != ChatEntry::CompactionSummary) return;
     model_[model_idx].collapsed = !model_[model_idx].collapsed;
     _Rebuild();
 }

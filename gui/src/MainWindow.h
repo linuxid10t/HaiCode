@@ -179,6 +179,7 @@ private:
     // Engine state mirror for UI
     bool           engine_running_        = false;
     bool           compacting_            = false;
+    int            compaction_progress_   = -1;  // 0-99 while compacting; -1 = unknown
     std::string    streaming_state_ = "idle";  // idle|thinking|streaming|tool|compacting
     std::string    current_tool_name_;
 
