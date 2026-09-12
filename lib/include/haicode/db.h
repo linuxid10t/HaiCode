@@ -113,6 +113,12 @@ public:
     void append_message(const std::string& session_id,
                         const std::string& type,
                         const std::string& data_json);
+    // Overwrite one message row's data_json (used by the vision-fallback
+    // backfill to persist image descriptions on attachment entries). No-op if
+    // the (session_id, seq) row does not exist.
+    void update_message_data(const std::string& session_id,
+                             int seq,
+                             const std::string& data_json);
     std::vector<SessionMessage> load_messages(const std::string& session_id);
 
     // ---- Compaction checkpoints (non-destructive compaction) ----

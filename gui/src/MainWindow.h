@@ -106,6 +106,7 @@ private:
 
     // Attachments
     void _OpenAttachPanel();
+    bool _VisionAvailable();
     void _HandleAttachRefs(BMessage* msg);
     void _NotifyAttachmentLimit(const std::string& note);
     void _RemoveAttachment(int32 index);

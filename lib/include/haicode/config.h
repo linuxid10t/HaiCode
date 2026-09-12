@@ -51,6 +51,18 @@ struct AppConfig {
     // populated from the top-level "models" object in config.json. Used by
     // get_context_window() as a hard override on top of the hardcoded prefix table.
     std::map<std::string, int> model_contexts;
+    // Per-model vision-capability overrides (keyed by exact model_id), parsed
+    // from the top-level "vision" object in config.json. Used by
+    // model_supports_vision() as a hard override on the built-in prefix table;
+    // models absent from both are treated as NOT vision-capable (fail-closed).
+    std::map<std::string, bool> model_vision;
+    // Vision fallback: a (provider, model) pair that IS vision-capable, used
+    // to describe images for text-only primary models. Both empty = feature
+    // off. Parsed from the top-level "vision_fallback" object in config.json:
+    // {"provider": "...", "model": "..."}. Separate from "vision" (a per-model
+    // bool override map with different semantics).
+    std::string vision_fallback_provider;
+    std::string vision_fallback_model;
     // Per-model token-price overrides (USD per 1M tokens), keyed
     // "provider_id:model_id" or "provider_id:model-prefix". Overlays the
     // built-in defaults in lib/src/pricing/pricing.cpp. Populated from the

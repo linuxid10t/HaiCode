@@ -17,6 +17,8 @@
 #include <fnmatch.h>
 #include <dirent.h>
 #include <sys/wait.h>
+#include <FindDirectory.h>
+#include <Path.h>
 #include <sys/stat.h>
 #include <csignal>
 
@@ -1966,6 +1968,124 @@ public:
 };
 
 // Registration function
+// ---- screenshot tool ----
+
+// Parse width/height from a PNG file's IHDR chunk (bytes 16-23, big-endian).
+// Returns false when unreadable or missing the PNG signature.
+static bool png_dimensions(const std::string& path, int& width, int& height) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+    std::array<unsigned char, 24> hdr{};
+    f.read(reinterpret_cast<char*>(hdr.data()), hdr.size());
+    if (f.gcount() < 24) return false;
+    static const unsigned char kSig[8] = {0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'};
+    if (memcmp(hdr.data(), kSig, 8) != 0) return false;
+    width  = (hdr[16] << 24) | (hdr[17] << 16) | (hdr[18] << 8) | hdr[19];
+    height = (hdr[20] << 24) | (hdr[21] << 16) | (hdr[22] << 8) | hdr[23];
+    return true;
+}
+
+class ScreenshotTool : public Tool {
+public:
+    std::string name() const override { return "screenshot"; }
+    std::string description() const override {
+        return "Capture the current screen (or the active window) to a PNG in the"
+               " temporary directory and attach it to the conversation so you can"
+               " see it. Use it to inspect GUI programs you are building or"
+               " debugging, read error dialogs, or verify visual output.";
+    }
+    nlohmann::json input_schema() const override {
+        return {
+            {"type", "object"},
+            {"properties", {
+                {"window", {{"type", "boolean"},
+                    {"description", "Capture the active window instead of the whole screen (default false)"}}},
+                {"delay", {{"type", "integer"},
+                    {"description", "Seconds to wait before capturing, 0-10 (default 0) — lets windows finish drawing"}}}},
+            },
+        };
+    }
+    std::string resource(const nlohmann::json&, const ToolContext&) const override {
+        return "screen";
+    }
+    ToolResult execute(const nlohmann::json& input, const ToolContext&) override {
+        ToolResult r;
+        BPath temp_path;
+        std::string tmp = "/tmp";
+        if (find_directory(B_SYSTEM_TEMP_DIRECTORY, &temp_path) == B_OK
+                && temp_path.Path())
+            tmp = temp_path.Path();
+        std::string path = tmp + "/haicode_shot_"
+                         + std::to_string(util::now_ms()) + "_"
+                         + std::to_string((long)getpid()) + ".png";
+
+        bool window = input.value("window", false);
+        int delay = input.value("delay", 0);
+        if (delay < 0) delay = 0;
+        if (delay > 10) delay = 10;
+
+        std::string cmd = "timeout 15 screenshot --silent --format=png";
+        if (window) cmd += " --window";
+        if (delay > 0) cmd += " --delay=" + std::to_string(delay);
+        cmd += " " + sq(path) + " 2>&1";
+
+        std::string stderr_text;
+        if (FILE* pipe = popen(cmd.c_str(), "r")) {
+            stderr_text = read_pipe(pipe);
+            pclose(pipe);
+        }
+
+        // The system CLI returns nonzero exit codes even on success (B_OK
+        // errors reported through its own error path), so validate the output
+        // file instead of the exit status.
+        std::ifstream f(path, std::ios::binary);
+        if (!f) {
+            r.success = false;
+            r.error = "screenshot: no image was written"
+                    + (stderr_text.empty() ? "" : (": " + stderr_text));
+            return r;
+        }
+        std::string raw((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+        f.close();
+        if (raw.size() < 24 || memcmp(raw.data(), "\x89PNG\r\n\x1a\n", 8) != 0) {
+            r.success = false;
+            r.error = "screenshot: output is not a valid PNG"
+                    + (stderr_text.empty() ? "" : (": " + stderr_text));
+            remove(path.c_str());
+            return r;
+        }
+        // Same cap as GUI image attachments — larger captures would dominate
+        // the context window.
+        static const size_t MAX_IMAGE = 4 * 1024 * 1024;
+        if (raw.size() > MAX_IMAGE) {
+            r.success = false;
+            r.error = "screenshot: captured image is " + std::to_string(raw.size())
+                    + " bytes, over the 4 MB attachment cap. Retry with window=true"
+                      " to capture only the active window.";
+            remove(path.c_str());
+            return r;
+        }
+
+        int w = 0, h = 0;
+        png_dimensions(path, w, h);
+
+        // Reserved "attachments" key: the engine strips this array from the
+        // output and persists it on the tool_result row so the image reaches
+        // the model as an image block (survives /tmp cleanup).
+        nlohmann::json out;
+        out["summary"] = "Screenshot saved to " + path + " ("
+                       + std::to_string(w) + "x" + std::to_string(h)
+                       + ", image/png) — attached to context.";
+        out["attachments"] = nlohmann::json::array({
+            {{"media_type", "image/png"}, {"path", path},
+             {"data_b64", util::base64_encode(raw)}}
+        });
+        r.output = out.dump();
+        return r;
+    }
+};
+
 void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<BashTool>());
     registry.register_tool(std::make_shared<ReadTool>());
@@ -1985,6 +2105,7 @@ void register_builtin_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<FindTool>());
     registry.register_tool(std::make_shared<SymbolsTool>());
     registry.register_tool(std::make_shared<ProcessTool>());
+    registry.register_tool(std::make_shared<ScreenshotTool>());
     // web_search and web_extract live in web_tools.cpp; pull them in through
     // their own registration entry point so this file doesn't need to know
     // about HttpClient.

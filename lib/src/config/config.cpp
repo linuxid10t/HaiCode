@@ -155,6 +155,26 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             }
         }
 
+        // Per-model vision-capability overrides:
+        // {"vision": {"claude-sonnet-4": true, "some-text-only-model": false}}
+        if (j.contains("vision") && j["vision"].is_object()) {
+            for (auto& [k, v] : j["vision"].items()) {
+                if (v.is_boolean())
+                    cfg.model_vision[k] = v.get<bool>();
+            }
+        }
+
+        // Vision fallback pair:
+        // {"vision_fallback": {"provider": "openai", "model": "gpt-4o-mini"}}
+        // Describes images via this model when the primary is text-only.
+        if (j.contains("vision_fallback") && j["vision_fallback"].is_object()) {
+            const auto& vf = j["vision_fallback"];
+            if (vf.contains("provider") && vf["provider"].is_string())
+                cfg.vision_fallback_provider = vf["provider"].get<std::string>();
+            if (vf.contains("model") && vf["model"].is_string())
+                cfg.vision_fallback_model = vf["model"].get<std::string>();
+        }
+
         // Per-model token-price overrides:
         // {"pricing": {"anthropic:claude-sonnet-4": {"input": 3.0, "output": 15.0,
         //   "cache_read": 0.30, "cache_write": 3.75}}}
@@ -254,6 +274,12 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.instructions.push_back(s);
     for (auto& [k, v] : overlay.model_contexts)
         result.model_contexts[k] = v;
+    for (auto& [k, v] : overlay.model_vision)
+        result.model_vision[k] = v;
+    if (!overlay.vision_fallback_provider.empty())
+        result.vision_fallback_provider = overlay.vision_fallback_provider;
+    if (!overlay.vision_fallback_model.empty())
+        result.vision_fallback_model = overlay.vision_fallback_model;
     for (auto& [k, v] : overlay.pricing)
         result.pricing[k] = v;
     if (!overlay.web_search_engine.empty())

@@ -34,6 +34,39 @@ static const struct { const char* prefix; int window; } kKnownModels[] = {
     {"llama-3",             8192},
 };
 
+// (prefix, vision). Prefix matched case-insensitively like kKnownModels.
+// Covers Claude 3+ (all multimodal), OpenAI's image-capable generations
+// (note: plain gpt-4 / gpt-3.5 are text-only and deliberately absent),
+// Google Gemini, and common local vision models (llava, qwen*-vl,
+// llama3.2-vision, llama4).
+static const struct { const char* prefix; bool vision; } kVisionModels[] = {
+    // Anthropic — vision from Claude 3 onward.
+    {"claude-3",          true},
+    {"claude-opus",       true},
+    {"claude-sonnet",     true},
+    {"claude-haiku",      true},
+    // OpenAI
+    {"gpt-4o",            true},
+    {"chatgpt-4o",        true},
+    {"gpt-4.1",           true},
+    {"gpt-4-turbo",       true},
+    {"o1",                true},
+    {"o3",                true},
+    {"o4",                true},
+    {"gpt-5",             true},
+    // Google
+    {"gemini",            true},
+    // Local / open vision models
+    {"llava",             true},
+    {"qwen-vl",           true},
+    {"qwen2-vl",          true},
+    {"qwen2.5-vl",        true},
+    {"qwen3-vl",          true},
+    {"llama3.2-vision",   true},
+    {"llama-3.2-vision",  true},
+    {"llama4",            true},
+};
+
 static bool starts_with_ci(const std::string& s, const std::string& prefix) {
     if (s.size() < prefix.size()) return false;
     for (size_t i = 0; i < prefix.size(); ++i) {
@@ -92,6 +125,31 @@ int get_context_window(const std::string& provider_id,
     // 3. Hardcoded prefix-table match. Reuse the 3-arg overload with an
     // empty override map (the override was already checked in step 1).
     return get_context_window(provider_id, model_id, {});
+}
+
+bool model_supports_vision(const std::string& model_id,
+                           const std::map<std::string, bool>& config_overrides) {
+    // 1. Exact-match config override (explicit false wins over the table).
+    auto it = config_overrides.find(model_id);
+    if (it != config_overrides.end())
+        return it->second;
+
+    // 2. Longest-prefix hardcoded match.
+    const char* best_prefix = nullptr;
+    bool best_vision = false;
+    for (auto& entry : kVisionModels) {
+        std::string p = entry.prefix;
+        if (starts_with_ci(model_id, p)) {
+            if (!best_prefix || p.size() > strlen(best_prefix)) {
+                best_prefix = entry.prefix;
+                best_vision = entry.vision;
+            }
+        }
+    }
+    if (best_prefix) return best_vision;
+
+    // 3. Fail-closed: unknown models are assumed text-only.
+    return false;
 }
 
 } // namespace haicode

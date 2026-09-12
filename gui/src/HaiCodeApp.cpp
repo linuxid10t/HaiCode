@@ -341,19 +341,27 @@ HaiCodeApp::MessageReceived(BMessage* msg)
 
             // Capture shared_ptr so the provider stays alive through the thread
             auto provider = providers_->get(provider_id);
+            // Callers may request a distinct reply constant (e.g. the Settings
+            // vision-fallback dropdown) so the results land in their own
+            // handler instead of clobbering the primary model menu.
+            int32 reply_what = MSG_MODELS_LOADED;
+            int32 requested_what = 0;
+            if (msg->FindInt32("reply_what", &requested_what) == B_OK
+                    && requested_what != 0)
+                reply_what = requested_what;
             if (!provider) {
                 // No key configured — send empty list so dropdown shows "(none available)"
-                BMessage reply(MSG_MODELS_LOADED);
+                BMessage reply(reply_what);
                 reply.AddString("provider_id", provider_id.c_str());
                 reply_to.SendMessage(&reply);
                 break;
             }
 
             BMessenger win_msgr(reply_to);
-            std::thread([provider, provider_id, win_msgr]() {
+            std::thread([provider, provider_id, win_msgr, reply_what]() {
                 std::string err;
                 auto models = provider->list_models(err);
-                BMessage reply(MSG_MODELS_LOADED);
+                BMessage reply(reply_what);
                 reply.AddString("provider_id", provider_id.c_str());
                 reply.AddString("error", err.c_str());
                 for (auto& m : models)
@@ -444,6 +452,34 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 config_.model_contexts[context_model] = context_window;
             }
 
+            // Vision override for a model (from the Settings General tab).
+            // Tri-state: yes/no sets the override, auto erases it so the
+            // built-in table + fail-closed detection applies again.
+            const char* vision_override = nullptr;
+            const char* vision_model = nullptr;
+            if (msg->FindString("vision_override", &vision_override) == B_OK
+                && vision_override
+                && msg->FindString("vision_model", &vision_model) == B_OK
+                && vision_model && *vision_model) {
+                std::string v(vision_override);
+                if (v == "yes")
+                    config_.model_vision[vision_model] = true;
+                else if (v == "no")
+                    config_.model_vision[vision_model] = false;
+                else
+                    config_.model_vision.erase(vision_model);
+            }
+
+            // Vision fallback pair (from the Settings General tab). Empty
+            // provider or model turns the feature off.
+            const char* fb_provider = nullptr;
+            const char* fb_model = nullptr;
+            if (msg->FindString("vision_fallback_provider", &fb_provider) == B_OK
+                && msg->FindString("vision_fallback_model", &fb_model) == B_OK) {
+                config_.vision_fallback_provider = fb_provider ? fb_provider : "";
+                config_.vision_fallback_model    = fb_model    ? fb_model    : "";
+            }
+
             // Persist the full providers map, preserving other top-level keys.
             BPath settings_path;
             if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
@@ -483,6 +519,27 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     for (auto& [mid, win] : config_.model_contexts)
                         models_j[mid] = win;
                     j["models"] = models_j;
+                }
+                // Vision overrides use the "vision" top-level key that
+                // ConfigLoader parses; erase it when fully reset to Auto so
+                // stale entries don't linger.
+                if (!config_.model_vision.empty()) {
+                    nlohmann::json vision_j = nlohmann::json::object();
+                    for (auto& [mid, vis] : config_.model_vision)
+                        vision_j[mid] = vis;
+                    j["vision"] = vision_j;
+                } else {
+                    j.erase("vision");
+                }
+                // Vision fallback pair; erase-when-empty so "(none)" fully
+                // disables the feature in the persisted file.
+                if (!config_.vision_fallback_model.empty()) {
+                    j["vision_fallback"] = {
+                        {"provider", config_.vision_fallback_provider},
+                        {"model",    config_.vision_fallback_model},
+                    };
+                } else {
+                    j.erase("vision_fallback");
                 }
                 nlohmann::json providers_j = nlohmann::json::object();
                 for (auto& [id, p] : config_.providers) {

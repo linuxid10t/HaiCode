@@ -15,6 +15,8 @@ class BRadioButton;
 class BMenuField;
 class BPopUpMenu;
 class BMenuItem;
+class BTabView;
+class BButton;
 
 // Modal-ish editor for a single provider entry. Owned by SettingsWindow;
 // posts MSG_PROVIDER_DIALOG_DONE back to the parent with the edited fields.
@@ -54,8 +56,12 @@ private:
     void _ApplyDialogResult(BMessage* msg);
     void _Save();
     void _FetchModelsForMarkedProvider();
+    void _FetchFBModelsForMarkedProvider();  // fallback pair's model fetch
     std::string _MarkedProviderId() const;
+    std::string _MarkedFBProviderId() const; // fallback provider ("" = "(none)")
     void _RefreshContextField();   // sync context field to marked model's window
+    void _RefreshVisionMenu();     // sync vision dropdown to marked model's override
+    std::string _MarkedVision() const;           // "auto"/"yes"/"no" of marked item
     std::string _MarkedWSEngine() const;          // engine id of marked menu item
     void _UpdateKeyFieldVisibility();             // show key field for exa/zai only
     void _RememberKeyForEngine(const char* engine_id); // stash typed key per engine
@@ -75,6 +81,16 @@ private:
     BPopUpMenu*  model_menu_       = nullptr;
     BMenuField*  model_field_      = nullptr;
     BTextControl* context_field_   = nullptr;
+    // Vision override for the selected model (Auto/Yes/No), mirroring
+    // context_field_'s per-default-model scope.
+    BPopUpMenu*  vision_menu_      = nullptr;
+    BMenuField*  vision_field_     = nullptr;
+    // Vision fallback pair: a vision-capable (provider, model) used to
+    // describe images for text-only primaries. "(none)" = feature off.
+    BPopUpMenu*  fb_provider_menu_ = nullptr;
+    BMenuField*  fb_provider_field_= nullptr;
+    BPopUpMenu*  fb_model_menu_    = nullptr;
+    BMenuField*  fb_model_field_   = nullptr;
     BRadioButton* mode_plan_radio_   = nullptr;
     BRadioButton* mode_build_radio_  = nullptr;
 

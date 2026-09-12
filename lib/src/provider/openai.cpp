@@ -103,6 +103,10 @@ std::vector<nlohmann::json> translate_messages(
                 // user follow-up). Unknown block types warn but don't fail.
                 std::string user_text;
                 nlohmann::json image_parts = nlohmann::json::array();
+                // Images inside tool_result content blocks — OpenAI "tool"
+                // messages can't carry them, so they are split into a
+                // follow-up user message after the tool responses.
+                nlohmann::json tool_image_blocks = nlohmann::json::array();
                 for (auto& block : content) {
                     std::string btype = block.value("type", "");
                     if (btype == "tool_result") {
@@ -122,6 +126,8 @@ std::vector<nlohmann::json> translate_messages(
                                     acc += sub.get<std::string>();
                                 else if (sub.value("type", "") == "text")
                                     acc += sub.value("text", "");
+                                else if (sub.value("type", "") == "image")
+                                    tool_image_blocks.push_back(sub);
                                 else
                                     fprintf(stderr,
                                         "openai: dropping unsupported "
@@ -160,6 +166,25 @@ std::vector<nlohmann::json> translate_messages(
                                 "content block type '%s'\n",
                                 btype.c_str());
                     }
+                }
+                if (!tool_image_blocks.empty()) {
+                    nlohmann::json uc = nlohmann::json::array();
+                    uc.push_back({{"type", "text"},
+                                  {"text", "[image from tool result]"}});
+                    for (auto& blk : tool_image_blocks) {
+                        auto src = blk.find("source");
+                        if (src != blk.end() && src->is_object()) {
+                            uc.push_back({
+                                {"type", "image_url"},
+                                {"image_url", {
+                                    {"url", "data:" + src->value("media_type",
+                                                                    "image/png")
+                                          + ";base64," + src->value("data", "")}
+                                }}
+                            });
+                        }
+                    }
+                    out.push_back({{"role", "user"}, {"content", uc}});
                 }
                 if (!image_parts.empty()) {
                     // Mixed content must stay an array (text + image_url

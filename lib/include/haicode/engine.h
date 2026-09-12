@@ -21,12 +21,17 @@ public:
                      const std::string& system_dynamic,
                      const std::vector<ToolDefinition>& tools,
                      const std::string& model_id,
-                     const std::string& provider_id);
+                     const std::string& provider_id,
+                     bool model_accepts_images = true);
 
     // Assemble stored SessionMessages into the provider-facing message list.
     // Public so SessionEngine::compact_history can build the head slice for a
     // summarization call without going through the full build() path.
-    std::vector<nlohmann::json> assemble_messages(const std::vector<SessionMessage>& msgs);
+    // model_accepts_images=false swaps image blocks for their persisted
+    // vision-fallback descriptions (or a placeholder when none exists) so
+    // text-only primaries never receive raw image data.
+    std::vector<nlohmann::json> assemble_messages(const std::vector<SessionMessage>& msgs,
+                                                  bool model_accepts_images = true);
 };
 
 class SessionEngine {
@@ -136,6 +141,29 @@ private:
     void refine_title_llm(const std::string& session_id,
                           Provider& provider,
                           const std::string& model_id);
+
+    // Vision fallback: true when a usable fallback (provider registered +
+    // model vision-capable per model_supports_vision) is configured. Warns
+    // once on stderr when the configured fallback itself isn't vision-capable
+    // (treated as not ready — fail-safe).
+    bool vision_fallback_ready();
+
+    // One-shot describer call: sends the image to the fallback model and
+    // returns its text description ("" on failure). Same synchronous
+    // provider.stream pattern as refine_title_llm; runs on the engine's
+    // worker thread only.
+    std::string describe_image(Provider& provider,
+                               const std::string& model_id,
+                               const nlohmann::json& att);
+
+    // Describe-once backfill: when the session's primary model is text-only
+    // and a vision fallback is configured, find every persisted attachment
+    // (user_prompted and tool_result rows) lacking a "description" key and
+    // fill it via describe_image, persisting through update_message_data and
+    // updating the in-memory copies so this step's request sees them.
+    // Failures are skipped individually (placeholder rendering covers them).
+    void backfill_attachment_descriptions(const std::string& session_id,
+                                          std::vector<SessionMessage>& messages);
 
     SessionStore& store_;
     ProviderRegistry& providers_;

@@ -42,6 +42,11 @@ static const uint32 MSG_LIST_SEL        = 'PVls';  // list selection changed
 static const uint32 MSG_SET_PROVIDER    = 'PVsp';  // provider dropdown changed (carries "provider_id")
 static const uint32 MSG_WS_ENGINE_SELECTED = 'WSes'; // web-search engine menu item (carries "engine")
 
+// Vision fallback provider/model pair (SettingsWindow internal + app fetch)
+static const uint32 MSG_FB_PROVIDER_SET = 'VBps';  // fallback provider dropdown changed (carries "provider_id")
+static const uint32 MSG_FB_MODELS_LOADED = 'VBlm'; // be_app → SettingsWindow; repeated "model" strings
+static const uint32 MSG_FB_MODEL_CHANGED = 'VBmc'; // fallback model dropdown item selected
+
 // Model list
 static const uint32 MSG_FETCH_MODELS    = 'FTmd';  // MainWindow → be_app; "provider_id" string
 static const uint32 MSG_MODELS_LOADED   = 'MLld';  // be_app → MainWindow; repeated "model" strings

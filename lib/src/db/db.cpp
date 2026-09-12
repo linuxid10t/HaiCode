@@ -521,6 +521,22 @@ void SessionStore::append_message(const std::string& session_id,
     sqlite3_finalize(stmt);
 }
 
+void SessionStore::update_message_data(const std::string& session_id,
+                                       int seq,
+                                       const std::string& data_json) {
+    const char* sql =
+        "UPDATE session_message SET data_json=?, time_updated=?"
+        " WHERE session_id=? AND seq=?";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), sql, -1, &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, data_json.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, util::now_ms());
+    sqlite3_bind_text(stmt, 3, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, seq);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 std::vector<SessionMessage> SessionStore::load_messages(const std::string& session_id) {
     const char* sql =
         "SELECT id, session_id, type, seq, data_json, time_created, time_updated"

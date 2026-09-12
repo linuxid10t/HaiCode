@@ -1081,6 +1081,24 @@ MainWindow::_SwitchToSession(int idx)
     session_list_->Select(idx);
 }
 
+bool
+MainWindow::_VisionAvailable()
+{
+    if (!engine_) return true;
+    const haicode::AppConfig& cfg = engine_->config();
+    if (haicode::model_supports_vision(default_model_, cfg.model_vision))
+        return true;
+    // Relaxed fallback gate mirroring the engine: an explicitly configured
+    // fallback is trusted as long as its provider is registered (no
+    // prefix-table check — local vision models aren't in the table).
+    if (!cfg.vision_fallback_model.empty()) {
+        std::string fpid = cfg.vision_fallback_provider.empty()
+                         ? default_provider_ : cfg.vision_fallback_provider;
+        return engine_->providers().get(fpid) != nullptr;
+    }
+    return false;
+}
+
 void
 MainWindow::_OpenAttachPanel()
 {
@@ -1107,6 +1125,7 @@ MainWindow::_HandleAttachRefs(BMessage* msg)
     static const off_t MAX_BYTES = 4 * 1024 * 1024;  // under Anthropic's 5 MB cap
 
     entry_ref ref;
+    bool vision_alerted = false;
     for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; i++) {
         if (pending_attachments_.size() >= MAX_ATTACHMENTS) {
             _NotifyAttachmentLimit("at most 4 images per prompt");
@@ -1131,6 +1150,24 @@ MainWindow::_HandleAttachRefs(BMessage* msg)
         for (const char* m : ok) supported = supported || mime == m;
         if (!supported) {
             _NotifyAttachmentLimit(path.Leaf() + std::string(" is not a supported image"));
+            continue;
+        }
+
+        // Multimedia gate: the file is an image the model must be able to
+        // see. When neither the primary nor a usable fallback can, warn once
+        // per batch and skip the file.
+        if (!_VisionAvailable()) {
+            if (!vision_alerted) {
+                vision_alerted = true;
+                BAlert* alert = new BAlert("no_vision_model",
+                    "The current model can't see images, and no vision fallback "
+                    "is configured, so attachments would be ignored.\n\n"
+                    "Pick a vision-capable model or set a vision fallback first.",
+                    "Open Settings", "Cancel", nullptr,
+                    B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                if (alert->Go() == 0)
+                    be_app->PostMessage(MSG_SHOW_SETTINGS);
+            }
             continue;
         }
 

@@ -298,6 +298,77 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     mode_build_radio_ = new BRadioButton("mode_build", "Build mode", nullptr);
     (mode_is_plan ? mode_plan_radio_ : mode_build_radio_)->SetValue(B_CONTROL_ON);
 
+    // Vision override for the selected model: Auto (table + fail-closed),
+    // Yes/No (explicit override stored in config "vision"). Initial marking
+    // follows config_.model_vision for config_.model; _RefreshVisionMenu()
+    // re-syncs when the model dropdown selection changes.
+    vision_menu_ = new BPopUpMenu("vision_menu");
+    vision_menu_->SetRadioMode(true);
+    vision_menu_->SetLabelFromMarked(true);
+    struct VisionEntry { const char* label; const char* value; };
+    static const VisionEntry kVisionChoices[] = {
+        {"Auto (detect)", "auto"},
+        {"Yes",           "yes"},
+        {"No",            "no"},
+    };
+    std::string initial_vision = "auto";
+    auto vit = config_.model_vision.find(config_.model);
+    if (vit != config_.model_vision.end()) initial_vision = vit->second ? "yes" : "no";
+    BMenuItem* vision_marked = nullptr;
+    for (auto& e : kVisionChoices) {
+        auto* item = new BMenuItem(e.label, new BMessage());
+        item->Message()->AddString("vision", e.value);
+        vision_menu_->AddItem(item);
+        if (std::string(e.value) == initial_vision) vision_marked = item;
+    }
+    if (!vision_marked) vision_marked = vision_menu_->ItemAt(0);
+    vision_marked->SetMarked(true);
+    vision_field_ = new BMenuField("vision_field", "Vision:", vision_menu_);
+
+    // Vision fallback pair: a vision-capable (provider, model) that describes
+    // images for text-only primaries. Leading "(none)" item = feature off.
+    fb_provider_menu_ = new BPopUpMenu("fb_provider");
+    fb_provider_menu_->SetRadioMode(true);
+    fb_provider_menu_->SetLabelFromMarked(true);
+    {
+        auto* none_item = new BMenuItem("(none)", new BMessage(MSG_FB_PROVIDER_SET));
+        none_item->Message()->AddString("provider_id", "");
+        fb_provider_menu_->AddItem(none_item);
+        bool fb_found = config_.vision_fallback_provider.empty();
+        if (fb_found) none_item->SetMarked(true);
+        for (auto& [id, p] : config_.providers) {
+            auto* m = new BMessage(MSG_FB_PROVIDER_SET);
+            m->AddString("provider_id", id.c_str());
+            auto* item = new BMenuItem(id.c_str(), m);
+            fb_provider_menu_->AddItem(item);
+            if (id == config_.vision_fallback_provider) {
+                item->SetMarked(true);
+                fb_found = true;
+            }
+        }
+    }
+    fb_provider_field_ = new BMenuField("fb_provider_field",
+                                        "Vision fallback provider:",
+                                        fb_provider_menu_);
+
+    fb_model_menu_ = new BPopUpMenu("fb_model");
+    fb_model_menu_->SetRadioMode(true);
+    fb_model_menu_->SetLabelFromMarked(true);
+    if (!config_.vision_fallback_model.empty()) {
+        // Pre-mark the configured model; the fetch replaces placeholder items
+        // but preserves the marked label (same as the primary model menu).
+        auto* item = new BMenuItem(config_.vision_fallback_model.c_str(), nullptr);
+        item->SetMarked(true);
+        fb_model_menu_->AddItem(item);
+    } else {
+        auto* off = new BMenuItem("(off)", nullptr);
+        off->SetEnabled(false);
+        off->SetMarked(true);
+        fb_model_menu_->AddItem(off);
+    }
+    fb_model_field_ = new BMenuField("fb_model_field",
+                                     "Vision fallback model:", fb_model_menu_);
+
     auto* general_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
     BLayoutBuilder::Group<>(general_tab)
         .SetInsets(B_USE_DEFAULT_SPACING)
@@ -307,6 +378,15 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         .Add(new BStringView("ctx_hint",
             "(context window in tokens; sets/overrides the limit for this model)"
             "\nLeave blank to use the built-in default for known models."))
+        .Add(vision_field_)
+        .Add(new BStringView("vision_hint",
+            "(enables the screenshot tool for image-capable models"
+            " not in the built-in table)"))
+        .Add(fb_provider_field_)
+        .Add(fb_model_field_)
+        .Add(new BStringView("fb_hint",
+            "(when the default model is text-only, this vision-capable pair"
+            " describes images for it; (none) disables)"))
         .Add(new BSeparatorView(B_HORIZONTAL))
         .Add(new BStringView("mode_label", "New-session start mode:"))
         .AddGroup(B_VERTICAL)
@@ -423,6 +503,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     // Kick off an initial model-list fetch for the currently-marked provider
     // so the Default model dropdown is populated on open.
     _FetchModelsForMarkedProvider();
+    _FetchFBModelsForMarkedProvider();
 }
 
 std::string
@@ -526,7 +607,51 @@ SettingsWindow::MessageReceived(BMessage* msg)
         case MSG_MODEL_CHANGED:
             // Model dropdown selection changed — sync the context field.
             _RefreshContextField();
+            _RefreshVisionMenu();
             break;
+        case MSG_FB_PROVIDER_SET: {
+            // Fallback provider dropdown changed — refetch its model list.
+            while (fb_model_menu_->CountItems() > 0)
+                delete fb_model_menu_->RemoveItem((int32)0);
+            auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
+            loading->SetEnabled(false);
+            loading->SetMarked(true);
+            fb_model_menu_->AddItem(loading);
+            if (!_MarkedFBProviderId().empty())
+                _FetchFBModelsForMarkedProvider();
+            break;
+        }
+        case MSG_FB_MODELS_LOADED: {
+            std::string preserved = config_.vision_fallback_model;
+            while (fb_model_menu_->CountItems() > 0)
+                delete fb_model_menu_->RemoveItem((int32)0);
+            const char* m = nullptr;
+            int32 idx = 0;
+            bool any = false;
+            BMenuItem* to_mark = nullptr;
+            while (msg->FindString("model", idx++, &m) == B_OK) {
+                if (m && *m) {
+                    fb_model_menu_->AddItem(new BMenuItem(m, nullptr));
+                    any = true;
+                }
+            }
+            if (any) {
+                if (!preserved.empty())
+                    to_mark = fb_model_menu_->FindItem(preserved.c_str());
+                if (!to_mark) to_mark = fb_model_menu_->ItemAt(0);
+            } else {
+                std::string label = "(none available)";
+                const char* err = nullptr;
+                if (msg->FindString("error", &err) == B_OK && err && *err)
+                    label = std::string("(fetch failed: ") + err + ")";
+                to_mark = new BMenuItem(label.c_str(), nullptr);
+                to_mark->SetEnabled(false);
+                fb_model_menu_->AddItem(to_mark);
+            }
+            if (to_mark) to_mark->SetMarked(true);
+            fb_model_menu_->SetLabelFromMarked(true);
+            break;
+        }
         case MSG_SET_PROVIDER: {
             // Provider dropdown changed — refetch the model list.
             while (model_menu_->CountItems() > 0)
@@ -565,6 +690,7 @@ SettingsWindow::MessageReceived(BMessage* msg)
             if (to_mark) to_mark->SetMarked(true);
             model_menu_->SetLabelFromMarked(true);
             _RefreshContextField();
+            _RefreshVisionMenu();
             break;
         }
         case MSG_WS_ENGINE_SELECTED: {
@@ -664,6 +790,25 @@ SettingsWindow::_Save()
         }
     }
 
+    // Vision override for the selected model. Unlike the context pair, always
+    // sent when a real model is selected — "auto" explicitly erases a stored
+    // override. Placeholder labels like "(loading…)" are skipped.
+    if (!model_sel.empty() && model_sel[0] != '(') {
+        saved.AddString("vision_override", _MarkedVision().c_str());
+        saved.AddString("vision_model", model_sel.c_str());
+    }
+
+    // Vision fallback pair. "(none)" provider or a placeholder/unset model
+    // label means the feature is off (sent as empty strings).
+    std::string fb_provider = _MarkedFBProviderId();
+    std::string fb_model;
+    if (auto* mk = fb_model_menu_->FindMarked()) {
+        std::string lbl = mk->Label();
+        if (!lbl.empty() && lbl[0] != '(') fb_model = lbl;
+    }
+    saved.AddString("vision_fallback_provider", fb_provider.c_str());
+    saved.AddString("vision_fallback_model", fb_model.c_str());
+
     target_.SendMessage(&saved);
     Quit();
 }
@@ -697,6 +842,46 @@ SettingsWindow::_RefreshContextField()
     int builtin = haicode::get_context_window(_MarkedProviderId(), model,
                                               config_.model_contexts);
     context_field_->SetText(builtin > 0 ? std::to_string(builtin).c_str() : "");
+}
+
+void
+SettingsWindow::_RefreshVisionMenu()
+{
+    if (!vision_menu_) return;
+    std::string model;
+    if (auto* marked = model_menu_->FindMarked()) {
+        std::string label = marked->Label();
+        // Skip placeholder labels like "(loading…)" / "(none available)".
+        if (!label.empty() && label[0] != '(') model = label;
+    }
+
+    std::string want = "auto";
+    auto vit = config_.model_vision.find(model);
+    if (vit != config_.model_vision.end()) want = vit->second ? "yes" : "no";
+
+    for (int32 i = 0; i < vision_menu_->CountItems(); ++i) {
+        BMenuItem* item = vision_menu_->ItemAt(i);
+        const char* value = nullptr;
+        if (item->Message()
+            && item->Message()->FindString("vision", &value) == B_OK
+            && value && std::string(value) == want) {
+            item->SetMarked(true);
+            return;
+        }
+    }
+}
+
+std::string
+SettingsWindow::_MarkedVision() const
+{
+    if (auto* marked = vision_menu_->FindMarked()) {
+        const char* vision = nullptr;
+        if (marked->Message()
+            && marked->Message()->FindString("vision", &vision) == B_OK
+            && vision)
+            return vision;
+    }
+    return "auto";
 }
 
 std::string
@@ -763,4 +948,31 @@ SettingsWindow::_FetchModelsForMarkedProvider()
     // Route the reply back to this window instead of MainWindow.
     fetch.AddMessenger("reply", BMessenger(this));
     be_app->PostMessage(&fetch);
+}
+
+void
+SettingsWindow::_FetchFBModelsForMarkedProvider()
+{
+    std::string pid = _MarkedFBProviderId();
+    if (pid.empty()) return;
+    BMessage fetch(MSG_FETCH_MODELS);
+    fetch.AddString("provider_id", pid.c_str());
+    fetch.AddMessenger("reply", BMessenger(this));
+    // Distinct reply constant so the fallback list doesn't clobber the
+    // primary model dropdown (app handler echoes this back as `what`).
+    fetch.AddInt32("reply_what", MSG_FB_MODELS_LOADED);
+    be_app->PostMessage(&fetch);
+}
+
+std::string
+SettingsWindow::_MarkedFBProviderId() const
+{
+    if (auto* marked = fb_provider_menu_->FindMarked()) {
+        const char* pid = nullptr;
+        if (marked->Message()
+            && marked->Message()->FindString("provider_id", &pid) == B_OK
+            && pid)
+            return pid;
+    }
+    return "";
 }

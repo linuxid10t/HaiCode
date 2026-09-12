@@ -215,6 +215,11 @@ ToolResult ToolRegistry::execute(const std::string& name,
     if (name == "propose_plan" || name == "todo_write" || name == "ask_user")
         return tool->execute(input, ctx);
 
+    // screenshot is read-only (captures shared screen state, writes one file
+    // to the temp directory) and must work in Plan mode — always allow.
+    if (name == "screenshot")
+        return tool->execute(input, ctx);
+
     // process list and check_port are read-only — always allow.
     if (name == "process") {
         std::string action = input.value("action", "");

@@ -190,19 +190,37 @@ LLMRequest ContextBuilder::build(
     const std::string& system_dynamic,
     const std::vector<ToolDefinition>& tools,
     const std::string& model_id,
-    const std::string& /*provider_id*/)
+    const std::string& /*provider_id*/,
+    bool model_accepts_images)
 {
     LLMRequest req;
     req.model_id = model_id;
     req.system = system_prompt;
     req.system_dynamic = system_dynamic;
     req.tools = tools;
-    req.messages = assemble_messages(messages);
+    req.messages = assemble_messages(messages, model_accepts_images);
     return req;
 }
 
+// Text stand-in for an image block when the primary model is text-only.
+// Uses the persisted vision-fallback description when present; otherwise the
+// same placeholder shape compaction renders for image attachments.
+static std::string render_image_as_text(const nlohmann::json& att) {
+    std::string path = att.value("path", "");
+    if (att.contains("description") && att["description"].is_string()) {
+        std::string d = att["description"].get<std::string>();
+        if (!d.empty())
+            return "[image" + (path.empty() ? "" : ": " + path)
+                 + " — described by vision fallback: " + d + "]";
+    }
+    std::string name = path.empty() ? "unnamed" : path;
+    return "[image attachment: " + name + ", "
+         + att.value("media_type", "image/png") + "]";
+}
+
 std::vector<nlohmann::json> ContextBuilder::assemble_messages(
-    const std::vector<SessionMessage>& msgs)
+    const std::vector<SessionMessage>& msgs,
+    bool model_accepts_images)
 {
     // Tool results from past user turns are truncated to keep context lean.
     // "Past turn" = before the most recent user_prompted message.
@@ -245,14 +263,19 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     if (!text.empty())
                         content.push_back({{"type", "text"}, {"text", text}});
                     for (const auto& att : data["attachments"]) {
-                        content.push_back({
-                            {"type", "image"},
-                            {"source", {
-                                {"type", "base64"},
-                                {"media_type", att.value("media_type", "image/png")},
-                                {"data", att.value("data_b64", "")}
-                            }}
-                        });
+                        if (model_accepts_images) {
+                            content.push_back({
+                                {"type", "image"},
+                                {"source", {
+                                    {"type", "base64"},
+                                    {"media_type", att.value("media_type", "image/png")},
+                                    {"data", att.value("data_b64", "")}
+                                }}
+                            });
+                        } else {
+                            content.push_back({{"type", "text"},
+                                               {"text", render_image_as_text(att)}});
+                        }
                     }
                     m["content"] = content;
                 } else {
@@ -340,7 +363,36 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     output += "\n[truncated: " + std::to_string(dropped)
                             + " more bytes]";
                 }
-                content["content"] = output;
+                // Images returned by tools (e.g. screenshot) are persisted in
+                // an "attachments" array. Anthropic tool_result content
+                // accepts mixed text + image blocks; OpenAI's
+                // translate_messages splits the image blocks out on the fly.
+                bool has_images = data.contains("attachments")
+                               && data["attachments"].is_array()
+                               && !data["attachments"].empty();
+                if (has_images) {
+                    nlohmann::json blocks = nlohmann::json::array();
+                    if (!output.empty())
+                        blocks.push_back({{"type", "text"}, {"text", output}});
+                    for (const auto& att : data["attachments"]) {
+                        if (model_accepts_images) {
+                            blocks.push_back({
+                                {"type", "image"},
+                                {"source", {
+                                    {"type", "base64"},
+                                    {"media_type", att.value("media_type", "image/png")},
+                                    {"data", att.value("data_b64", "")}
+                                }}
+                            });
+                        } else {
+                            blocks.push_back({{"type", "text"},
+                                              {"text", render_image_as_text(att)}});
+                        }
+                    }
+                    content["content"] = blocks;
+                } else {
+                    content["content"] = output;
+                }
                 m["content"] = nlohmann::json::array({content});
                 result.push_back(m);
             }
@@ -871,6 +923,14 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         auto messages = load_context_messages(session_id);
 
+        // Vision fallback: when the primary is text-only and a fallback is
+        // configured, describe any not-yet-described attachments (once,
+        // persisted) so assembly below emits text instead of image bytes.
+        bool primary_supports_vision =
+            model_supports_vision(model_id, config_.model_vision);
+        if (!primary_supports_vision)
+            backfill_attachment_descriptions(session_id, messages);
+
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
         // Filter tools by mode. Plan and Chat use allowlists (fail-closed):
@@ -883,6 +943,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 "web_search", "web_extract",
                 "diff", "todo_write", "ask_user",
                 "propose_plan", "discard_plan",
+                "screenshot",
             };
             std::erase_if(tool_defs, [&](const ToolDefinition& td) {
                 return !plan_allowed.count(td.name);
@@ -898,8 +959,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 return !chat_allowed.count(td.name);
             });
         }
+        // Vision gate: the screenshot tool returns an image the model must be
+        // able to see. Hide it from text-only models unless a vision fallback
+        // is configured (the returned PNG gets described by the backfill pass
+        // above). model_id was re-read from the session above, so a mid-loop
+        // model switch re-evaluates on the next step.
+        std::erase_if(tool_defs, [&](const ToolDefinition& td) {
+            return td.name == "screenshot"
+                && !primary_supports_vision && !vision_fallback_ready();
+        });
         auto req = builder.build(messages, system, system_dynamic, tool_defs,
-                                  model_id, provider_id);
+                                  model_id, provider_id, primary_supports_vision);
 
         // Auto-compaction: if the context is approaching the model's window,
         // summarize the older portion of the conversation before sending the
@@ -1280,11 +1350,27 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 }
             }
 
-            // Persist tool result
+            // Persist tool result. Tools may return a JSON object with a
+            // reserved "attachments" array (screenshot): the array is moved
+            // onto the row alongside the output text so it persists like user
+            // attachments, and the stored output becomes the summary text.
             nlohmann::json data;
             data["call_id"] = call.id;
-            data["output"] = result.success ? result.output : result.error;
             data["success"] = result.success;
+            if (result.success) {
+                nlohmann::json out_json = nlohmann::json::parse(result.output,
+                                                                nullptr, false);
+                if (out_json.is_object() && out_json.contains("attachments")
+                        && out_json["attachments"].is_array()
+                        && !out_json["attachments"].empty()) {
+                    data["output"] = out_json.value("summary", "");
+                    data["attachments"] = out_json["attachments"];
+                } else {
+                    data["output"] = result.output;
+                }
+            } else {
+                data["output"] = result.error;
+            }
             store_.append_message(session_id, "tool_result", data.dump());
 
             {
@@ -1874,6 +1960,123 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     ev["session_id"] = session_id;
     ev["title"] = title;
     bus_.publish(events::EventType::SessionRenamed, ev);
+}
+
+bool SessionEngine::vision_fallback_ready()
+{
+    if (config_.vision_fallback_model.empty())
+        return false;
+    // Resolve the fallback provider: explicit config wins; empty means "same
+    // provider as the session".
+    std::string pid = config_.vision_fallback_provider;
+    if (pid.empty()) pid = config_.provider;
+    if (!providers_.get(pid)) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "[engine] vision fallback provider not registered: %s\n",
+                    pid.c_str());
+            warned = true;
+        }
+        return false;
+    }
+    // No prefix-table check on the fallback model: it is an explicit user
+    // choice, trusted as-is. Local vision servers (llava, qwen-vl, custom
+    // names) are rarely in the kVisionModels table, and rejecting them here
+    // silently disabled the feature for exactly the setups that need it.
+    return true;
+}
+
+std::string SessionEngine::describe_image(Provider& provider,
+                                          const std::string& model_id,
+                                          const nlohmann::json& att)
+{
+    nlohmann::json content = nlohmann::json::array();
+    content.push_back({{"type", "text"}, {"text",
+        "Describe this image factually and concisely for a text-only coding "
+        "assistant. Cover: UI elements and their layout, any text content "
+        "visible in the image (error messages verbatim), relevant colors or "
+        "state indicators. Plain text only, no markdown headers."}});
+    content.push_back({
+        {"type", "image"},
+        {"source", {
+            {"type", "base64"},
+            {"media_type", att.value("media_type", "image/png")},
+            {"data", att.value("data_b64", "")}
+        }}
+    });
+    nlohmann::json user_msg;
+    user_msg["role"] = "user";
+    user_msg["content"] = content;
+
+    LLMRequest req;
+    req.model_id  = model_id;
+    req.system    = "You describe images for a text-only coding assistant.";
+    req.messages  = {std::move(user_msg)};
+    req.max_tokens = 1024;
+
+    std::string text;
+    bool failed = false;
+    std::string err;
+
+    StreamCallbacks cbs;
+    cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
+        text += delta;
+    };
+    cbs.on_finish = [&](FinishReason, TokenUsage, std::vector<ToolCall>) {};
+    cbs.on_error = [&](const std::string& error) {
+        failed = true;
+        err = error;
+    };
+
+    provider.stream(req, cbs);
+
+    if (failed) {
+        fprintf(stderr, "[engine] vision fallback describe failed: %s\n",
+                err.c_str());
+        return "";
+    }
+    return text;
+}
+
+void SessionEngine::backfill_attachment_descriptions(
+    const std::string& session_id,
+    std::vector<SessionMessage>& messages)
+{
+    if (!vision_fallback_ready()) return;
+
+    std::string pid = config_.vision_fallback_provider;
+    if (pid.empty()) pid = config_.provider;
+    auto provider = providers_.get(pid);
+    if (!provider) return;
+
+    for (auto& msg : messages) {
+        if (msg.type != "user_prompted" && msg.type != "tool_result") continue;
+        auto data = nlohmann::json::parse(msg.data_json, nullptr, false);
+        if (!data.is_object() || !data.contains("attachments")
+                || !data["attachments"].is_array())
+            continue;
+
+        bool changed = false;
+        for (auto& att : data["attachments"]) {
+            if (!att.is_object()) continue;
+            if (att.contains("description")) continue;  // describe once
+            std::string desc = describe_image(*provider,
+                                              config_.vision_fallback_model,
+                                              att);
+            if (!desc.empty()) {
+                // Clamp persisted descriptions so one verbose image can't
+                // bloat every future request.
+                if (desc.size() > 4096) desc.resize(4096);
+                att["description"] = desc;
+                changed = true;
+            }
+        }
+        if (changed) {
+            std::string updated = data.dump();
+            store_.update_message_data(session_id, msg.seq, updated);
+            msg.data_json = std::move(updated);
+        }
+    }
 }
 
 void SessionEngine::seed_todos(const std::string& session_id,

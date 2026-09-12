@@ -87,6 +87,10 @@ size_t serialized_size(const SessionMessage& m, size_t max_tool_output_bytes) {
     } else if (m.type == "tool_result") {
         size_t out = d.value("output", "").size();
         bytes += std::min(out, max_tool_output_bytes) + 48;
+        if (d.contains("attachments") && d["attachments"].is_array()) {
+            for (const auto& att : d["attachments"])
+                bytes += 48 + att.value("path", "").size();
+        }
     } else {
         bytes += m.data_json.size();
     }
@@ -220,7 +224,15 @@ std::string serialize_history(const std::vector<SessionMessage>& msgs,
                 }
                 out << "### Tool result (call_id="
                     << d.value("call_id", "") << ", "
-                    << (ok ? "success" : "error") << ")\n" << output << "\n\n";
+                    << (ok ? "success" : "error") << ")\n" << output << "\n";
+                if (d.contains("attachments") && d["attachments"].is_array()) {
+                    for (const auto& att : d["attachments"]) {
+                        out << "[image attachment: " << att.value("path", "")
+                            << ", " << att.value("media_type", "image/png")
+                            << "]\n";
+                    }
+                }
+                out << "\n";
             } else if (msg.type == "compaction_summary") {
                 out << "### Prior summary\n" << d.value("text", "") << "\n\n";
             }
