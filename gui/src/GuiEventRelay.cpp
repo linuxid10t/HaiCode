@@ -220,6 +220,7 @@ GuiEventRelay::attach()
         msg.AddString("summary", data.value("summary", "").c_str());
         msg.AddInt32("messages_before", data.value("messages_before", 0));
         msg.AddInt32("messages_after",  data.value("messages_after",  0));
+        msg.AddInt32("context_tokens",  data.value("context_tokens",  0));
         main_window_.SendMessage(&msg);
     });
 

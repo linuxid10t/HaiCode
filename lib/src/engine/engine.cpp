@@ -1674,6 +1674,21 @@ bool SessionEngine::compact_history(const std::string& session_id,
     // Atomic commit: one UPDATE flips pending → complete.
     store_.complete_checkpoint(checkpoint_id, summary);
 
+    // Refresh the context meter: no provider usage will arrive until the next
+    // step, so estimate the post-compaction request (checkpoint block +
+    // retained tail — exactly what load_context_messages now returns) with
+    // the same chars/4 + overhead approximation the unknown-window path uses.
+    // Persisted to tok_last_input so a relaunch shows it; the next StepEnded
+    // replaces it with the exact reported usage.
+    int post_context_tokens = 0;
+    {
+        size_t chars = 0;
+        for (const auto& m : load_context_messages(session_id))
+            chars += m.data_json.size();
+        post_context_tokens = static_cast<int>(chars / 4) + 8192;
+    }
+    store_.update_last_input_tokens(session_id, post_context_tokens);
+
     {
         nlohmann::json ev;
         ev["session_id"]      = session_id;
@@ -1683,6 +1698,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         ev["messages_before"] = older.size() + recent.size();
         ev["messages_after"]  = recent.size() + 1;
         ev["summary"]         = summary;
+        ev["context_tokens"]  = post_context_tokens;
         bus_.publish(events::EventType::CompactionEnded, ev);
     }
 

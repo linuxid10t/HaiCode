@@ -201,7 +201,10 @@ enable compaction for models HaiCode doesn't recognize.
 After each compaction, a collapsible `[context compacted]` transcript entry
 shows the checkpoint summary in the chat scrollback (toggle with `'t'` in the
 TUI, click in the GUI). It is rendered from the checkpoint table, never stored
-as a message, so the model's context is unaffected.
+as a message, so the model's context is unaffected. The context-size indicator
+in the status area also drops immediately to a post-compaction estimate
+(checkpoint block + retained tail) instead of waiting for the next model
+response to report fresh usage.
 
 ### Session autonaming
 

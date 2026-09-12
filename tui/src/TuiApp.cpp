@@ -278,6 +278,7 @@ void TuiApp::subscribe_events() {
         ev.str3       = j.value("summary", "");
         ev.int1       = j.value("messages_before", 0);
         ev.int2       = j.value("messages_after",  0);
+        ev.int3       = j.value("context_tokens", 0);
         push_engine_event(std::move(ev));
     });
 
@@ -454,6 +455,10 @@ void TuiApp::process_engine_events() {
                 compacting_ = false;
                 compaction_progress_ = -1;
                 if (ev.str2 == "complete") {
+                    // The meter would otherwise sit stale until the next
+                    // provider usage report; the event carries the fresh
+                    // post-compaction estimate.
+                    if (ev.int3 > 0) current_context_tokens_ = ev.int3;
                     append_line({ LineType::CompactHeader,
                                   "[context compacted \xe2\x80\x94 earlier "
                                   "messages summarized]" });

@@ -293,6 +293,19 @@ void SessionStore::update_cost(const std::string& session_id, double cost,
     sqlite3_finalize(stmt);
 }
 
+void SessionStore::update_last_input_tokens(const std::string& session_id,
+                                            int tokens) {
+    const char* sql =
+        "UPDATE session SET tok_last_input=?, time_updated=? WHERE id=?";
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(), sql, -1, &stmt, nullptr);
+    sqlite3_bind_int(stmt, 1, tokens);
+    sqlite3_bind_int64(stmt, 2, util::now_ms());
+    sqlite3_bind_text(stmt, 3, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 void SessionStore::delete_session(const std::string& session_id) {
     const char* sql = "DELETE FROM session WHERE id=?";
     sqlite3_stmt* stmt = nullptr;

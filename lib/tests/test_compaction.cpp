@@ -169,6 +169,21 @@ static bool test_end_to_end_checkpoint() {
     CHECK(got_summary_event,
           "CompactionEnded carries the committed summary for the UI");
 
+    // The complete event must also carry the post-compaction context estimate
+    // (checkpoint block + retained tail) so the meter refreshes immediately.
+    bool got_ctx_tokens = false;
+    {
+        std::lock_guard<std::mutex> lock(ev_mu);
+        for (const auto& j : ended_events) {
+            if (j.value("status", "") == "complete"
+                    && j.value("context_tokens", 0) > 0) {
+                got_ctx_tokens = true;
+            }
+        }
+    }
+    CHECK(got_ctx_tokens,
+          "CompactionEnded carries a positive post-compaction context estimate");
+
     // Progress events stream during summarization, i.e. before CompactionEnded
     // completed above, so no extra wait is needed.
     bool got_progress = false;

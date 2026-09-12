@@ -84,6 +84,9 @@ public:
     void update_title(const std::string& session_id, const std::string& title);
     void update_directory(const std::string& session_id, const std::string& directory);
     void update_cost(const std::string& session_id, double cost, const TokenUsage& tokens);
+    // Overwrite just the per-request input seed (tok_last_input) — used after
+    // compaction, where no provider report will arrive until the next step.
+    void update_last_input_tokens(const std::string& session_id, int tokens);
     // Patch the "mode" field inside the session's model_json blob. No-op if the
     // session does not exist. mode_str should be "build" or "plan".
     void update_mode(const std::string& session_id, const std::string& mode_str);

@@ -1612,6 +1612,11 @@ MainWindow::_HandleCompaction(BMessage* msg)
             chat_view_->AppendCompactionSummary(
                 "[context compacted \xe2\x80\x94 earlier messages summarized]",
                 sum);
+            // Refresh the context meter with the engine's post-compaction
+            // estimate; the next StepEnded replaces it with exact usage.
+            int32 ctx = 0;
+            if (msg->FindInt32("context_tokens", &ctx) == B_OK && ctx > 0)
+                current_context_tokens_ = (int)ctx;
         } else {
             chat_view_->AppendSystem(
                 "Compaction failed \xe2\x80\x94 full context retained.");

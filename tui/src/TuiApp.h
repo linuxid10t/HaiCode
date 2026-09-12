@@ -73,6 +73,7 @@ struct EngineEvent {
     bool bool1 = false; // success flag for tool results
     int int1   = 0;     // input tokens for StepEnded
     int int2   = 0;     // output tokens for StepEnded
+    int int3   = 0;     // post-compaction context estimate for Compaction
     double dbl1 = 0.0;  // step cost (USD) for StepEnded
     std::vector<haicode::Todo> todos;  // for TodoUpdated
     PendingPermission* perm = nullptr;
