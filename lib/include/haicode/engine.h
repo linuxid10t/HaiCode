@@ -55,7 +55,9 @@ public:
     void continue_session(const std::string& session_id);
     // Append a user_prompted message + publish Prompted event without starting
     // the agentic loop. Used by approval handlers between set_mode and
-    // continue_session to inject the plan-approved directive.
+    // continue_session to inject the plan-approved directive. An explicitly
+    // injected message supersedes any queued mode-change notice, which is
+    // cleared here.
     void inject_message(const std::string& session_id, const std::string& text);
     void interrupt(const std::string& session_id);
 
@@ -153,6 +155,10 @@ private:
     // session. Negative = "never compacted this turn". Reset to -1 in
     // submit_prompt so each new user turn rearms the trigger. Guarded by mu_.
     std::map<std::string, int> last_compaction_step_;
+    // Mode-change notice queued by set_mode, flushed as metadata on the next
+    // user_prompted row by submit_prompt. Only the last flip before a send
+    // survives; never persisted as its own message row. Guarded by mu_.
+    std::map<std::string, std::string> pending_mode_notice_;
     std::mutex mu_;
 
     // Track pending ask_user questions per session. The agentic_loop blocks on

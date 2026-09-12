@@ -1746,10 +1746,8 @@ MainWindow::_SetMode(haicode::SessionMode next)
 
     engine_->set_mode(active_session_id_, next);
     _ApplyModeCheckboxVisibility(true);
-    engine_->inject_message(active_session_id_,
-        next == haicode::SessionMode::Plan ? haicode::kSwitchedToPlanMessage
-      : next == haicode::SessionMode::Chat ? haicode::kSwitchedToChatMessage
-                                           : haicode::kSwitchedToBuildMessage);
+    // No injected message here: set_mode queues a notice that rides out with
+    // the next submitted prompt (only the last flip survives).
     _RefreshModeButton();
     _UpdateStatusStrip();
 }

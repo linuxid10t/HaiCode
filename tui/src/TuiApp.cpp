@@ -798,8 +798,9 @@ void TuiApp::handle_key(int key) {
         case '\n':
         case KEY_ENTER:
             if (!active_session_id_.empty()) {
+                // No injected message: set_mode queues a notice that rides
+                // out with the next submitted prompt.
                 engine_.set_mode(active_session_id_, SessionMode::Build);
-                engine_.inject_message(active_session_id_, kSwitchedToBuildMessage);
             }
             confirm_build_visible_ = false;
             break;
@@ -1538,10 +1539,9 @@ void TuiApp::toggle_mode() {
     if (next == SessionMode::Build) {
         confirm_build_visible_ = true;
     } else {
+        // No injected message: set_mode queues a notice that rides out with
+        // the next submitted prompt.
         engine_.set_mode(active_session_id_, next);
-        engine_.inject_message(active_session_id_,
-            next == SessionMode::Plan ? kSwitchedToPlanMessage
-                                      : kSwitchedToChatMessage);
     }
 }
 

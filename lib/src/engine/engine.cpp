@@ -229,12 +229,18 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
             if (msg.type == "user_prompted") {
                 nlohmann::json m;
                 m["role"] = "user";
+                // Deferred mode-change notice: set_mode queued it and
+                // submit_prompt attached it here; it goes out with this
+                // request only and is never rendered in the transcript.
+                std::string notice = data.value("mode_notice", "");
                 if (data.contains("attachments") && data["attachments"].is_array()
                         && !data["attachments"].empty()) {
                     // Mixed text + image content — Anthropic block style.
                     // OpenAI's translate_messages maps image blocks to
                     // image_url entries on the fly.
                     nlohmann::json content = nlohmann::json::array();
+                    if (!notice.empty())
+                        content.push_back({{"type", "text"}, {"text", notice}});
                     std::string text = data.value("text", "");
                     if (!text.empty())
                         content.push_back({{"type", "text"}, {"text", text}});
@@ -250,7 +256,7 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     }
                     m["content"] = content;
                 } else {
-                    m["content"] = data.value("text", "");
+                    m["content"] = notice + data.value("text", "");
                 }
                 result.push_back(m);
             } else if (msg.type == "assistant_text") {
@@ -414,10 +420,27 @@ void SessionEngine::submit_prompt(const std::string& session_id,
 void SessionEngine::submit_prompt(const std::string& session_id,
                                    const std::string& text,
                                    const std::vector<Attachment>& attachments) {
+    // Pop any queued mode-change notice. It rides as metadata on this row
+    // (ContextBuilder prepends it to the outgoing text) instead of being
+    // persisted as its own message. First message of a session: dropped —
+    // the system prompt's mode block already states the mode.
+    std::string mode_notice;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto it = pending_mode_notice_.find(session_id);
+        if (it != pending_mode_notice_.end()) {
+            if (!store_.load_messages(session_id).empty())
+                mode_notice = it->second;
+            pending_mode_notice_.erase(session_id);
+        }
+    }
+
     // Persist the user message
     nlohmann::json data;
     data["role"] = "user";
     data["text"] = text;
+    if (!mode_notice.empty())
+        data["mode_notice"] = mode_notice;
     if (!attachments.empty()) {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& att : attachments) {
@@ -508,6 +531,12 @@ void SessionEngine::submit_prompt(const std::string& session_id,
 
 void SessionEngine::inject_message(const std::string& session_id,
                                    const std::string& text) {
+    // An explicit injection (plan approval) supersedes any queued mode
+    // notice: its own text already tells the model the mode changed.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        pending_mode_notice_.erase(session_id);
+    }
     nlohmann::json data;
     data["role"] = "user";
     data["text"] = text;
@@ -574,9 +603,19 @@ void SessionEngine::interrupt(const std::string& session_id) {
 }
 
 void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
+    // Resolve the previous mode before either copy is overwritten (get_mode
+    // reads the in-memory cache, else the DB value update_mode is about to
+    // replace).
+    SessionMode prev = get_mode(session_id);
     {
         std::lock_guard<std::mutex> lock(mu_);
         session_modes_[session_id] = mode;
+        if (prev != mode) {
+            pending_mode_notice_[session_id] =
+                mode == SessionMode::Plan ? kSwitchedToPlanMessage
+              : mode == SessionMode::Chat ? kSwitchedToChatMessage
+                                          : kSwitchedToBuildMessage;
+        }
     }
     store_.update_mode(session_id, mode == SessionMode::Plan ? "plan"
                                                        : mode == SessionMode::Chat ? "chat"
