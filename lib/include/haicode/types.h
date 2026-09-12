@@ -43,7 +43,8 @@ struct Attachment {
 // Optional fields use a has_* flag so "unset" (provider/model default) is
 // distinguishable from an explicit zero.
 struct InferenceParams {
-    int  max_tokens = 8192;
+    // -1 = unset (provider default applies); >0 overrides.
+    int  max_tokens = -1;
     bool has_temperature = false;
     double temperature = 0.0;
     bool has_top_p = false;

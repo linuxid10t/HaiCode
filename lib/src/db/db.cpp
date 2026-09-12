@@ -453,7 +453,8 @@ void SessionStore::update_inference(const std::string& session_id,
     try {
         auto j = nlohmann::json::parse(model_json, nullptr, false);
         if (j.is_discarded() || !j.is_object()) j = nlohmann::json::object();
-        j["max_tokens"] = params.max_tokens;
+        if (params.max_tokens > 0)   j["max_tokens"] = params.max_tokens;
+        else                         j.erase("max_tokens");
         if (params.has_temperature) j["temperature"] = params.temperature;
         else                          j.erase("temperature");
         if (params.has_top_p)        j["top_p"] = params.top_p;

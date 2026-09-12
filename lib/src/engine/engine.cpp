@@ -997,7 +997,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                      config_.model_contexts,
                                                      provider.get());
             if (window > 0) {
-                int threshold = usable_input_tokens(window, req.max_tokens,
+                int threshold = usable_input_tokens(window,
+                                                    req.max_tokens.value_or(kDefaultMaxTokens),
                                                     config_.compaction_buffer,
                                                     config_.auto_compact_threshold);
                 int current_tokens = prev_total_input;
@@ -1034,11 +1035,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         }
 
         // Apply per-session inference params (max_tokens / temperature / top_p /
-        // reasoning_effort) stored in model_json. Defaults inside LLMRequest
-        // win when not present.
+        // reasoning_effort) stored in model_json. Provider defaults win when
+        // not present.
         if (mj_now.is_object()) {
-            if (mj_now.contains("max_tokens"))
-                req.max_tokens = mj_now.value("max_tokens", req.max_tokens);
+            if (int v = mj_now.value("max_tokens", 0); v > 0)
+                req.max_tokens = v;
             if (mj_now.contains("temperature"))
                 req.temperature = mj_now.value("temperature", 0.0);
             if (mj_now.contains("top_p"))

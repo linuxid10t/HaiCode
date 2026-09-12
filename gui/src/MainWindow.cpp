@@ -355,7 +355,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     .End();
 
     // Inference tab — per-session model/agentic controls.
-    inf_max_tokens_  = new BTextControl("max_tokens", "Max tokens:", "8192", nullptr);
+    inf_max_tokens_  = new BTextControl("max_tokens", "Max tokens:", "", nullptr);
     inf_temperature_ = new BTextControl("temperature", "Temperature:", "", nullptr);
     inf_top_p_       = new BTextControl("top_p", "Top p:", "", nullptr);
     inf_max_steps_   = new BTextControl("max_steps", "Max steps:", "", nullptr);
@@ -1934,14 +1934,12 @@ MainWindow::_ApplyInference()
 
     haicode::InferenceParams p;
 
-    // max_tokens (default 8192 on empty/invalid).
+    // max_tokens (blank/invalid = unset → provider default).
     if (inf_max_tokens_) {
         std::string s = inf_max_tokens_->Text();
-        if (!s.empty()) {
-            try { p.max_tokens = std::stoi(s); }
-            catch (...) { p.max_tokens = 8192; }
-        }
-        if (p.max_tokens < 1) p.max_tokens = 1;
+        try { p.max_tokens = std::stoi(s); }
+        catch (...) { p.max_tokens = -1; }
+        if (p.max_tokens < 1) p.max_tokens = -1;
     }
 
     // Helper: parse an optional double field. Blank → unset.
@@ -2000,8 +1998,12 @@ MainWindow::_RestoreInferenceFrom(const haicode::InferenceParams& p)
 {
     char buf[32];
     if (inf_max_tokens_) {
-        snprintf(buf, sizeof(buf), "%d", p.max_tokens);
-        inf_max_tokens_->SetText(buf);
+        if (p.max_tokens > 0) {
+            snprintf(buf, sizeof(buf), "%d", p.max_tokens);
+            inf_max_tokens_->SetText(buf);
+        } else {
+            inf_max_tokens_->SetText("");
+        }
     }
     if (inf_temperature_) {
         if (p.has_temperature) {
@@ -2054,7 +2056,7 @@ MainWindow::_RestoreInference()
                 auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
                 if (mj.is_object()) {
                     if (mj.contains("max_tokens"))
-                        p.max_tokens = mj.value("max_tokens", 8192);
+                        p.max_tokens = mj.value("max_tokens", -1);
                     if (mj.contains("temperature")) {
                         p.has_temperature = true;
                         p.temperature = mj.value("temperature", 0.0);

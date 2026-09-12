@@ -17,13 +17,18 @@ struct ToolDefinition {
 
 enum class FinishReason { EndTurn, ToolUse, MaxTokens, Error, Stopped };
 
+// Anthropic's Messages API requires max_tokens (no omit-and-default); this is
+// the fallback when a request leaves it unset. Also the compaction output
+// allowance when unset.
+inline constexpr int kDefaultMaxTokens = 8192;
+
 struct LLMRequest {
     std::string model_id;
     std::string system;          // byte-stable across turns (cacheable prefix)
     std::string system_dynamic;  // per-step content that varies (e.g. {{STEPS_LEFT}})
     std::vector<nlohmann::json> messages;
     std::vector<ToolDefinition> tools;
-    int max_tokens = 8192;
+    std::optional<int> max_tokens;  // unset = provider/model default
     std::optional<double> temperature;
     std::optional<double> top_p;
     // "" = unset; off/minimal/low/medium/high/xhigh/max. OpenAI maps this to

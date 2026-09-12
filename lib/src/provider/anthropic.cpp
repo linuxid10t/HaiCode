@@ -22,7 +22,8 @@ public:
 
         nlohmann::json body;
         body["model"] = request.model_id;
-        body["max_tokens"] = request.max_tokens;
+        // Anthropic's API has no omit-and-default for this field.
+        body["max_tokens"] = request.max_tokens.value_or(kDefaultMaxTokens);
         body["stream"] = true;
         if (request.temperature)
             body["temperature"] = *request.temperature;

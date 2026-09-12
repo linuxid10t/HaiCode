@@ -394,7 +394,8 @@ public:
         nlohmann::json body;
         body["model"]       = request.model_id;
         body["stream"]      = true;
-        body["max_tokens"]  = request.max_tokens;
+        if (request.max_tokens)
+            body["max_tokens"] = *request.max_tokens;
         if (request.temperature)
             body["temperature"] = *request.temperature;
         if (request.top_p)
