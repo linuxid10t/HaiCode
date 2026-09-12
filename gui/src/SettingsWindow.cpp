@@ -202,7 +202,6 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     list_ = new BListView("providers_list", B_SINGLE_SELECTION_LIST);
     list_->SetSelectionMessage(new BMessage(MSG_LIST_SEL));
     list_->SetExplicitMinSize(BSize(480, 140));
-    list_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 180));
     auto* scroll = new BScrollView("providers_scroll", list_,
                                    0, false, true, B_FANCY_BORDER);
 
