@@ -1086,16 +1086,23 @@ public:
 // ---- DiscardPlanTool ----
 //
 // Marks the most recent active plan as discarded so it is no longer
-// injected into the system prompt. Use when abandoning a plan without
-// implementing it, or after the plan has been fully implemented.
+// injected into the system prompt. Primary use: abandoning a plan (user
+// rejected it, or work stopped before completion). A plan whose todos are
+// all completed is retired automatically by the engine (status rewritten
+// to "implemented"), so discard_plan is not needed after a finished
+// implementation — a "no active plan found" result then is expected.
 
 class DiscardPlanTool : public Tool {
 public:
     std::string name() const override { return "discard_plan"; }
     std::string description() const override {
-        return "Retire the most recent active plan. Call this when the plan "
-               "has been fully implemented or when the user wants to abandon "
-               "it. Retired plans are no longer injected into future sessions.";
+        return "Retire the most recent active plan when abandoning it (user "
+               "rejected the plan, or work stopped before completion). Note: "
+               "the engine retires a plan automatically once all its todos "
+               "are completed, so calling this after finishing implementation "
+               "normally returns 'no active plan found' — that is expected, "
+               "not an error. Retired plans are no longer injected into "
+               "future sessions.";
     }
     nlohmann::json input_schema() const override {
         return {
@@ -1103,7 +1110,7 @@ public:
             {"properties", {
                 {"reason", {
                     {"type", "string"},
-                    {"description", "Brief reason: 'implemented' or 'abandoned'."}
+                    {"description", "Brief reason: 'abandoned' (or 'implemented' for a manual early retire)."}
                 }}
             }},
             {"required", nlohmann::json::array({"reason"})}
@@ -1148,7 +1155,7 @@ public:
         closedir(d);
 
         if (latest_name.empty())
-            return {false, "", "discard_plan: no active plan found."};
+            return {false, "", "discard_plan: no active plan found (plans are auto-retired once all todos complete, so there is likely nothing to do)."};
 
         std::string path = plans_dir + "/" + latest_name;
 

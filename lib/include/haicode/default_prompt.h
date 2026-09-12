@@ -71,7 +71,7 @@ R"HPCODE(
 - web_extract: Fetch a URL and return its cleaned main-body text. Use selectively.
 - todo_write: Replace the session's task list atomically; send the full list on every call, not a delta.
 - propose_plan: Submit an implementation plan for approval (Plan mode only). Stop and wait after calling.
-- discard_plan: Retire the active plan once implemented or abandoned; retired plans are no longer injected into sessions.
+- discard_plan: Retire the active plan when abandoning it (rejected or stopped mid-course). Completed plans retire automatically once all todos are done, so a "no active plan found" result afterwards is expected.
 - ask_user: Ask the user a focused disambiguation question with 2-5 preset options; only when truly blocked, never for confirmation.
 - write_agents_md: Create or overwrite `agents.md` in the project root; it is appended to your system prompt for every future session in this project.
 
