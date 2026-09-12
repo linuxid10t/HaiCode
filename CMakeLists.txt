@@ -72,7 +72,6 @@ include_directories(
 # Find required libraries
 find_library(SQLITE3_LIB sqlite3 HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(CURL_LIB curl HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
-find_library(NCURSES_LIB ncursesw HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(BE_LIB be HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(ROOT_LIB root HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 
@@ -84,5 +83,4 @@ if(NOT CURL_LIB)
 endif()
 
 add_subdirectory(lib)
-add_subdirectory(tui)
 add_subdirectory(gui)

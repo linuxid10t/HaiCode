@@ -13,7 +13,6 @@ cmake -B build -S .
 make -C build -j4
 
 # Build individual targets
-make -C build haicode-tui
 make -C build haicode-gui
 make -C build test_db
 make -C build test_diff
@@ -30,7 +29,6 @@ make -C build test_config_permission
 ## Run
 
 ```bash
-./build/tui/haicode-tui [/path/to/project]   # TUI (ncurses)
 ./build/gui/haicode-gui [/path/to/project]   # GUI (BeAPI)
 ./build/lib/test_db                           # Database smoke test
 ./build/lib/test_diff                         # DiffTool unit tests
@@ -43,7 +41,7 @@ make -C build test_config_permission
 ./build/lib/test_model_context                # context-window parsing for vLLM/OpenRouter/LM Studio/Ollama/llama.cpp
 ```
 
-**Single instance only.** Do not launch a second HaiCode (TUI or GUI) while one is already running — both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db` and concurrent access fails on SQLite database locking. If you need to verify runtime behavior, use the already-running instance; never spawn another copy for testing.
+**Single instance only.** Do not launch a second HaiCode GUI instance while one is already running — both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db` and concurrent access fails on SQLite database locking. If you need to verify runtime behavior, use the already-running instance; never spawn another copy for testing.
 
 ## Test
 
@@ -70,7 +68,7 @@ Then re-run `cmake -B build -S .` and add the binary to the table above. All tra
 
 ## Architecture
 
-The project has three layers:
+The project has two layers:
 
 ### `lib/` — libhaicode (core, no GUI dependency)
 
@@ -105,11 +103,11 @@ Context assembly always goes through `load_context_messages()` → `apply_checkp
 
 `compact_now()` (used by the GUI's **Compact** button) reuses the same locking discipline as `submit_prompt`: under `mu_` it marks `session_running_[id]=true`, joins any finished runner thread, and stores its worker in `runner_threads_`. The worker clears the flag on exit. This closes a race where a concurrent `submit_prompt` could start the agentic loop on top of an in-progress manual compaction, leading to concurrent SQLite writes on the same session.
 
-**Session autonaming** (`config_.autoname_sessions`, default on): new sessions get a title without user action, in two stages. (1) In `submit_prompt`, after appending the first `user_prompted` message, if the title is still empty `derive_heuristic_title()` produces a short title (first non-empty line, whitespace collapsed, ~60-char word-boundary truncation) and calls `SessionStore::update_title`. (2) At the end of `agentic_loop`, when the user-turn count (`user_prompted` messages) satisfies `count % 5 == 1` — i.e. turns 1, 6, 11, 16, … — and `autoname_llm_refine` is on, `refine_title_llm()` makes a one-shot `provider->stream()` call (same model, `max_tokens` ~48, no tools). On the first call it generates a fresh ≤6-word title; on later calls it reconsiders — shown the current title and the full prompt history, the model either echoes the title verbatim (no write, no event) or returns a revised one. Both stages publish a `SessionRenamed` event, which the GUI relay forwards as `MSG_SESSION_RENAMED` (not gated on active session, so the sidebar refreshes regardless) and the TUI handles by reloading `sessions_` from the store. The master toggle disables both; the refine flag disables only the LLM call.
+**Session autonaming** (`config_.autoname_sessions`, default on): new sessions get a title without user action, in two stages. (1) In `submit_prompt`, after appending the first `user_prompted` message, if the title is still empty `derive_heuristic_title()` produces a short title (first non-empty line, whitespace collapsed, ~60-char word-boundary truncation) and calls `SessionStore::update_title`. (2) At the end of `agentic_loop`, when the user-turn count (`user_prompted` messages) satisfies `count % 5 == 1` — i.e. turns 1, 6, 11, 16, … — and `autoname_llm_refine` is on, `refine_title_llm()` makes a one-shot `provider->stream()` call (same model, `max_tokens` ~48, no tools). On the first call it generates a fresh ≤6-word title; on later calls it reconsiders — shown the current title and the full prompt history, the model either echoes the title verbatim (no write, no event) or returns a revised one. Both stages publish a `SessionRenamed` event, which the GUI relay forwards as `MSG_SESSION_RENAMED` (not gated on active session, so the sidebar refreshes regardless). The master toggle disables both; the refine flag disables only the LLM call.
 
 **Providers** (`lib/src/provider/`): `AnthropicProvider` and `OpenAIProvider` each implement `stream()` (SSE) and `list_models()` (HTTP GET, reports HTTP status via an `error` out-param). `base_url` is the **complete API root** (scheme + host + path prefix + version segment); the code appends only the resource path (`/messages`, `/chat/completions`, `/models`), so the version must be part of `base_url`. Defaults: `https://api.anthropic.com/v1`, `https://api.openai.com/v1`. OpenAI's message format differs from Anthropic's; `translate_messages()` in `openai.cpp` converts between them, including converting Anthropic content arrays with `tool_use` blocks into OpenAI `tool_calls`. Register providers via `ProviderRegistry::register_provider()`.
 
-The app supports **any number** of providers. Each `ProviderConfig` in `AppConfig::providers` (a `map<id, ProviderConfig>`) has a `type` of `"anthropic"`, `"openai"`, or one of the flavored OpenAI-compatible servers: `"ollama"`, `"vllm"`, `"openrouter"`, `"lmstudio"`, `"llamacpp"`; when empty it is inferred from the id (`"anthropic"` → anthropic, anything else → openai). Both frontends iterate the map to register providers. The factory functions `make_anthropic_provider()` / `make_openai_provider()` take an optional `id` so each instance reports a distinct id to the registry. Flavored providers are constructed via `make_openai_compat_provider(api_key, base_url, id, flavor)`, which applies a flavor-specific default `base_url` when one isn't supplied (e.g. `lmstudio` → `http://localhost:1234/v1`, `ollama` → `http://localhost:11434/v1`). Env-var fallback (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only to providers whose ids are literally `"anthropic"` / `"openai"`; an OpenAI-compatible entry with no key but a `base_url` (e.g. local Ollama) registers keyless.
+The app supports **any number** of providers. Each `ProviderConfig` in `AppConfig::providers` (a `map<id, ProviderConfig>`) has a `type` of `"anthropic"`, `"openai"`, or one of the flavored OpenAI-compatible servers: `"ollama"`, `"vllm"`, `"openrouter"`, `"lmstudio"`, `"llamacpp"`; when empty it is inferred from the id (`"anthropic"` → anthropic, anything else → openai). The GUI iterates the map to register providers. The factory functions `make_anthropic_provider()` / `make_openai_provider()` take an optional `id` so each instance reports a distinct id to the registry. Flavored providers are constructed via `make_openai_compat_provider(api_key, base_url, id, flavor)`, which applies a flavor-specific default `base_url` when one isn't supplied (e.g. `lmstudio` → `http://localhost:1234/v1`, `ollama` → `http://localhost:11434/v1`). Env-var fallback (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only to providers whose ids are literally `"anthropic"` / `"openai"`; an OpenAI-compatible entry with no key but a `base_url` (e.g. local Ollama) registers keyless.
 
 **Context-window discovery** (`get_context_window()` in `lib/src/util/model_info.cpp`, declared in `model_info.h`): resolution order is (1) exact-match config override (`"models": {"<model_id>": <tokens>}`), (2) longest-prefix match against a hardcoded table of common Anthropic/OpenAI/Llama models, (3) `0` (unknown). When a `Provider*` is passed (tier 4), an unknown result falls through to `provider->get_model_context(model_id)` — the discovery path used by flavored local servers so the context meter and auto-compaction work without manual config. Each flavor discovers context differently (`ServerFlavor` enum in `lib/include/haicode/model_context_parse.h`):
 - **vLLM / OpenRouter**: context carried inline in the OpenAI-compatible `/v1/models` `data[]` entries (`max_model_len` / `context_length` respectively); parsed during `list_models()` into a cache.
@@ -133,22 +131,6 @@ In the GUI, the provider dropdown is built dynamically via `MainWindow::RebuildP
 
 **Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Twenty built-in tools — see Tool Details below.
 
-### `tui/` — ncurses frontend
-
-Pure POSIX + Haiku kernel (no `BApplication`). `TuiApp::run()` multiplexes `STDIN_FILENO` and a wake pipe via `select()`. Engine threads post `EngineEvent` objects into a mutex-protected queue and write one byte to the pipe to wake the main loop. Permission requests travel through this same queue carrying a raw `PendingPermission*` (heap-allocated, with a `std::promise*`); the main loop renders the overlay and resolves the promise.
-
-**Key bindings** (global — intercepted before input buffer):
-- `Ctrl+N` — new session
-- `Ctrl+P` — toggle Build/Plan mode
-- `Ctrl+C` / `Ctrl+X` — interrupt running engine
-- `t` / `T` — toggle todo list overlay
-- `x` / `X` — toggle tool body expand/collapse (default: collapsed; header shows `▶`/`▼`)
-- `Tab` — switch focus between session list and chat/input pane
-
-Tool call bodies (`╔ … ╚` block) are hidden by default. `x` expands all blocks globally; `x` again collapses them. The tool result line (`✓`/`✗`) is always visible regardless of expand state. `ToolHeader` lines store just the tool name; `render_chat()` formats the full `╔ <name> ▶/▼` display text dynamically.
-
-**Ask-user overlay**: when an `AskUserRequested` event arrives, `process_engine_events()` sets `ask_visible_` and `render_ask_overlay()` draws a centered box with the question and the preset options as radio rows, plus an "Other:" row for free-form input. `↑`/`↓` (or `k`/`j`) move the selection through options and the Other row; `Enter` submits the highlighted preset or switches to the Other text field for typing; `Esc`/`q` cancels. Submitting calls `engine_->reply_to_ask()` with the picked answer (or a cancel sentinel), which unblocks the waiting engine thread.
-
 ### `gui/` — BeAPI (Haiku native) frontend
 
 - `HaiCodeApp` (BApplication) owns all haicode objects as `unique_ptr`. On startup, reads `last_directory` from settings JSON if no command-line arg was given.
@@ -170,7 +152,6 @@ Tool call bodies (`╔ … ╚` block) are hidden by default. `x` expands all bl
 ## Key constraints
 
 - **Never block the BeAPI looper thread** — all network/engine calls go through `be_app` or a detached thread posting back via `BMessenger`.
-- **Never block the TUI main loop** — engine events arrive via the wake pipe; the loop must remain responsive to `getch`.
 - **`B_SIZE_UNLIMITED` is only valid as a maximum size**, not a minimum. Use `B_SIZE_UNSET` for unconstrained minimum dimensions.
 - **BeAPI `BScrollView` constructor**: use the 6-arg layout-aware form (no `resizingMode` parameter) when building layout-managed views. The 7-arg old-style form breaks layout and grays out child views.
 - **SQLite schema**: `session`, `session_message` (types: `user_prompted`, `assistant_text`, `tool_called`, `tool_result`), `permission`. WAL mode + FK constraints (`ON DELETE CASCADE`) enabled.
@@ -341,7 +322,7 @@ When a session is in Plan mode, the engine:
 
 Plan mode instructions tell the model to call `ask_user` with 2–5 concrete options if the request is ambiguous before researching or proposing. Questions that can be answered by reading the codebase should not be asked, and no more than one `ask_user` call should precede a proposal.
 
-`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, reads the plan file stored in `pending_plan_path_` (set when `PlanProposed` fired), calls `haicode::parse_plan_tasks()` to extract the `## Tasks` checklist, and calls `engine_->seed_todos(sid, todos)` to write the list to the DB and publish `TodoUpdated` — so the todo panel is populated immediately before the engine resumes. Then calls `engine_->set_mode(sid, Build)`, `engine_->inject_message(sid, kPlanApprovedMessage)`, and `engine_->continue_session(sid)` unconditionally. The `inject_message` call appends a `user_prompted` message (the shared `kPlanApprovedMessage` constant from `lib/include/haicode/default_prompt.h`) so the model, on resume, knows the plan was approved and it is now in Build mode — without it, `continue_session` re-enters the loop with no new input and the model has to infer the state change from the tool list shifting. The UI refresh is gated on `sid == active_session_id_` but the session always resumes. The TUI plan-review overlay (`tui/src/TuiApp.cpp`, `'a'`/Enter case) follows the identical sequence: `seed_todos` → `set_mode(Build)` → `inject_message(kPlanApprovedMessage)` → `continue_session`. On denial, the session stays in Plan mode; a "Plan discarded" system message is appended to the active chat but no mode change or `continue_session` is called.
+`_HandlePlanDecision()` in `gui/src/MainWindow.cpp`: on approval, reads the plan file stored in `pending_plan_path_` (set when `PlanProposed` fired), calls `haicode::parse_plan_tasks()` to extract the `## Tasks` checklist, and calls `engine_->seed_todos(sid, todos)` to write the list to the DB and publish `TodoUpdated` — so the todo panel is populated immediately before the engine resumes. Then calls `engine_->set_mode(sid, Build)`, `engine_->inject_message(sid, kPlanApprovedMessage)`, and `engine_->continue_session(sid)` unconditionally. The `inject_message` call appends a `user_prompted` message (the shared `kPlanApprovedMessage` constant from `lib/include/haicode/default_prompt.h`) so the model, on resume, knows the plan was approved and it is now in Build mode — without it, `continue_session` re-enters the loop with no new input and the model has to infer the state change from the tool list shifting. The UI refresh is gated on `sid == active_session_id_` but the session always resumes. On denial, the session stays in Plan mode; a "Plan discarded" system message is appended to the active chat but no mode change or `continue_session` is called.
 
 **Plan task format**: `propose_plan` should include a `## Tasks` section with a markdown checklist for seeding to work:
 
@@ -354,4 +335,4 @@ Plan mode instructions tell the model to call `ask_user` with 2–5 concrete opt
 
 `parse_plan_tasks()` (`lib/src/engine/engine.cpp`) reads lines from the `## Tasks` section until the next `##` heading or EOF. It accepts `- [ ]`, `- [x]`, `- [X]`, and plain `- ` prefixes. `activeForm` is derived by converting the leading verb to gerund (e.g. "Add" → "Adding") via a lookup table; unknown verbs fall back to the content string unchanged.
 
-`engine_->seed_todos()` (`lib/include/haicode/engine.h`) calls `store_.replace_todos()` then publishes `TodoUpdated` — it is also callable from the TUI plan approval path and anywhere else a todo list needs to be set programmatically.
+`engine_->seed_todos()` (`lib/include/haicode/engine.h`) calls `store_.replace_todos()` then publishes `TodoUpdated` — it is also callable from the GUI plan approval path and anywhere else a todo list needs to be set programmatically.

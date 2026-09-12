@@ -808,8 +808,7 @@ public:
                "interactive full-screen terminal programs (editors like vim, "
                "ncurses apps, REPLs, shells) that cannot run inside the `bash` "
                "tool because `bash` merges stderr and reads output through a "
-               "pipe. Works regardless of which HaiCode frontend (GUI or TUI) "
-               "is in use. Returns immediately; the window closes when the "
+               "pipe. Returns immediately; the window closes when the "
                "command exits.";
     }
     nlohmann::json input_schema() const override {

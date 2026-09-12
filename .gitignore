@@ -9,7 +9,6 @@ cmake_install.cmake.*
 
 # Stray built binaries at src roots
 gui/haicode-gui
-tui/haicode-tui
 lib/test_*
 
 # Claude Code per-user local state

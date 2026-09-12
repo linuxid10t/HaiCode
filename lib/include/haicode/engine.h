@@ -93,7 +93,7 @@ public:
     void compact_now(const std::string& session_id);
 
     // Supply an answer to a pending ask_user question. Unblocks the agentic
-    // loop that called ask_user. Called by GUI/TUI event handlers.
+    // loop that called ask_user. Called by the GUI event handler.
     void reply_to_ask(const std::string& session_id,
                       const std::string& call_id,
                       const std::string& answer);

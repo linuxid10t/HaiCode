@@ -1,17 +1,16 @@
 # Project
 
 HaiCode — a native coding-agent app for **Haiku R1**. C++20 core library
-(`lib/`) with two frontends: `haicode-tui` (ncurses, POSIX) and `haicode-gui`
-(Haiku BeAPI). Talks to Anthropic and OpenAI-compatible LLM providers, runs
+(`lib/`) with a `haicode-gui` (Haiku BeAPI) frontend. Talks to Anthropic
+and OpenAI-compatible LLM providers, runs
 tools with per-action permissions, and persists every session to SQLite.
 
 # Build & run
 
 ```bash
 cmake -B build -S .            # re-run after adding a new .cpp source
-make -C build -j4              # builds lib + tui + gui + tests
+make -C build -j4              # builds lib + gui + tests
 
-./build/tui/haicode-tui [project_dir]
 ./build/gui/haicode-gui [project_dir]
 ```
 
@@ -30,7 +29,7 @@ automatically — no need to call `todo_write` at the start of the build turn.
 ## Tasks
 - [ ] Add BuildHookResult event to events.h
 - [ ] Publish event in engine.cpp
-- [ ] Handle event in GUI relay and TUI
+- [ ] Handle event in GUI relay
 ```
 
 Rules:

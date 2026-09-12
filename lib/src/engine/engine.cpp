@@ -840,7 +840,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         }
 
         // Re-read mode each step. The user can toggle Plan/Build mid-loop
-        // (GUI _ToggleMode / TUI toggle_mode call set_mode, which updates the
+        // (the GUI's _ToggleMode calls set_mode, which updates the
         // in-memory cache + DB synchronously); the tool allowlist and the
         // plan-mode system block below must reflect the flip on the next step,
         // not on the next turn.

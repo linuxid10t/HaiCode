@@ -1,13 +1,13 @@
 # HaiCode
 
-A native coding-agent app for **Haiku R1** — TUI (ncurses) and GUI (BeAPI) frontends backed by a C++20 agentic loop. Talks to Anthropic and OpenAI-compatible providers, runs tools with per-action permissions, and persists every session to SQLite.
+A native coding-agent app for **Haiku R1** — a native GUI (BeAPI) frontend backed by a C++20 agentic loop. Talks to Anthropic and OpenAI-compatible providers, runs tools with per-action permissions, and persists every session to SQLite.
 
 > Status: early preview. Built and tested on Haiku R1-beta5 / development tip.
 
 ## Features
 
 - **Agentic loop** — up to 20 tool-use steps per turn, with atomic interruption between steps.
-- **Two frontends** — `haicode-tui` (ncurses, pure POSIX) and `haicode-gui` (Haiku native BeAPI).
+- **Native GUI** — `haicode-gui`, a Haiku BeAPI frontend.
 - **Nineteen built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `ls`, `find`, `symbols`, `diff`, `git`, `process`, `external_terminal`, `todo_write`, `propose_plan`, `discard_plan`, `write_agents_md`, plus `web_search` and `web_extract` — each with safe argument handling and a 100 KB output cap. The `symbols` tool does heuristic C/C++ symbol search (definitions + classified references), skipping comments and string literals for less noise than `grep`.
 - **Multi-provider** — any number of Anthropic and OpenAI-compatible endpoints (proxies, Ollama, LM Studio, …) in `config.json`, with message-format translation between them.
 - **Permissions** — fnmatch rules per session, with an interactive Ask → Allow / Deny / Allow-Always flow.
@@ -22,11 +22,10 @@ Install these via `pkgman`:
 
 | Package | What it provides | Used by |
 |---------|------------------|---------|
-| `haiku_devel` | BeAPI headers (`os/`, incl. `Tracker`), `libbe`, `libroot`, `libtracker` | `lib`, `tui`, `gui` |
+| `haiku_devel` | BeAPI headers (`os/`, incl. `Tracker`), `libbe`, `libroot`, `libtracker` | `lib`, `gui` |
 | `nlohmann_json` | `nlohmann/json.hpp` (header-only) | `lib`, `gui` (config, provider payloads, events) |
 | `sqlite_devel` | `sqlite3.h` + `libsqlite3` | `lib` (session persistence) |
 | `curl_devel` | `curl/curl.h` + `libcurl` | `lib` (LLM HTTP) |
-| `ncurses6_devel` | `ncurses.h` + `libncursesw` | `tui` |
 | `cmake` | build configuration | all |
 | `make` | build runner | all |
 
@@ -38,7 +37,7 @@ separate `tracker_devel`.
 Install everything in one line:
 
 ```bash
-pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel ncurses6_devel cmake make
+pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel cmake make
 ```
 
 ### Optional
@@ -68,7 +67,6 @@ cmake -B build -S .
 make -C build -j4
 
 # Or build targets individually
-make -C build haicode-tui
 make -C build haicode-gui
 make -C build test_db
 ```
@@ -104,23 +102,21 @@ no special action is needed.
 ## Run
 
 ```bash
-./build/tui/haicode-tui [/path/to/project]   # TUI (ncurses)
 ./build/gui/haicode-gui [/path/to/project]   # GUI (BeAPI)
 ./build/lib/test_db                           # Database smoke test
 ```
 
 If no project directory is given, the GUI opens the last-used project from global config.
 
-**Single instance only.** Do not run two HaiCode instances at once (TUI or GUI): both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db`, and concurrent access fails on SQLite database locking. Close one before starting another.
+**Single instance only.** Do not run two HaiCode GUI instances at once: both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db`, and concurrent access fails on SQLite database locking. Close one before starting another.
 
 ## Architecture
 
-Three layers:
+Two layers:
 
 | Layer | What it is |
 |-------|------------|
 | `lib/` | `libhaicode` — core engine, providers, tools, persistence. Pure C++20 + POSIX. No GUI dependency. |
-| `tui/` | ncurses frontend. `select()`-based main loop multiplexes stdin with a wake pipe fed by engine threads. |
 | `gui/` | Haiku native BeAPI frontend. `BApplication` owns engine; events ride `BMessage`s from engine threads via `BMessenger`. |
 
 Key types live in `lib/include/haicode/` — `engine.h`, `provider.h`, `tool.h`, `events.h`, `db.h`, `config.h`, `util.h`. See [`CLAUDE.md`](./CLAUDE.md) for a deeper walkthrough of the agentic loop, permission gate, message-format translation, and per-tool behavior.
@@ -201,8 +197,8 @@ top-level `"models"` object (e.g. `"models": {"my-local-model": 131072}`) to
 enable compaction for models HaiCode doesn't recognize.
 
 After each compaction, a collapsible `[context compacted]` transcript entry
-shows the checkpoint summary in the chat scrollback (toggle with `'t'` in the
-TUI, click in the GUI). It is rendered from the checkpoint table, never stored
+shows the checkpoint summary in the chat scrollback (click to toggle in the
+GUI). It is rendered from the checkpoint table, never stored
 as a message, so the model's context is unaffected. The context-size indicator
 in the status area also drops immediately to a post-compaction estimate
 (checkpoint block + retained tail) instead of waiting for the next model

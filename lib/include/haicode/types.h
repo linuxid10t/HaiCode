@@ -31,7 +31,7 @@ struct ModelRef {
 };
 
 // An image attached to a user prompt. `data_b64` is filled by the engine at
-// submit time (the GUI/TUI only supply path + media_type) and persisted so
+// submit time (the GUI only supplies path + media_type) and persisted so
 // session replay survives the source file being moved or deleted.
 struct Attachment {
     std::string media_type;  // "image/png", "image/jpeg", "image/gif", "image/webp"
