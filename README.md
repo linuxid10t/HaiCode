@@ -26,7 +26,7 @@ Install these via `pkgman`:
 | `nlohmann_json` | `nlohmann/json.hpp` (header-only) | `lib`, `gui` (config, provider payloads, events) |
 | `sqlite_devel` | `sqlite3.h` + `libsqlite3` | `lib` (session persistence) |
 | `curl_devel` | `curl/curl.h` + `libcurl` | `lib` (LLM HTTP) |
-| `ncurses_devel` | `ncurses.h` + `libncursesw` | `tui` |
+| `ncurses6_devel` | `ncurses.h` + `libncursesw` | `tui` |
 | `cmake` | build configuration | all |
 | `make` | build runner | all |
 
@@ -38,7 +38,7 @@ separate `tracker_devel`.
 Install everything in one line:
 
 ```bash
-pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel ncurses_devel cmake make
+pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel ncurses6_devel cmake make
 ```
 
 ### Optional
