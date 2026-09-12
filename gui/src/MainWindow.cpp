@@ -730,7 +730,10 @@ MainWindow::MessageReceived(BMessage* msg)
                     marked->Message()->FindString("provider_id", &pid_str);
             }
             std::string pid = pid_str ? pid_str : "anthropic";
-            default_provider_ = pid;
+            // Re-mark the provider dropdown too: external fetches (settings
+            // save, startup) don't go through the menu's radio selection, so
+            // without this the label would keep showing the old provider.
+            SelectProvider(pid);
             _ApplyProviderModelToActiveSession();
             _PersistProviderModel();
 
@@ -991,6 +994,7 @@ MainWindow::_SelectSession(int idx)
         }
 
         // Restore provider + model dropdowns
+        std::string prev_provider = default_provider_;
         std::string provider_id, model_id;
         try {
             auto mj = nlohmann::json::parse(si->model_json);
@@ -1026,6 +1030,16 @@ MainWindow::_SelectSession(int idx)
                 }
             }
             default_model_ = model_id;
+        }
+
+        if (!provider_id.empty() && provider_id != prev_provider) {
+            // Cross-provider switch: the model dropdown still holds the
+            // previous provider's list. Refetch so it matches the restored
+            // provider; MSG_MODELS_LOADED re-marks this session's model if
+            // present in the new list (default_model_ is preserved).
+            BMessage fetch(MSG_FETCH_MODELS);
+            fetch.AddString("provider_id", provider_id.c_str());
+            PostMessage(&fetch);
         }
     }
 

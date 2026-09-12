@@ -531,6 +531,59 @@ SettingsWindow::_RepopulateList()
 }
 
 void
+SettingsWindow::_RebuildProviderMenus()
+{
+    // Rebuild both provider dropdowns from config_.providers after an add or
+    // remove, preserving each menu's marked id when it still exists. Without
+    // this the menus (built once in the constructor) go stale: a new provider
+    // can't be selected as default, and removing the marked one leaves a ghost
+    // entry that Save would write back into config_.provider.
+
+    std::string keep_primary = _MarkedProviderId();
+    std::string keep_fb      = _MarkedFBProviderId();
+
+    while (provider_menu_->CountItems() > 0)
+        delete provider_menu_->RemoveItem((int32)0);
+    bool found_provider = false;
+    for (auto& [id, p] : config_.providers) {
+        auto* msg = new BMessage(MSG_SET_PROVIDER);
+        msg->AddString("provider_id", id.c_str());
+        auto* item = new BMenuItem(id.c_str(), msg);
+        provider_menu_->AddItem(item);
+        if (id == keep_primary) {
+            item->SetMarked(true);
+            found_provider = true;
+        }
+    }
+    if (!found_provider && provider_menu_->CountItems() > 0)
+        provider_menu_->ItemAt(0)->SetMarked(true);
+    if (provider_menu_->CountItems() == 0) {
+        auto* item = new BMenuItem("(none configured)", nullptr);
+        item->SetEnabled(false);
+        item->SetMarked(true);
+        provider_menu_->AddItem(item);
+    }
+
+    while (fb_provider_menu_->CountItems() > 0)
+        delete fb_provider_menu_->RemoveItem((int32)0);
+    {
+        auto* none_item = new BMenuItem("(none)", new BMessage(MSG_FB_PROVIDER_SET));
+        none_item->Message()->AddString("provider_id", "");
+        fb_provider_menu_->AddItem(none_item);
+        if (keep_fb.empty())
+            none_item->SetMarked(true);
+        for (auto& [id, p] : config_.providers) {
+            auto* m = new BMessage(MSG_FB_PROVIDER_SET);
+            m->AddString("provider_id", id.c_str());
+            auto* item = new BMenuItem(id.c_str(), m);
+            fb_provider_menu_->AddItem(item);
+            if (id == keep_fb)
+                item->SetMarked(true);
+        }
+    }
+}
+
+void
 SettingsWindow::_OpenEditor(const std::string& editing_id)
 {
     std::string type, key, url;
@@ -571,6 +624,17 @@ SettingsWindow::_ApplyDialogResult(BMessage* msg)
         p.api_key = incoming_key;
     config_.providers[p.id] = std::move(p);
     _RepopulateList();
+
+    // Keep the General-tab provider dropdowns in sync with add/edit. If the
+    // mark moved (e.g. first provider added while "(none configured)" was
+    // marked), refetch so the model list matches the new default.
+    std::string prev_primary = _MarkedProviderId();
+    std::string prev_fb      = _MarkedFBProviderId();
+    _RebuildProviderMenus();
+    if (_MarkedProviderId() != prev_primary)
+        _FetchModelsForMarkedProvider();
+    if (_MarkedFBProviderId() != prev_fb)
+        _FetchFBModelsForMarkedProvider();
 }
 
 void
@@ -595,6 +659,17 @@ SettingsWindow::MessageReceived(BMessage* msg)
             std::advance(it, sel);
             config_.providers.erase(it);
             _RepopulateList();
+
+            // Refresh the General-tab dropdowns: removing the marked default
+            // moves the mark to another provider (or "(none configured)"), so
+            // refetch when it did.
+            std::string prev_primary = _MarkedProviderId();
+            std::string prev_fb      = _MarkedFBProviderId();
+            _RebuildProviderMenus();
+            if (_MarkedProviderId() != prev_primary)
+                _FetchModelsForMarkedProvider();
+            if (_MarkedFBProviderId() != prev_fb)
+                _FetchFBModelsForMarkedProvider();
             break;
         }
         case MSG_PROVIDER_DIALOG_DONE:
@@ -612,15 +687,32 @@ SettingsWindow::MessageReceived(BMessage* msg)
             // Fallback provider dropdown changed — refetch its model list.
             while (fb_model_menu_->CountItems() > 0)
                 delete fb_model_menu_->RemoveItem((int32)0);
+            if (_MarkedFBProviderId().empty()) {
+                // "(none)" disables the feature outright: no fetch, no
+                // loading state — the model menu resolves immediately to
+                // "(off)" (a stale in-flight reply is dropped by the
+                // provider-id guard in MSG_FB_MODELS_LOADED).
+                auto* off = new BMenuItem("(off)", nullptr);
+                off->SetEnabled(false);
+                off->SetMarked(true);
+                fb_model_menu_->AddItem(off);
+                break;
+            }
             auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
             loading->SetEnabled(false);
             loading->SetMarked(true);
             fb_model_menu_->AddItem(loading);
-            if (!_MarkedFBProviderId().empty())
-                _FetchFBModelsForMarkedProvider();
+            _FetchFBModelsForMarkedProvider();
             break;
         }
         case MSG_FB_MODELS_LOADED: {
+            // Same stale-reply guard as the primary pair; also discards late
+            // replies after switching back to "(none)" (empty id never matches).
+            const char* fb_loaded_pid = nullptr;
+            if (msg->FindString("provider_id", &fb_loaded_pid) == B_OK
+                    && fb_loaded_pid && std::string(fb_loaded_pid) != _MarkedFBProviderId())
+                break;
+
             std::string preserved = config_.vision_fallback_model;
             while (fb_model_menu_->CountItems() > 0)
                 delete fb_model_menu_->RemoveItem((int32)0);
@@ -663,6 +755,14 @@ SettingsWindow::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_MODELS_LOADED: {
+            // Discard replies for a provider that is no longer marked — fetches
+            // run on detached threads and can land out of order after the user
+            // switched providers (same guard MainWindow applies).
+            const char* loaded_pid = nullptr;
+            if (msg->FindString("provider_id", &loaded_pid) == B_OK
+                    && loaded_pid && std::string(loaded_pid) != _MarkedProviderId())
+                break;
+
             // Repopulate model dropdown from the fetched list.
             std::string preserved = config_.model;
             while (model_menu_->CountItems() > 0)

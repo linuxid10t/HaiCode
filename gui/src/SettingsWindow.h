@@ -57,6 +57,10 @@ private:
     void _Save();
     void _FetchModelsForMarkedProvider();
     void _FetchFBModelsForMarkedProvider();  // fallback pair's model fetch
+    // Rebuild both provider dropdowns from config_.providers (add/remove),
+    // preserving the marked ids when still present. Returns nothing; callers
+    // compare marks before/after to decide whether a refetch is needed.
+    void _RebuildProviderMenus();
     std::string _MarkedProviderId() const;
     std::string _MarkedFBProviderId() const; // fallback provider ("" = "(none)")
     void _RefreshContextField();   // sync context field to marked model's window
