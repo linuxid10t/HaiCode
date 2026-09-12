@@ -93,7 +93,7 @@ private:
     void _HandleCompactNow();
     void _RefreshTodosFromEngine();
 
-    void _ToggleMode();
+    void _SetMode(haicode::SessionMode next);
     void _ApplyModeCheckboxVisibility(bool reset_hidden);
     void _UpdateStatusStrip();
     void _UpdateMaxContext();
@@ -143,11 +143,21 @@ private:
     BButton*       interrupt_btn_   = nullptr;
     BButton*       new_session_btn_ = nullptr;
     BButton*       dir_btn_         = nullptr;
-    BButton*       mode_btn_        = nullptr;
+    BPopUpMenu*    mode_menu_       = nullptr;
+    BMenuField*    mode_field_      = nullptr;
     BButton*       compact_btn_     = nullptr;
     BCheckBox*     auto_edits_chk_  = nullptr;
     BCheckBox*     yolo_chk_        = nullptr;
     BCheckBox*     read_everywhere_chk_ = nullptr;
+    // Desired-visibility mirror for mode-dependent widgets. BView::IsHidden()
+    // is true for every view while the window is not yet shown, so it cannot
+    // gate Hide()/Show() during the pre-Show() startup mode restore; these
+    // tracked bools can. Must match the constructor's initial Hide() calls.
+    bool dir_btn_visible_             = true;
+    bool auto_edits_chk_visible_      = true;
+    bool yolo_chk_visible_            = true;
+    bool read_everywhere_chk_visible_ = false;
+    void _SetWidgetVisible(BView* v, bool& tracked, bool visible);
     BFilePanel*    dir_panel_       = nullptr;
     BFilePanel*    attach_panel_    = nullptr;
     BGroupView*    attach_row_      = nullptr;   // removable attachment chips

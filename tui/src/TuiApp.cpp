@@ -973,7 +973,7 @@ void TuiApp::handle_key(int key) {
         render_all();
         return;
 
-    case 16: // Ctrl+P — toggle Build/Plan mode
+    case 16: // Ctrl+P — cycle Build → Plan → Chat mode
         toggle_mode();
         render_all();
         return;
@@ -1405,9 +1405,11 @@ void TuiApp::render_statusbar() {
 
     // Mode badge
     std::string badge = "[BUILD]";
-    if (!active_session_id_.empty()
-        && engine_.get_mode(active_session_id_) == SessionMode::Plan)
-        badge = "[PLAN]";
+    if (!active_session_id_.empty()) {
+        auto m = engine_.get_mode(active_session_id_);
+        if (m == SessionMode::Plan)      badge = "[PLAN]";
+        else if (m == SessionMode::Chat) badge = "[CHAT]";
+    }
 
     std::string model  = config_.model.empty() ? "?" : config_.model;
     std::string agent  = config_.agent.empty() ? "default" : config_.agent;
@@ -1529,11 +1531,17 @@ void TuiApp::render_permission_overlay() {
 void TuiApp::toggle_mode() {
     if (active_session_id_.empty()) return;
     auto cur = engine_.get_mode(active_session_id_);
-    if (cur == SessionMode::Plan) {
+    // Cycle Build → Plan → Chat → Build.
+    SessionMode next = (cur == SessionMode::Build) ? SessionMode::Plan
+                     : (cur == SessionMode::Plan)  ? SessionMode::Chat
+                                                   : SessionMode::Build;
+    if (next == SessionMode::Build) {
         confirm_build_visible_ = true;
     } else {
-        engine_.set_mode(active_session_id_, SessionMode::Plan);
-        engine_.inject_message(active_session_id_, kSwitchedToPlanMessage);
+        engine_.set_mode(active_session_id_, next);
+        engine_.inject_message(active_session_id_,
+            next == SessionMode::Plan ? kSwitchedToPlanMessage
+                                      : kSwitchedToChatMessage);
     }
 }
 
@@ -1644,7 +1652,7 @@ void TuiApp::render_ask_overlay() {
 
 void TuiApp::render_confirm_build_overlay() {
     const char* lines[] = {
-        "Switch from Plan mode to Build mode?",
+        "Switch to Build mode?",
         "",
         "Build mode allows file edits and shell commands.",
     };

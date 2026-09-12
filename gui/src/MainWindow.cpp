@@ -225,8 +225,25 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     model_menu_->AddItem(loading_item);
     model_field_ = new BMenuField("model_field", "Model:", model_menu_);
 
-    // Mode toggle — switches between Build (default) and Plan
-    mode_btn_ = new BButton("mode", "Mode: Build", new BMessage(MSG_TOGGLE_MODE));
+    // Mode selector — Build (full access), Plan (read-only + propose_plan),
+    // Chat (conversation + web research only, zero local computer access).
+    // Radio mode keeps exactly one item marked; _RefreshModeButton() re-marks
+    // it whenever the engine-side mode changes.
+    mode_menu_ = new BPopUpMenu("Mode");
+    mode_menu_->SetRadioMode(true);
+    mode_menu_->SetLabelFromMarked(true);
+    const struct { const char* label; const char* value; } kModeItems[] = {
+        { "Build", "build" },
+        { "Plan",  "plan"  },
+        { "Chat",  "chat"  },
+    };
+    for (auto& item : kModeItems) {
+        BMessage* mode_msg = new BMessage(MSG_MODE_SELECTED);
+        mode_msg->AddString("mode", item.value);
+        mode_menu_->AddItem(new BMenuItem(item.label, mode_msg));
+    }
+    if (BMenuItem* it = mode_menu_->ItemAt(0)) it->SetMarked(true);
+    mode_field_ = new BMenuField("mode_field", "Mode:", mode_menu_);
 
     auto_edits_chk_ = new BCheckBox("auto_edits", "Auto-allow edits",
                                     new BMessage(MSG_AUTO_ALLOW_EDITS));
@@ -286,7 +303,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(dir_btn_)
         .Add(provider_field_)
         .Add(model_field_)
-        .Add(mode_btn_)
+        // Weight 0: BMenuField is horizontally stretchy, and a third
+        // stretchy field was redistributing the toolbar's surplus space,
+        // shrinking the Provider/Model dropdowns. Keep it at preferred
+        // width like the buttons.
+        .Add(mode_field_, 0.f)
         .Add(interrupt_btn_)
         .AddGlue()
     .End();
@@ -636,9 +657,19 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_ASK_USER_REPLY:
             _HandleAskUserReply(msg);
             break;
-        case MSG_TOGGLE_MODE:
-            _ToggleMode();
+        case MSG_MODE_SELECTED: {
+            // Mode menu item; radio mode has already marked the item, so a
+            // cancelled confirmation must re-mark the engine's actual mode.
+            BString mode;
+            if (msg->FindString("mode", &mode) == B_OK) {
+                haicode::SessionMode next =
+                    (mode == "plan") ? haicode::SessionMode::Plan
+                  : (mode == "chat") ? haicode::SessionMode::Chat
+                                     : haicode::SessionMode::Build;
+                _SetMode(next);
+            }
             break;
+        }
         case MSG_APPLY_INFERENCE:
             _ApplyInference();
             break;
@@ -1686,31 +1717,39 @@ MainWindow::_RefreshTodosFromEngine()
 }
 
 void
-MainWindow::_ToggleMode()
+MainWindow::_SetMode(haicode::SessionMode next)
 {
     if (active_session_id_.empty() || !engine_) return;
     auto current = engine_->get_mode(active_session_id_);
 
-    if (current == haicode::SessionMode::Plan) {
+    if (next == haicode::SessionMode::Build
+        && current != haicode::SessionMode::Build) {
         BAlert* alert = new BAlert("Switch to Build Mode",
-            "Switch from Plan mode to Build mode?\n\n"
+            "Switch to Build mode?\n\n"
             "Build mode allows file edits and shell commands.",
             "Cancel", "Switch to Build", nullptr,
             B_WIDTH_AS_USUAL, B_WARNING_ALERT);
         alert->SetShortcut(0, B_ESCAPE);
         int32 choice = alert->Go();
-        if (choice != 1) return;
+        if (choice != 1) {
+            // Radio mode already marked the clicked item; restore the mark
+            // to the mode the engine still has.
+            _RefreshModeButton();
+            return;
+        }
     }
 
-    auto next = (current == haicode::SessionMode::Plan)
-                ? haicode::SessionMode::Build
-                : haicode::SessionMode::Plan;
+    if (next == current) {
+        _RefreshModeButton();
+        return;
+    }
+
     engine_->set_mode(active_session_id_, next);
     _ApplyModeCheckboxVisibility(true);
     engine_->inject_message(active_session_id_,
-        next == haicode::SessionMode::Plan
-            ? haicode::kSwitchedToPlanMessage
-            : haicode::kSwitchedToBuildMessage);
+        next == haicode::SessionMode::Plan ? haicode::kSwitchedToPlanMessage
+      : next == haicode::SessionMode::Chat ? haicode::kSwitchedToChatMessage
+                                           : haicode::kSwitchedToBuildMessage);
     _RefreshModeButton();
     _UpdateStatusStrip();
 }
@@ -1718,21 +1757,42 @@ MainWindow::_ToggleMode()
 void
 MainWindow::_RefreshModeButton()
 {
-    if (!mode_btn_ || active_session_id_.empty() || !engine_) return;
-    auto m = engine_->get_mode(active_session_id_);
-    mode_btn_->SetLabel(m == haicode::SessionMode::Plan ? "Mode: Plan" : "Mode: Build");
+    if (!mode_menu_) return;
+    int index = 0;
+    if (!active_session_id_.empty() && engine_) {
+        auto m = engine_->get_mode(active_session_id_);
+        index = (m == haicode::SessionMode::Plan) ? 1
+              : (m == haicode::SessionMode::Chat) ? 2 : 0;
+    }
+    if (BMenuItem* it = mode_menu_->ItemAt(index)) it->SetMarked(true);
     _ApplyModeCheckboxVisibility(false);
+}
+
+void
+MainWindow::_SetWidgetVisible(BView* v, bool& tracked, bool visible)
+{
+    if (!v || tracked == visible) return;
+    tracked = visible;
+    if (visible) v->Show(); else v->Hide();
 }
 
 void
 MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
 {
     if (!auto_edits_chk_ || !yolo_chk_ || !read_everywhere_chk_) return;
-    bool plan = (!active_session_id_.empty() && engine_ &&
-                 engine_->get_mode(active_session_id_) == haicode::SessionMode::Plan);
-    if (plan) {
+    haicode::SessionMode cur_mode = haicode::SessionMode::Build;
+    if (!active_session_id_.empty() && engine_)
+        cur_mode = engine_->get_mode(active_session_id_);
+    bool plan = (cur_mode == haicode::SessionMode::Plan);
+    bool chat = (cur_mode == haicode::SessionMode::Chat);
+
+    // BView::Hide()/Show() maintain a nestable counter, so they must only be
+    // called on an actual state change — and the change signal must be our
+    // tracked bools, not IsHidden() (which is true for every view while the
+    // window is not yet shown, silently skipping the startup restore's hides).
+    if (plan || chat) {
         if (reset_hidden) {
-            // Hidden toggles must not stay live behind the Plan-mode UI.
+            // Hidden toggles must not stay live behind the restricted-mode UI.
             auto_edits_chk_->SetValue(B_CONTROL_OFF);
             yolo_chk_->SetValue(B_CONTROL_OFF);
             {
@@ -1745,14 +1805,24 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
                 m.AddInt32("be:value", B_CONTROL_OFF);
                 be_app->PostMessage(&m);
             }
+            if (chat) {
+                // Chat has no read tool at all; reset the Plan-only toggle.
+                read_everywhere_chk_->SetValue(B_CONTROL_OFF);
+                BMessage m(MSG_READ_EVERYWHERE);
+                m.AddInt32("be:value", B_CONTROL_OFF);
+                be_app->PostMessage(&m);
+            }
             if (!active_session_id_.empty())
                 store_.update_permission_flags(
                     active_session_id_, false, false,
-                    read_everywhere_chk_->Value() == B_CONTROL_ON);
+                    plan && read_everywhere_chk_->Value() == B_CONTROL_ON);
         }
-        auto_edits_chk_->Hide();
-        yolo_chk_->Hide();
-        read_everywhere_chk_->Show();
+        _SetWidgetVisible(auto_edits_chk_, auto_edits_chk_visible_, false);
+        _SetWidgetVisible(yolo_chk_, yolo_chk_visible_, false);
+        _SetWidgetVisible(read_everywhere_chk_, read_everywhere_chk_visible_, plan);
+        // Chat has no local access at all, so the working-directory picker
+        // is meaningless there.
+        _SetWidgetVisible(dir_btn_, dir_btn_visible_, !chat);
     } else {
         if (reset_hidden) {
             read_everywhere_chk_->SetValue(B_CONTROL_OFF);
@@ -1768,9 +1838,10 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
                     yolo_chk_->Value() == B_CONTROL_ON,
                     false);
         }
-        read_everywhere_chk_->Hide();
-        auto_edits_chk_->Show();
-        yolo_chk_->Show();
+        _SetWidgetVisible(read_everywhere_chk_, read_everywhere_chk_visible_, false);
+        _SetWidgetVisible(auto_edits_chk_, auto_edits_chk_visible_, true);
+        _SetWidgetVisible(yolo_chk_, yolo_chk_visible_, true);
+        _SetWidgetVisible(dir_btn_, dir_btn_visible_, true);
     }
 }
 
@@ -1944,9 +2015,11 @@ MainWindow::_UpdateStatusStrip()
 
     // Mode badge
     std::string badge = "[BUILD]";
-    if (engine_ && !active_session_id_.empty()
-        && engine_->get_mode(active_session_id_) == haicode::SessionMode::Plan)
-        badge = "[PLAN]";
+    if (engine_ && !active_session_id_.empty()) {
+        auto m = engine_->get_mode(active_session_id_);
+        if (m == haicode::SessionMode::Plan)       badge = "[PLAN]";
+        else if (m == haicode::SessionMode::Chat)  badge = "[CHAT]";
+    }
 
     // State glyph + label
     std::string glyph, label;

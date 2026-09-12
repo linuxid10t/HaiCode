@@ -174,11 +174,11 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
         if (j.contains("build_command") && j["build_command"].is_string())
             cfg.build_command = j["build_command"].get<std::string>();
 
-        // Default session mode: "plan" or "build". Unrecognized values are
-        // ignored so the struct default ("build") stands.
+        // Default session mode: "plan", "chat", or "build". Unrecognized
+        // values are ignored so the struct default ("build") stands.
         if (j.contains("default_mode") && j["default_mode"].is_string()) {
             std::string dm = j["default_mode"].get<std::string>();
-            if (dm == "plan" || dm == "build")
+            if (dm == "plan" || dm == "chat" || dm == "build")
                 cfg.default_mode = dm;
         }
 

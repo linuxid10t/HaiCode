@@ -578,7 +578,9 @@ void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
         std::lock_guard<std::mutex> lock(mu_);
         session_modes_[session_id] = mode;
     }
-    store_.update_mode(session_id, mode == SessionMode::Plan ? "plan" : "build");
+    store_.update_mode(session_id, mode == SessionMode::Plan ? "plan"
+                                                       : mode == SessionMode::Chat ? "chat"
+                                                                                   : "build");
 }
 
 void SessionEngine::update_provider_model(const std::string& session_id,
@@ -606,11 +608,15 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
     if (auto si = store_.get(session_id)) {
         try {
             auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
-            return mj.value("mode", config_.default_mode) == "plan"
-                ? SessionMode::Plan : SessionMode::Build;
+            std::string ms = mj.value("mode", config_.default_mode);
+            if (ms == "plan") return SessionMode::Plan;
+            if (ms == "chat") return SessionMode::Chat;
+            return SessionMode::Build;
         } catch (...) {}
     }
-    return (config_.default_mode == "plan") ? SessionMode::Plan : SessionMode::Build;
+    if (config_.default_mode == "plan") return SessionMode::Plan;
+    if (config_.default_mode == "chat") return SessionMode::Chat;
+    return SessionMode::Build;
 }
 
 void SessionEngine::agentic_loop(const std::string& session_id) {
@@ -633,7 +639,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             mode = it->second;
         } else {
             std::string mode_str = model_json.value("mode", config_.default_mode);
-            mode = (mode_str == "plan") ? SessionMode::Plan : SessionMode::Build;
+            mode = (mode_str == "plan") ? SessionMode::Plan
+                 : (mode_str == "chat") ? SessionMode::Chat
+                                        : SessionMode::Build;
             session_modes_[session_id] = mode;
         }
     }
@@ -736,11 +744,20 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         plan_mode_block = kPlanModeInstructions;
     }
 
+    // Chat-mode block: appended only when the session is in Chat mode.
+    // Conversation + web research only; the engine separately strips every
+    // tool except the chat allowlist, so there is zero local computer access.
+    std::string chat_mode_block;
+    if (mode == SessionMode::Chat) {
+        chat_mode_block = kChatModeInstructions;
+    }
+
     std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
                        + agents_md_block
                        + latest_plan_block
                        + instructions_block
-                       + plan_mode_block;
+                       + plan_mode_block
+                       + chat_mode_block;
 
     // Dynamic per-step content ({{STEPS_LEFT}}). Emitted as a separate
     // system text block by the Anthropic provider so the stable body
@@ -751,7 +768,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
-            mode == SessionMode::Plan ? "plan" : "build",
+            mode == SessionMode::Plan ? "plan"
+                 : mode == SessionMode::Chat ? "chat" : "build",
             max_steps, config_.instructions.size());
     // The full prompt embeds project agents.md content; dump it only when
     // explicitly debugging prompt assembly.
@@ -790,22 +808,24 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         mode = get_mode(session_id);
         plan_mode_block = (mode == SessionMode::Plan) ? kPlanModeInstructions
                                                        : std::string{};
+        chat_mode_block = (mode == SessionMode::Chat) ? kChatModeInstructions
+                                                       : std::string{};
 
         // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
         // stay current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
                                max_steps - step) + agents_md_block + latest_plan_block
-                              + instructions_block + plan_mode_block;
+                              + instructions_block + plan_mode_block + chat_mode_block;
         // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
         system_dynamic = render_dynamic_prompt(model_id, os_info,
                                                 session.directory,
                                                 max_steps - step);
 
-        // Re-inject the current todo list (Build mode only) so the model
-        // stays anchored to outstanding work without having to remember it
-        // from the plan. Lives in the dynamic block to preserve the stable
-        // body's prefix cache.
-        if (mode == SessionMode::Build) {
+        // Re-inject the current todo list (Build and Chat modes) so the model
+        // stays anchored to outstanding work. Chat allows todo_write, so it
+        // must also see the list. Lives in the dynamic block to preserve the
+        // stable body's prefix cache.
+        if (mode != SessionMode::Plan) {
             auto todos_now = store_.load_todos(session_id);
             system_dynamic += render_todos_block(todos_now);
         }
@@ -814,9 +834,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
-        // Filter tools by mode. Plan mode uses an allowlist (fail-closed):
-        // anything not explicitly safe for research is hidden, so future
-        // tools don't silently leak into Plan turns. Build mode has no filter.
+        // Filter tools by mode. Plan and Chat use allowlists (fail-closed):
+        // anything not explicitly safe for that mode is hidden, so future
+        // tools don't silently leak into restricted turns. Build mode has no
+        // filter.
         if (mode == SessionMode::Plan) {
             static const std::set<std::string> plan_allowed = {
                 "read", "glob", "grep", "ls", "find",
@@ -824,8 +845,18 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 "diff", "todo_write", "ask_user",
                 "propose_plan", "discard_plan",
             };
-            std::erase_if(tool_defs, [](const ToolDefinition& td) {
+            std::erase_if(tool_defs, [&](const ToolDefinition& td) {
                 return !plan_allowed.count(td.name);
+            });
+        } else if (mode == SessionMode::Chat) {
+            // Chat = conversation + web research only; zero local computer
+            // access. todo_write touches only app-internal session state and
+            // ask_user only round-trips to the UI.
+            static const std::set<std::string> chat_allowed = {
+                "web_search", "web_extract", "todo_write", "ask_user",
+            };
+            std::erase_if(tool_defs, [&](const ToolDefinition& td) {
+                return !chat_allowed.count(td.name);
             });
         }
         auto req = builder.build(messages, system, system_dynamic, tool_defs,

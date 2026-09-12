@@ -158,7 +158,7 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 //   steps_left 5–14  → "Budget is getting tight"
 //   steps_left 1–4   → "CRITICAL"
 constexpr const char* kDynamicSystemPromptNeutral = R"HPCODE(
-You have a per-session step budget (configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each model turn counts as one step, no matter how many tool calls it contains; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration. Work the active todo list top-down; when it is empty or fully complete, wrap up the current turn by reporting the outcome to the user instead of starting new work.
+You have a per-session step budget (configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each model turn counts as one step, no matter how many tool calls it contains; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration. Work the active todo list top-down; when it is empty or fully complete, wrap up the current turn by reporting the outcome to the user instead of starting new work. Do not reference the amount of steps left in assistant messages.
 )HPCODE";
 
 // Lowercase filenames auto-discovered at the project root.
@@ -203,6 +203,23 @@ You are in PLAN MODE. The user wants a researched implementation strategy before
 - Do not call `propose_plan` more than once per turn unless the user asks for revisions.
 )HPCODE";
 
+// Appended to the system prompt only when the session is in Chat mode.
+// The engine filters the toolset down to a fail-closed allowlist
+// (web_search, web_extract, todo_write, ask_user) when this block is active,
+// so the model literally cannot touch the local machine.
+constexpr const char* kChatModeInstructions = R"HPCODE(
+
+# Chat mode active
+
+You are in CHAT MODE. The user wants conversation and online research only — zero access to the local computer.
+
+- Available tools this turn: web_search, web_extract, todo_write, ask_user. That is the complete list.
+- There is NO access to local files, the shell, the codebase, or any tool that reads or modifies this machine. Do not claim to have run, read, or checked anything locally.
+- Answer conversationally. Use `web_search` / `web_extract` when the question needs current information or facts you are unsure of; cite URLs you actually fetched.
+- For multi-part research questions, use `todo_write` to track the parts, marking them in_progress/completed as you go.
+- If the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — call `ask_user` with a focused question and 2-5 concrete options, then stop and wait for the reply.
+)HPCODE";
+
 // Injected as a user_prompted message when the user approves a plan, before
 // continue_session resumes the agentic loop. Tells the model the plan was
 // accepted and that it is now in Build mode, so it begins implementing
@@ -225,6 +242,13 @@ Switching to Plan mode. Stop any in-progress edits. From here on, research and p
 // than relying on the system-prompt change alone.
 constexpr const char* kSwitchedToBuildMessage = R"HPCODE(
 Switching to Build mode. You may now use bash, write, edit, and external_terminal again. Resume normal implementation work.
+)HPCODE";
+
+// Injected when the user manually switches into Chat mode mid-conversation.
+// Mirrors the Plan notice so the model has an explicit signal in the chat
+// history rather than relying on the system-prompt change alone.
+constexpr const char* kSwitchedToChatMessage = R"HPCODE(
+Switching to Chat mode. From here on this is conversation and online research only — you have no access to local files, the shell, or the codebase. Your only tools are web_search, web_extract, todo_write, and ask_user.
 )HPCODE";
 
 }  // namespace haicode
