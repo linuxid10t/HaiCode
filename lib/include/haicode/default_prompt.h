@@ -8,7 +8,9 @@ namespace haicode {
 //   {{MODEL}}       - the active model identifier (e.g. "claude-sonnet-4-6")
 //   {{OS}}          - uname() sysname/release/machine
 //   {{PROJECT_DIR}} - absolute path of the active project directory
-//   {{STEPS_LEFT}}  - remaining steps in the session's step budget (re-rendered each step)
+//   {{STEPS_LEFT}}  - remaining steps in the session's step budget; rendered
+//                     only in the final stretch of the session (see
+//                     kDynamicSystemPromptNeutral below)
 //
 // SPLIT: kDefaultSystemPrompt is byte-stable across turns so Anthropic's
 // prefix cache can hit on it. The {{STEPS_LEFT}} sentence lives in
@@ -148,15 +150,19 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 - Do not echo secrets in logs or error messages.
 )HPCODE";
 
-// Re-rendered every step ({{STEPS_LEFT}} changes) and emitted as a
-// separate system text block AFTER the stable body. Kept short so the
-// per-step byte delta is minimal. Splitting this out is what lets the
+// Re-rendered every step and emitted as a separate system text block AFTER
+// the stable body — but only once the session enters its final stretch:
+// while steps_left > max(1, min(10, max_steps / 2)) this entire block is
+// omitted (render_dynamic_prompt returns an empty string). Kept short so
+// the per-step byte delta is minimal. Splitting this out is what lets the
 // stable body hit Anthropic's prefix cache.
 //
-// This is the neutral tier (steps_left >= 15). render_dynamic_prompt()
-// in engine.cpp appends escalating urgency lines at two thresholds:
+// Escalation within the emitted window (render_dynamic_prompt in engine.cpp):
 //   steps_left 5–14  → "Budget is getting tight"
 //   steps_left 1–4   → "CRITICAL"
+// Since the gate threshold is capped at 10, the first appearance always
+// lands inside the "getting tight" band — the base sentence below never
+// appears without an escalation line appended.
 constexpr const char* kDynamicSystemPromptNeutral = R"HPCODE(
 You have a per-session step budget (configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each model turn counts as one step, no matter how many tool calls it contains; a single user turn can consume several. When the remaining count is low, prioritise finishing the user's task over further exploration. Work the active todo list top-down; when it is empty or fully complete, wrap up the current turn by reporting the outcome to the user instead of starting new work. Do not reference the amount of steps left in assistant messages.
 )HPCODE";

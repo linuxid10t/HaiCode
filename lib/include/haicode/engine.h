@@ -221,10 +221,14 @@ bool should_compact_with_hysteresis(int prev_total_input,
 
 // Tiered dynamic system block: wording escalates as the step budget depletes
 // so the model reprioritizes before running out. The stable cached body is
-// untouched — only this tail changes per step.
+// untouched — only this tail changes per step. The whole block is emitted
+// only in the final stretch of the session: while steps_left exceeds
+// max(1, min(10, max_steps / 2)), the budget is plentiful and the function
+// returns an empty string.
 std::string render_dynamic_prompt(const std::string& model,
                                   const std::string& os_info,
                                   const std::string& project_dir,
-                                  int steps_left);
+                                  int steps_left,
+                                  int max_steps);
 
 } // namespace haicode

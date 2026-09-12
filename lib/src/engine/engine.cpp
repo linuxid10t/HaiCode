@@ -87,7 +87,18 @@ static std::string render_prompt(const std::string& tmpl,
 std::string render_dynamic_prompt(const std::string& model,
                                   const std::string& os_info,
                                   const std::string& project_dir,
-                                  int steps_left) {
+                                  int steps_left,
+                                  int max_steps) {
+    // Emit the budget sentence only in the final stretch: the last
+    // min(10, max_steps/2) steps (floor of 1 so a tiny budget still gets a
+    // final CRITICAL). Outside that window the budget is plentiful and the
+    // block is pure noise — and per-step churn for prefix caches.
+    // Because the threshold is capped at 10 and the "getting tight" line
+    // fires at <= 14, the first appearance always lands inside that band;
+    // the base sentence never appears without an escalation line.
+    int threshold = std::max(1, std::min(10, max_steps / 2));
+    if (steps_left > threshold) return {};
+
     std::string base = render_prompt(kDynamicSystemPromptNeutral, model,
                                      os_info, project_dir, steps_left);
     if (steps_left <= 4) {
@@ -774,8 +785,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     if (prompt_tmpl.find("{{STEPS_LEFT}}") != std::string::npos) {
         fprintf(stderr, "[engine] warning: agent '%s' system_prompt contains "
                         "{{STEPS_LEFT}}; it will change every step and break "
-                        "Anthropic prefix caching. Move it to the dynamic "
-                        "sentence (it always renders the count) or remove it.\n",
+                        "Anthropic prefix caching. Remove it — the dynamic "
+                        "sentence already renders the count in the final "
+                        "stretch of the session.\n",
                 session.agent.c_str());
         fflush(stderr);
     }
@@ -855,7 +867,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // above stays byte-identical across turns and hits the prefix cache.
     std::string system_dynamic = render_dynamic_prompt(model_id, os_info,
                                                        session.directory,
-                                                       max_steps);
+                                                       max_steps, max_steps);
 
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
@@ -910,7 +922,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
         system_dynamic = render_dynamic_prompt(model_id, os_info,
                                                 session.directory,
-                                                max_steps - step);
+                                                max_steps - step, max_steps);
 
         // Re-inject the current todo list (Build and Chat modes) so the model
         // stays anchored to outstanding work. Chat allows todo_write, so it
