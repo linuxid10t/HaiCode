@@ -95,6 +95,11 @@ int main(int argc, char* argv[]) {
         }
         execl("/boot/system/apps/Terminal", "Terminal",
               "/bin/sh", "-c", cmd.c_str(), nullptr);
+        // execl never returns on success; falling through here means the
+        // re-exec failed and stdin is still not a tty — ncurses would
+        // busy-spin on a perpetually-ready EOF stream, so bail out loudly.
+        perror("haicode: failed to re-exec in Terminal");
+        return 1;
     }
 
     // Project directory: first CLI arg, otherwise cwd

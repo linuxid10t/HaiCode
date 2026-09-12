@@ -1742,6 +1742,16 @@ void TuiApp::render_todos_overlay() {
 // ---------------------------------------------------------------------------
 
 void TuiApp::run() {
+    // A non-tty stdin (e.g. /dev/null or an EOF'd pipe) is perpetually
+    // "ready" for select() and wgetch() returns ERR forever — the main loop
+    // would busy-spin at 100% CPU instead of running the UI.
+    if (::isatty(STDIN_FILENO) != 1) {
+        std::fprintf(stderr,
+                     "haicode-tui: stdin is not a terminal "
+                     "(run me inside a Terminal)\n");
+        return;
+    }
+
     init_ncurses();
     subscribe_events();
 
@@ -1757,6 +1767,7 @@ void TuiApp::run() {
     render_all();
 
     // Main event loop
+    int consecutive_err = 0;  // sustained wgetch()==ERR while stdin read-ready
     while (true) {
         fd_set rfds;
         FD_ZERO(&rfds);
@@ -1787,9 +1798,15 @@ void TuiApp::run() {
             ::wtimeout(win_input_, 0);
             int key = ::wgetch(win_input_);
             if (key != ERR) {
+                consecutive_err = 0;
                 // Ctrl+Q — quit
                 if (key == 17) break;
                 handle_key(key);
+            } else if (++consecutive_err > 1000) {
+                // stdin reports ready but yields no key persistently — the
+                // tty went away (closed Terminal, hung-up pty) or the stream
+                // hit EOF. Exit instead of busy-spinning.
+                break;
             }
         }
     }
