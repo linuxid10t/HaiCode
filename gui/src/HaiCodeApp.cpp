@@ -253,6 +253,13 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             _ApplySessionRules();
             break;
         }
+        case MSG_READ_EVERYWHERE: {
+            int32 value = B_CONTROL_OFF;
+            msg->FindInt32("be:value", &value);
+            read_everywhere_on_ = (value == B_CONTROL_ON);
+            _ApplySessionRules();
+            break;
+        }
         case MSG_PERSIST_PM: {
             const char* provider = nullptr;
             const char* model    = nullptr;
@@ -548,5 +555,7 @@ HaiCodeApp::_ApplySessionRules()
         rules.push_back({"write", "*", haicode::PermissionEffect::Allow});
     if (yolo_on_)
         rules.push_back({"*", "*", haicode::PermissionEffect::Allow});
+    if (read_everywhere_on_)
+        rules.push_back({"read", "*", haicode::PermissionEffect::Allow});
     perm_gate_->set_session_rules(rules);
 }

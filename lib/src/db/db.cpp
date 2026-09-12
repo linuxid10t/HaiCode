@@ -353,7 +353,8 @@ void SessionStore::update_mode(const std::string& session_id, const std::string&
 }
 
 void SessionStore::update_permission_flags(const std::string& session_id,
-                                           bool auto_edits, bool yolo) {
+                                           bool auto_edits, bool yolo,
+                                           bool read_everywhere) {
     // Read current model_json, patch the flag fields, write it back.
     sqlite3_stmt* sel = nullptr;
     sqlite3_prepare_v2(db_.handle(),
@@ -375,6 +376,7 @@ void SessionStore::update_permission_flags(const std::string& session_id,
         if (j.is_discarded() || !j.is_object()) j = nlohmann::json::object();
         j["auto_edits"] = auto_edits;
         j["yolo"] = yolo;
+        j["allow_read_everywhere"] = read_everywhere;
         model_json = j.dump();
     } catch (...) {
         // Corrupt JSON — leave the row alone rather than wiping other fields.

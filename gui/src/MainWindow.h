@@ -94,6 +94,7 @@ private:
     void _RefreshTodosFromEngine();
 
     void _ToggleMode();
+    void _ApplyModeCheckboxVisibility(bool reset_hidden);
     void _UpdateStatusStrip();
     void _UpdateMaxContext();
     void _RefreshModeButton();
@@ -146,6 +147,7 @@ private:
     BButton*       compact_btn_     = nullptr;
     BCheckBox*     auto_edits_chk_  = nullptr;
     BCheckBox*     yolo_chk_        = nullptr;
+    BCheckBox*     read_everywhere_chk_ = nullptr;
     BFilePanel*    dir_panel_       = nullptr;
     BFilePanel*    attach_panel_    = nullptr;
     BGroupView*    attach_row_      = nullptr;   // removable attachment chips

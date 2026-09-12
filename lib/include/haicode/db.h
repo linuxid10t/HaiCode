@@ -90,10 +90,12 @@ public:
     // Patch the "mode" field inside the session's model_json blob. No-op if the
     // session does not exist. mode_str should be "build" or "plan".
     void update_mode(const std::string& session_id, const std::string& mode_str);
-    // Patch the "auto_edits" and "yolo" permission-flag fields inside the
-    // session's model_json blob. No-op if the session does not exist.
+    // Patch the "auto_edits", "yolo", and "allow_read_everywhere"
+    // permission-flag fields inside the session's model_json blob. No-op if
+    // the session does not exist.
     void update_permission_flags(const std::string& session_id,
-                                 bool auto_edits, bool yolo);
+                                 bool auto_edits, bool yolo,
+                                 bool read_everywhere);
     // Patch the "id" (model) and "provider_id" fields inside the session's
     // model_json blob. Either string may be empty to leave that field untouched.
     // No-op if the session does not exist.

@@ -231,6 +231,10 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     auto_edits_chk_ = new BCheckBox("auto_edits", "Auto-allow edits",
                                     new BMessage(MSG_AUTO_ALLOW_EDITS));
     yolo_chk_       = new BCheckBox("yolo", "YOLO", new BMessage(MSG_YOLO));
+    read_everywhere_chk_ = new BCheckBox("read_everywhere",
+                                         "Allow Read Everywhere",
+                                         new BMessage(MSG_READ_EVERYWHERE));
+    read_everywhere_chk_->Hide();
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -394,6 +398,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                         .AddGlue()
                         .Add(auto_edits_chk_)
                         .Add(yolo_chk_)
+                        .Add(read_everywhere_chk_)
                     .End()
                     .Add(input_group)
                 .End()
@@ -646,21 +651,27 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_AUTO_ALLOW_EDITS:
         case MSG_YOLO:
-            // Persist both toggle states to the active session's model_json so
+        case MSG_READ_EVERYWHERE:
+            // Persist toggle states to the active session's model_json so
             // they survive session switches and app restart. The toggled value
-            // comes from the message; the other is read from its checkbox.
+            // comes from the message; the others are read from their checkboxes.
             if (!active_session_id_.empty()) {
                 int32 ae = (auto_edits_chk_ ? auto_edits_chk_->Value()
                                             : B_CONTROL_OFF);
                 int32 yo = (yolo_chk_ ? yolo_chk_->Value() : B_CONTROL_OFF);
+                int32 re = (read_everywhere_chk_ ? read_everywhere_chk_->Value()
+                                                 : B_CONTROL_OFF);
                 if (msg->what == MSG_AUTO_ALLOW_EDITS)
                     msg->FindInt32("be:value", &ae);
-                else
+                else if (msg->what == MSG_YOLO)
                     msg->FindInt32("be:value", &yo);
+                else
+                    msg->FindInt32("be:value", &re);
                 store_.update_permission_flags(
                     active_session_id_,
                     ae == B_CONTROL_ON,
-                    yo == B_CONTROL_ON);
+                    yo == B_CONTROL_ON,
+                    re == B_CONTROL_ON);
             }
             be_app->PostMessage(msg);
             break;
@@ -889,6 +900,7 @@ MainWindow::_NewSession()
     // clears always_rules_ and toggle flags via _ApplySessionRules().
     if (auto_edits_chk_) auto_edits_chk_->SetValue(B_CONTROL_OFF);
     if (yolo_chk_)       yolo_chk_->SetValue(B_CONTROL_OFF);
+    if (read_everywhere_chk_) read_everywhere_chk_->SetValue(B_CONTROL_OFF);
     be_app->PostMessage(MSG_NEW_SESSION);
     {
         BMessage m(MSG_AUTO_ALLOW_EDITS);
@@ -897,6 +909,11 @@ MainWindow::_NewSession()
     }
     {
         BMessage m(MSG_YOLO);
+        m.AddInt32("be:value", B_CONTROL_OFF);
+        be_app->PostMessage(&m);
+    }
+    {
+        BMessage m(MSG_READ_EVERYWHERE);
         m.AddInt32("be:value", B_CONTROL_OFF);
         be_app->PostMessage(&m);
     }
@@ -921,6 +938,7 @@ MainWindow::_SelectSession(int idx)
     // Sync toolbar to session's stored provider/model/directory
     bool restore_auto_edits = false;
     bool restore_yolo = false;
+    bool restore_read_everywhere = false;
     auto si = store_.get(active_session_id_);
     if (si) {
         // Restore working directory
@@ -937,6 +955,7 @@ MainWindow::_SelectSession(int idx)
             model_id    = mj.value("id", "");
             restore_auto_edits = mj.value("auto_edits", false);
             restore_yolo       = mj.value("yolo", false);
+            restore_read_everywhere = mj.value("allow_read_everywhere", false);
         } catch (...) {}
 
         if (!provider_id.empty())
@@ -990,6 +1009,8 @@ MainWindow::_SelectSession(int idx)
         restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
     if (yolo_chk_)       yolo_chk_->SetValue(
         restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
+    if (read_everywhere_chk_) read_everywhere_chk_->SetValue(
+        restore_read_everywhere ? B_CONTROL_ON : B_CONTROL_OFF);
     {
         BMessage m(MSG_AUTO_ALLOW_EDITS);
         m.AddInt32("be:value", restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
@@ -1000,6 +1021,12 @@ MainWindow::_SelectSession(int idx)
         m.AddInt32("be:value", restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
         be_app->PostMessage(&m);
     }
+    {
+        BMessage m(MSG_READ_EVERYWHERE);
+        m.AddInt32("be:value", restore_read_everywhere ? B_CONTROL_ON : B_CONTROL_OFF);
+        be_app->PostMessage(&m);
+    }
+    _RefreshModeButton();
 }
 
 void
@@ -1680,6 +1707,7 @@ MainWindow::_ToggleMode()
                 ? haicode::SessionMode::Build
                 : haicode::SessionMode::Plan;
     engine_->set_mode(active_session_id_, next);
+    _ApplyModeCheckboxVisibility(true);
     engine_->inject_message(active_session_id_,
         next == haicode::SessionMode::Plan
             ? haicode::kSwitchedToPlanMessage
@@ -1694,6 +1722,57 @@ MainWindow::_RefreshModeButton()
     if (!mode_btn_ || active_session_id_.empty() || !engine_) return;
     auto m = engine_->get_mode(active_session_id_);
     mode_btn_->SetLabel(m == haicode::SessionMode::Plan ? "Mode: Plan" : "Mode: Build");
+    _ApplyModeCheckboxVisibility(false);
+}
+
+void
+MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
+{
+    if (!auto_edits_chk_ || !yolo_chk_ || !read_everywhere_chk_) return;
+    bool plan = (!active_session_id_.empty() && engine_ &&
+                 engine_->get_mode(active_session_id_) == haicode::SessionMode::Plan);
+    if (plan) {
+        if (reset_hidden) {
+            // Hidden toggles must not stay live behind the Plan-mode UI.
+            auto_edits_chk_->SetValue(B_CONTROL_OFF);
+            yolo_chk_->SetValue(B_CONTROL_OFF);
+            {
+                BMessage m(MSG_AUTO_ALLOW_EDITS);
+                m.AddInt32("be:value", B_CONTROL_OFF);
+                be_app->PostMessage(&m);
+            }
+            {
+                BMessage m(MSG_YOLO);
+                m.AddInt32("be:value", B_CONTROL_OFF);
+                be_app->PostMessage(&m);
+            }
+            if (!active_session_id_.empty())
+                store_.update_permission_flags(
+                    active_session_id_, false, false,
+                    read_everywhere_chk_->Value() == B_CONTROL_ON);
+        }
+        auto_edits_chk_->Hide();
+        yolo_chk_->Hide();
+        read_everywhere_chk_->Show();
+    } else {
+        if (reset_hidden) {
+            read_everywhere_chk_->SetValue(B_CONTROL_OFF);
+            {
+                BMessage m(MSG_READ_EVERYWHERE);
+                m.AddInt32("be:value", B_CONTROL_OFF);
+                be_app->PostMessage(&m);
+            }
+            if (!active_session_id_.empty())
+                store_.update_permission_flags(
+                    active_session_id_,
+                    auto_edits_chk_->Value() == B_CONTROL_ON,
+                    yolo_chk_->Value() == B_CONTROL_ON,
+                    false);
+        }
+        read_everywhere_chk_->Hide();
+        auto_edits_chk_->Show();
+        yolo_chk_->Show();
+    }
 }
 
 void
