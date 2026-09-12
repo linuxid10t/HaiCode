@@ -391,11 +391,12 @@ public:
         // Include usage in stream_options (supported by OpenAI and most compat endpoints)
         body["stream_options"] = { {"include_usage", true} };
 
-        // llama.cpp only populates/uses the KV cache when explicitly asked.
-        // Other OpenAI-compatible flavors (vLLM/Ollama/LM Studio/OpenRouter)
-        // ignore unknown fields, but gate on flavor so we never change their
-        // contract — e.g. OpenAI's endpoint rejects `cache_prompt`.
-        if (flavor_ == ServerFlavor::LlamaCpp)
+        // llama.cpp (and LM Studio's llama.cpp-backed GGUF runtime) only
+        // populate the KV/prefix cache when explicitly asked. LM Studio's
+        // OpenAI-compat layer ignores unknown fields with a log warning, so
+        // this is safe to send; other flavors keep their exact contract
+        // (e.g. OpenAI rejects `cache_prompt`).
+        if (flavor_ == ServerFlavor::LlamaCpp || flavor_ == ServerFlavor::LMStudio)
             body["cache_prompt"] = true;
 
         // Translate messages (system is prepended inside)
