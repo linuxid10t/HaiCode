@@ -111,6 +111,8 @@ no special action is needed.
 
 If no project directory is given, the GUI opens the last-used project from global config.
 
+**Single instance only.** Do not run two HaiCode instances at once (TUI or GUI): both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db`, and concurrent access fails on SQLite database locking. Close one before starting another.
+
 ## Architecture
 
 Three layers:

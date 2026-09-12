@@ -43,6 +43,8 @@ make -C build test_config_permission
 ./build/lib/test_model_context                # context-window parsing for vLLM/OpenRouter/LM Studio/Ollama/llama.cpp
 ```
 
+**Single instance only.** Do not launch a second HaiCode (TUI or GUI) while one is already running — both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db` and concurrent access fails on SQLite database locking. If you need to verify runtime behavior, use the already-running instance; never spawn another copy for testing.
+
 ## Test
 
 | Binary | What it tests |

@@ -208,6 +208,14 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     std::string dir_label = dir_basename(project_dir_);
     dir_btn_ = new BButton("dir_btn", dir_label.c_str(), new BMessage(MSG_CHOOSE_DIR));
 
+    // Slot container that always stays in the toolbar flow. When Chat mode
+    // hides the button, _SetDirBtnVisible() pins this slot's width so the
+    // Provider:/Model:/Mode: fields don't shift left.
+    dir_slot_ = new BGroupView(B_HORIZONTAL, 0);
+    BLayoutBuilder::Group<>(dir_slot_)
+        .Add(dir_btn_)
+    .End();
+
     // Provider selector — populated from config in RebuildProviderMenu().
     provider_menu_ = new BPopUpMenu("Provider");
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
@@ -300,7 +308,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     BGroupView* toolbar_group = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
     BLayoutBuilder::Group<>(toolbar_group)
         .Add(new_session_btn_)
-        .Add(dir_btn_)
+        // Weight 0: a BGroupView has an unlimited max width, so with default
+        // weight it would absorb the toolbar's surplus space and push the
+        // Provider:/Model: fields right. Keep it at its natural (or pinned)
+        // width like the buttons.
+        .Add(dir_slot_, 0.f)
         .Add(provider_field_)
         .Add(model_field_)
         // Weight 0: BMenuField is horizontally stretchy, and a third
@@ -1775,6 +1787,26 @@ MainWindow::_SetWidgetVisible(BView* v, bool& tracked, bool visible)
 }
 
 void
+MainWindow::_SetDirBtnVisible(bool visible)
+{
+    if (!dir_btn_ || !dir_slot_) return;
+    if (dir_btn_visible_ == visible) return;
+    dir_btn_visible_ = visible;
+    if (!visible) {
+        // Pin the slot to the button's last laid-out width so hiding it
+        // leaves an empty gap instead of collapsing the toolbar.
+        float w = dir_btn_->Bounds().Width();
+        if (w <= 0.f) w = dir_btn_->PreferredSize().width;
+        dir_slot_->SetExplicitMinSize(BSize(w, B_SIZE_UNSET));
+        dir_btn_->Hide();
+    } else {
+        // Clear the pin so the slot reflows with label changes.
+        dir_slot_->SetExplicitMinSize(BSize(B_SIZE_UNSET, B_SIZE_UNSET));
+        dir_btn_->Show();
+    }
+}
+
+void
 MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
 {
     if (!auto_edits_chk_ || !yolo_chk_ || !read_everywhere_chk_) return;
@@ -1819,8 +1851,9 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
         _SetWidgetVisible(yolo_chk_, yolo_chk_visible_, false);
         _SetWidgetVisible(read_everywhere_chk_, read_everywhere_chk_visible_, plan);
         // Chat has no local access at all, so the working-directory picker
-        // is meaningless there.
-        _SetWidgetVisible(dir_btn_, dir_btn_visible_, !chat);
+        // is meaningless there. The slot keeps its width so the rest of the
+        // toolbar doesn't shift left.
+        _SetDirBtnVisible(!chat);
     } else {
         if (reset_hidden) {
             read_everywhere_chk_->SetValue(B_CONTROL_OFF);
@@ -1839,7 +1872,7 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
         _SetWidgetVisible(read_everywhere_chk_, read_everywhere_chk_visible_, false);
         _SetWidgetVisible(auto_edits_chk_, auto_edits_chk_visible_, true);
         _SetWidgetVisible(yolo_chk_, yolo_chk_visible_, true);
-        _SetWidgetVisible(dir_btn_, dir_btn_visible_, true);
+        _SetDirBtnVisible(true);
     }
 }
 

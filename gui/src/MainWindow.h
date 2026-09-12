@@ -143,6 +143,7 @@ private:
     BButton*       interrupt_btn_   = nullptr;
     BButton*       new_session_btn_ = nullptr;
     BButton*       dir_btn_         = nullptr;
+    BGroupView*    dir_slot_        = nullptr;   // keeps toolbar flow stable when the button hides
     BPopUpMenu*    mode_menu_       = nullptr;
     BMenuField*    mode_field_      = nullptr;
     BButton*       compact_btn_     = nullptr;
@@ -158,6 +159,9 @@ private:
     bool yolo_chk_visible_            = true;
     bool read_everywhere_chk_visible_ = false;
     void _SetWidgetVisible(BView* v, bool& tracked, bool visible);
+    // Hides/shows dir_btn_ while pinning its slot's width so the rest of the
+    // toolbar (Provider:/Model:/Mode:) never shifts when it disappears.
+    void _SetDirBtnVisible(bool visible);
     BFilePanel*    dir_panel_       = nullptr;
     BFilePanel*    attach_panel_    = nullptr;
     BGroupView*    attach_row_      = nullptr;   // removable attachment chips
