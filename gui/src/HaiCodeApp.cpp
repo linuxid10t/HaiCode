@@ -419,8 +419,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             if (msg->FindString("build_command", &build_command) == B_OK)
                 config_.build_command = build_command ? build_command : "";
             if (msg->FindString("web_search_engine", &ws_engine) == B_OK && ws_engine
-                && (std::string(ws_engine) == "mojeek"
-                    || std::string(ws_engine) == "ddg_lite"
+                && (std::string(ws_engine) == "ddg_lite"
                     || std::string(ws_engine) == "ddg_html"
                     || std::string(ws_engine) == "exa"
                     || std::string(ws_engine) == "zai")) {

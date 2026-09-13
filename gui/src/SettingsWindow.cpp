@@ -399,10 +399,9 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
                                         config_.build_command.c_str(), nullptr);
     build_cmd_field_->SetDivider(label_w);
 
-    bool ws_mojeek  = (config_.web_search_engine != "ddg_lite"
-                       && config_.web_search_engine != "ddg_html"
-                       && config_.web_search_engine != "exa"
-                       && config_.web_search_engine != "zai");
+    bool ws_ddg_lite = (config_.web_search_engine != "ddg_html"
+                        && config_.web_search_engine != "exa"
+                        && config_.web_search_engine != "zai");
 
     // Engine selector: dropdown instead of a radio group. Each item carries
     // the engine id in its message; save reads it from the marked item's
@@ -413,7 +412,6 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     ws_engine_menu_->SetLabelFromMarked(true);
     struct WSEntry { const char* label; const char* value; };
     static const WSEntry kWSEngines[] = {
-        {"Mojeek",          "mojeek"},
         {"DuckDuckGo Lite", "ddg_lite"},
         {"DuckDuckGo HTML", "ddg_html"},
         {"Exa",             "exa"},
@@ -425,7 +423,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
                                    new BMessage(MSG_WS_ENGINE_SELECTED));
         item->Message()->AddString("engine", e.value);
         ws_engine_menu_->AddItem(item);
-        if ((ws_mojeek && std::string(e.value) == "mojeek")
+        if ((ws_ddg_lite && std::string(e.value) == "ddg_lite")
             || std::string(e.value) == config_.web_search_engine)
             ws_marked = item;
     }
@@ -468,7 +466,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
 
     // Initialize per-engine stored key + visibility for the marked engine.
     ws_current_engine_ = _MarkedWSEngine();
-    if (ws_current_engine_.empty()) ws_current_engine_ = "mojeek";
+    if (ws_current_engine_.empty()) ws_current_engine_ = "ddg_lite";
     _RememberKeyForEngine(ws_current_engine_.c_str());
     _UpdateKeyFieldVisibility();
 

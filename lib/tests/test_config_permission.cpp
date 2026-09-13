@@ -242,7 +242,7 @@ static bool merge_providers_merged() {
 
 static bool merge_web_search_overlay() {
     haicode::AppConfig base, overlay;
-    base.web_search_engine      = "mojeek";
+    base.web_search_engine      = "exa";
     base.web_search_max_results = 5;
     base.web_search_api_keys["exa"] = "base-exa";
     base.web_search_api_keys["zai"] = "base-zai";
@@ -262,7 +262,7 @@ static bool merge_web_search_overlay() {
 static bool merge_web_search_default_overlay_preserves_base() {
     // Regression: a default-constructed overlay (project config file absent)
     // must not clobber the base engine. The struct default used to be
-    // "mojeek", which wiped the global config's engine on every load.
+    // non-empty, which wiped the global config's engine on every load.
     haicode::AppConfig base, overlay;
     base.web_search_engine = "exa";
     haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);

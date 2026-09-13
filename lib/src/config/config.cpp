@@ -232,7 +232,7 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
         if (j.contains("autoname_llm_refine") && j["autoname_llm_refine"].is_boolean())
             cfg.autoname_llm_refine = j["autoname_llm_refine"].get<bool>();
 
-        // web_search tool config: {"web_search": {"engine": "mojeek", "max_results": 5}}
+        // web_search tool config: {"web_search": {"engine": "ddg_lite", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
             if (ws.contains("engine") && ws["engine"].is_string())

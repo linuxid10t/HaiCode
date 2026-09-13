@@ -69,12 +69,10 @@ struct AppConfig {
     // top-level "pricing" object in config.json.
     std::map<std::string, ModelPricing> pricing;
     // web_search tool config. engine = "" (unset; the runtime falls back to
-    // "mojeek"), or one of "mojeek", "ddg_lite", "ddg_html", "exa", "zai".
+    // "ddg_lite"), or one of "ddg_lite", "ddg_html", "exa", "zai".
     // Must default to empty: merge() treats any non-empty overlay value as
     // authoritative, so a non-empty default would clobber the global config
     // whenever the project config file is absent.
-    // Mojeek is the effective default because DuckDuckGo's lite/html
-    // endpoints now serve a CAPTCHA "anomaly" page to most non-browser clients.
     // Exa and Z.ai are API-key services; keys resolve at execute time from
     // web_search_api_keys (config) with an $EXA_API_KEY / $ZAI_API_KEY fallback.
     std::string web_search_engine;

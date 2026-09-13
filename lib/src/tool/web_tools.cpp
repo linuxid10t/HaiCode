@@ -413,6 +413,9 @@ static std::string extract_query_param(const std::string& url, const std::string
 // Extract the first `max_results` results from a DDG results page.
 // anchor_class: "result-link" (lite) or "result__a" (html).
 // snippet_class: "result-snippet" (lite) or "result__snippet" (html).
+// snippet_close_tag: closing tag of the element holding the snippet text —
+// "</td>" for lite, "</a>" for html. Snippets contain inline <b> tags around
+// query terms, so we must read to the container's close, not the next '<'.
 struct SearchResult { std::string title; std::string url; std::string snippet; };
 
 // Resolve an API-key-based search engine's key: config wins, then env.
@@ -478,32 +481,43 @@ static std::vector<SearchResult> parse_zai_results(const nlohmann::json& j,
     return out;
 }
 
+// DDG serves class attributes with either " or ' depending on page variant;
+// return the earliest occurrence of class="<cls>" in either style at/after start.
+static size_t find_class_attr(const std::string& lower, size_t start, const std::string& cls) {
+    size_t dq = find_ci(lower, start, "class=\"" + cls + "\"");
+    size_t sq = find_ci(lower, start, "class='" + cls + "'");
+    if (dq == std::string::npos) return sq;
+    if (sq == std::string::npos) return dq;
+    return std::min(dq, sq);
+}
+
 static std::vector<SearchResult> parse_ddg_results(const std::string& html,
                                                     const std::string& anchor_class,
                                                     const std::string& snippet_class,
+                                                    const std::string& snippet_close_tag,
                                                     int max_results) {
     std::vector<SearchResult> out;
     if (max_results <= 0) return out;
 
     std::string lower = to_lower(html);
-    std::string anchor_needle = "class=\"" + anchor_class + "\"";
-    std::string snippet_needle = "class=\"" + snippet_class + "\"";
 
     size_t cursor = 0;
     while ((int)out.size() < max_results) {
-        size_t anchor = find_ci(lower, cursor, anchor_needle);
+        size_t anchor = find_class_attr(lower, cursor, anchor_class);
         if (anchor == std::string::npos) break;
 
         // Backtrack to find the opening '<' of this anchor so we can grab href.
         size_t lt = lower.rfind('<', anchor);
-        if (lt == std::string::npos) { cursor = anchor + anchor_needle.size(); continue; }
+        if (lt == std::string::npos) { cursor = anchor + 6; continue; }
 
         // Find the closing '>' of the anchor start tag.
         size_t tag_end = lower.find('>', anchor);
         if (tag_end == std::string::npos) break;
 
-        // Within the start tag, look for href="..."
+        // Within the start tag, look for href="..." (normalize ' to " first —
+        // DDG Lite serves single-quoted attributes).
         std::string start_tag = html.substr(lt, tag_end - lt + 1);
+        for (char& c : start_tag) if (c == '\'') c = '"';
         std::string href;
         {
             size_t hp = find_ci(start_tag, 0, "href=\"");
@@ -536,14 +550,18 @@ static std::vector<SearchResult> parse_ddg_results(const std::string& html,
         };
         trim(title);
 
-        // Snippet: find the next occurrence of snippet_needle after this anchor.
+        // Snippet: find the next occurrence of the snippet class after this anchor.
         std::string snippet;
-        size_t snip = find_ci(lower, title_end == std::string::npos ? tag_end : title_end, snippet_needle);
+        size_t snip = find_class_attr(lower, title_end == std::string::npos ? tag_end : title_end, snippet_class);
         if (snip != std::string::npos) {
             size_t snip_tag_end = lower.find('>', snip);
             if (snip_tag_end != std::string::npos) {
                 size_t snip_start = snip_tag_end + 1;
-                size_t snip_close = lower.find('<', snip_start);
+                // Read to the container's closing tag — snippets contain inline
+                // <b> tags around query terms, so "next '<'" would truncate.
+                size_t snip_close = find_ci(lower, snip_start, snippet_close_tag);
+                if (snip_close == std::string::npos)
+                    snip_close = lower.find('<', snip_start);
                 if (snip_close != std::string::npos) {
                     std::string snip_html = html.substr(snip_start, snip_close - snip_start);
                     // The snippet may contain inline tags (<b>, <em>) — strip them.
@@ -563,87 +581,6 @@ static std::vector<SearchResult> parse_ddg_results(const std::string& html,
     return out;
 }
 
-// Parse Mojeek's results page. Each result is an `<li class="rN">` containing
-// `<a class="title" href="URL">TITLE</a>` and a `<p class="s">SNIPPET</p>`.
-// URLs are direct (no redirect wrapper), so we take href verbatim.
-static std::vector<SearchResult> parse_mojeek_results(const std::string& html,
-                                                      int max_results) {
-    std::vector<SearchResult> out;
-    if (max_results <= 0) return out;
-
-    std::string lower = to_lower(html);
-    const std::string title_needle   = "class=\"title\"";
-    const std::string snippet_needle = "class=\"s\"";
-
-    auto trim = [](std::string& t) {
-        size_t a = t.find_first_not_of(" \t\r\n");
-        size_t b = t.find_last_not_of(" \t\r\n");
-        if (a == std::string::npos) { t.clear(); return; }
-        t = t.substr(a, b - a + 1);
-    };
-
-    size_t cursor = 0;
-    while ((int)out.size() < max_results) {
-        size_t anchor = find_ci(lower, cursor, title_needle);
-        if (anchor == std::string::npos) break;
-
-        // Backtrack to opening '<' so we can read the start tag (for href).
-        size_t lt = lower.rfind('<', anchor);
-        if (lt == std::string::npos) { cursor = anchor + title_needle.size(); continue; }
-
-        size_t tag_end = lower.find('>', anchor);
-        if (tag_end == std::string::npos) break;
-
-        std::string start_tag = html.substr(lt, tag_end - lt + 1);
-        std::string href;
-        {
-            size_t hp = find_ci(start_tag, 0, "href=\"");
-            if (hp != std::string::npos) {
-                hp += 6;
-                size_t quote = start_tag.find('"', hp);
-                if (quote != std::string::npos)
-                    href = start_tag.substr(hp, quote - hp);
-            }
-        }
-
-        // Title text sits between the opening tag's '>' and the next '<'.
-        size_t title_start = tag_end + 1;
-        size_t title_end = lower.find('<', title_start);
-        std::string title;
-        if (title_end != std::string::npos) {
-            title = decode_html_entities(html.substr(title_start, title_end - title_start));
-            trim(title);
-        }
-
-        // Snippet: first <p class="s"> after the title. Read to </p> (not just
-        // the next '<', since Mojeek bolds query terms with <strong>).
-        std::string snippet;
-        size_t search_from = (title_end == std::string::npos) ? tag_end : title_end;
-        size_t snip = find_ci(lower, search_from, snippet_needle);
-        if (snip != std::string::npos) {
-            size_t snip_tag_end = lower.find('>', snip);
-            if (snip_tag_end != std::string::npos) {
-                size_t snip_start = snip_tag_end + 1;
-                size_t snip_close = find_ci(lower, snip_start, "</p>");
-                if (snip_close == std::string::npos)
-                    snip_close = lower.find('<', snip_start);
-                if (snip_close != std::string::npos) {
-                    snippet = strip_remaining_tags(html.substr(snip_start, snip_close - snip_start));
-                    snippet = decode_html_entities(snippet);
-                    trim(snippet);
-                }
-            }
-        }
-
-        if (!href.empty() || !title.empty()) {
-            out.push_back({ std::move(title), std::move(href), std::move(snippet) });
-        }
-
-        cursor = (title_end == std::string::npos) ? lower.size() : title_end + 1;
-    }
-    return out;
-}
-
 // ---------------------------------------------------------------------------
 // WebSearchTool
 // ---------------------------------------------------------------------------
@@ -652,10 +589,10 @@ class WebSearchTool : public Tool {
 public:
     std::string name() const override { return "web_search"; }
     std::string description() const override {
-        return "Search the web (Mojeek by default; DuckDuckGo, Exa, and Z.ai "
-               "optional via config; Exa/Z.ai need an API key) and return ranked "
-               "results. Use this FIRST when researching — it's cheap. Read the "
-               "snippets before calling web_extract on any URL.";
+        return "Search the web (DuckDuckGo Lite by default; DuckDuckGo HTML, "
+               "Exa, and Z.ai optional via config; Exa/Z.ai need an API key) "
+               "and return ranked results. Use this FIRST when researching — "
+               "it's cheap. Read the snippets before calling web_extract on any URL.";
     }
     nlohmann::json input_schema() const override {
         return {
@@ -684,13 +621,13 @@ public:
         }
         if (max_results > 10) max_results = 10;
 
-        // Engine: read from config if available; default mojeek.
-        std::string engine = "mojeek";
+        // Engine: read from config if available; default ddg_lite.
+        std::string engine = "ddg_lite";
         if (ctx.config && !ctx.config->web_search_engine.empty())
             engine = ctx.config->web_search_engine;
-        if (engine != "mojeek" && engine != "ddg_lite" && engine != "ddg_html"
+        if (engine != "ddg_lite" && engine != "ddg_html"
             && engine != "exa" && engine != "zai")
-            engine = "mojeek";
+            engine = "ddg_lite";
 
         // API-key engines (exa, zai) resolve their key now so a missing key
         // fails before any network round-trip.
@@ -706,17 +643,19 @@ public:
         }
 
         std::string url;
-        std::string anchor_class, snippet_class;
+        std::string anchor_class, snippet_class, snippet_close_tag;
         std::vector<SearchResult> results;
         if (engine == "ddg_html") {
             url = "https://html.duckduckgo.com/html/?q=" + url_encode(query);
             anchor_class  = "result__a";
             snippet_class = "result__snippet";
+            snippet_close_tag = "</a>";
         } else if (engine == "ddg_lite") {
             url = "https://lite.duckduckgo.com/lite/?q=" + url_encode(query) + "&kl=us-en";
             anchor_class  = "result-link";
             snippet_class = "result-snippet";
-        }  // mojeek: URL built below.
+            snippet_close_tag = "</td>";
+        }
 
         std::map<std::string, std::string> headers = {
             {"User-Agent", kBrowserUA},
@@ -725,10 +664,7 @@ public:
 
         std::string body;
         try {
-            if (engine == "mojeek") {
-                std::string murl = "https://www.mojeek.com/search?q=" + url_encode(query);
-                body = http_.get(murl, headers, 20L);
-            } else if (engine == "exa" || engine == "zai") {
+            if (engine == "exa" || engine == "zai") {
                 std::map<std::string, std::string> api_headers = {
                     {"Content-Type", "application/json"},
                 };
@@ -782,8 +718,7 @@ public:
             // JSON API answered 200 but with nothing usable.
             return {true, "(no results — empty response from search engine)", ""};
         }
-        if (body.empty() && (engine == "mojeek" || engine == "ddg_lite"
-                             || engine == "ddg_html"))
+        if (body.empty() && (engine == "ddg_lite" || engine == "ddg_html"))
             return {true, "(no results — empty response from search engine)", ""};
 
         // DuckDuckGo now serves an "anomaly" CAPTCHA page (HTTP 202) to many
@@ -799,12 +734,9 @@ public:
             }
         }
 
-        if (results.empty() && (engine == "mojeek" || engine == "ddg_lite"
-                                || engine == "ddg_html")) {
-            results = (engine == "mojeek")
-                ? parse_mojeek_results(body, max_results)
-                : parse_ddg_results(body, anchor_class, snippet_class, max_results);
-        }
+        if (results.empty() && (engine == "ddg_lite" || engine == "ddg_html"))
+            results = parse_ddg_results(body, anchor_class, snippet_class,
+                                        snippet_close_tag, max_results);
 
         if (results.empty())
             return {true, "(no results)", ""};
