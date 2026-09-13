@@ -714,6 +714,9 @@ public:
         } catch (const std::exception& e) {
             return {false, "", std::string("web_search fetch failed: ") + e.what()};
         }
+        // Raw response bytes are not guaranteed to be UTF-8 — sanitize before
+        // parsing or embedding in JSON output.
+        body = util::sanitize_utf8(body);
         if (results.empty() && body.empty() && (engine == "exa" || engine == "zai")) {
             // JSON API answered 200 but with nothing usable.
             return {true, "(no results — empty response from search engine)", ""};
@@ -730,7 +733,7 @@ public:
                 lower.find("bots use duckduckgo") != std::string::npos) {
                 return {false, "",
                     "web_search: DuckDuckGo returned a CAPTCHA challenge page. "
-                    "Switch engine to 'mojeek' in config (web_search.engine) and retry."};
+                    "Retry later."};
             }
         }
 
@@ -818,6 +821,9 @@ public:
         }
 
         std::string text = strip_html(body);
+        // Fetched pages are not guaranteed to be UTF-8 (Latin-1, stray bytes) —
+        // sanitize so the JSON dump below can't throw on invalid sequences.
+        text = util::sanitize_utf8(text);
         if (text.empty()) {
             nlohmann::json err = {{"url", url},
                                   {"error", "no extractable content (paywall, JS-rendered page, or non-article URL)"}};

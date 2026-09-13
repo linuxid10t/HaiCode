@@ -1,4 +1,5 @@
 #include <haicode/tool.h>
+#include <haicode/util.h>
 #include <fnmatch.h>
 #include <set>
 #include <string>
@@ -154,6 +155,28 @@ std::shared_ptr<Tool> ToolRegistry::get(const std::string& name) const {
 }
 
 ToolResult ToolRegistry::execute(const std::string& name,
+                                  const nlohmann::json& input,
+                                  const ToolContext& ctx,
+                                  PermissionGate& gate) {
+    ToolResult r;
+    try {
+        r = execute_impl(name, input, ctx, gate);
+    } catch (const std::exception& e) {
+        r.success = false;
+        r.error   = "tool '" + name + "' failed: " + e.what();
+    } catch (...) {
+        r.success = false;
+        r.error   = "tool '" + name + "' failed with an unknown exception";
+    }
+    // Tool output is external content (web pages, command output) and may
+    // contain invalid UTF-8 — sanitize so downstream JSON serialization can't
+    // throw.
+    if (!r.output.empty()) r.output = util::sanitize_utf8(r.output);
+    if (!r.error.empty())  r.error  = util::sanitize_utf8(r.error);
+    return r;
+}
+
+ToolResult ToolRegistry::execute_impl(const std::string& name,
                                   const nlohmann::json& input,
                                   const ToolContext& ctx,
                                   PermissionGate& gate) {

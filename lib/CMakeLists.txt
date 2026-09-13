@@ -63,3 +63,6 @@ target_link_libraries(test_openai_translate haicode)
 
 add_executable(test_screenshot tests/test_screenshot.cpp)
 target_link_libraries(test_screenshot haicode)
+
+add_executable(test_tool_safety tests/test_tool_safety.cpp)
+target_link_libraries(test_tool_safety haicode)

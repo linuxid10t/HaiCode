@@ -59,6 +59,53 @@ std::string base64_encode(const std::string& raw) {
     return out;
 }
 
+std::string sanitize_utf8(const std::string& s) {
+    static const char kReplacement[] = "\xEF\xBF\xBD"; // U+FFFD
+    std::string out;
+    out.reserve(s.size());
+    size_t i = 0, n = s.size();
+    while (i < n) {
+        uint8_t b = (uint8_t)s[i];
+        if (b < 0x80) { // ASCII
+            out += (char)b;
+            ++i;
+            continue;
+        }
+        // Determine expected sequence length from the leading byte.
+        int len = 0;
+        uint32_t cp = 0;
+        if ((b & 0xE0) == 0xC0)      { len = 2; cp = b & 0x1F; }
+        else if ((b & 0xF0) == 0xE0) { len = 3; cp = b & 0x0F; }
+        else if ((b & 0xF8) == 0xF0) { len = 4; cp = b & 0x07; }
+        // Stray continuation byte or invalid leading byte (C0/C1 overlong,
+        // F5-FF): replace this one byte and rescan.
+        if (len == 0 || i + len > n) {
+            out += kReplacement;
+            ++i;
+            continue;
+        }
+        bool ok = true;
+        for (int k = 1; k < len; ++k) {
+            uint8_t c = (uint8_t)s[i + k];
+            if ((c & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (c & 0x3F);
+        }
+        // Reject overlong encodings, UTF-16 surrogates, and out-of-range.
+        if (ok && len == 2 && cp < 0x80) ok = false;
+        if (ok && len == 3 && cp < 0x800) ok = false;
+        if (ok && len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) ok = false;
+        if (ok && cp >= 0xD800 && cp <= 0xDFFF) ok = false; // UTF-16 surrogates
+        if (!ok) {
+            out += kReplacement;
+            ++i; // rescan from the next byte — may start a valid sequence
+            continue;
+        }
+        out.append(s, i, len);
+        i += len;
+    }
+    return out;
+}
+
 } // namespace util
 
 // ---- HttpClient ----

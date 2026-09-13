@@ -17,6 +17,12 @@ int64_t now_ms();
 // Base64-encode raw bytes (standard alphabet with padding).
 std::string base64_encode(const std::string& raw);
 
+// Return a copy of s that is guaranteed to be valid UTF-8: every invalid or
+// truncated byte sequence is replaced with U+FFFD. Valid input passes through
+// unchanged. Used on external content (web pages, command output) before it
+// is embedded in JSON — nlohmann's strict serializer throws otherwise.
+std::string sanitize_utf8(const std::string& s);
+
 } // namespace util
 
 // libcurl-based HTTP client with SSE support

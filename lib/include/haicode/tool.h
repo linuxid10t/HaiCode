@@ -78,10 +78,15 @@ public:
     void register_tool(std::shared_ptr<Tool> tool);
     std::vector<ToolDefinition> definitions() const;
     std::shared_ptr<Tool> get(const std::string& name) const;
+    // Executes a tool, converting any exception thrown by the tool into a
+    // failed ToolResult and sanitizing output/error to valid UTF-8 — so a
+    // misbehaving tool can never crash the engine.
     ToolResult execute(const std::string& name, const nlohmann::json& input,
                        const ToolContext& ctx, PermissionGate& gate);
 
 private:
+    ToolResult execute_impl(const std::string& name, const nlohmann::json& input,
+                            const ToolContext& ctx, PermissionGate& gate);
     std::map<std::string, std::shared_ptr<Tool>> tools_;
 };
 
