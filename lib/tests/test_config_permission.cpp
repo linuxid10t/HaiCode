@@ -450,12 +450,11 @@ static bool registry_unknown_tool() {
 }
 
 // Gate that denies everything: deny rules plus a deny-callback fallback.
+// glob/grep report the "read" action, so the read rule covers them.
 static haicode::PermissionGate make_deny_all_gate() {
     haicode::PermissionGate gate;
     gate.set_rules({
         {"read", "*", haicode::PermissionEffect::Deny},
-        {"grep", "*", haicode::PermissionEffect::Deny},
-        {"glob", "*", haicode::PermissionEffect::Deny},
     });
     gate.set_ask_callback([](const std::string&, const std::string&,
                               const nlohmann::json&) {
@@ -550,6 +549,41 @@ static bool registry_read_outside_still_denied() {
     return true;
 }
 
+static bool registry_read_everywhere_allows_glob_and_grep_outside_workdir() {
+    // "Allow Read Everywhere" = one session rule {"read","*",Allow}. glob and
+    // grep report the "read" action, so it must cover them outside the tree.
+    // The ask callback denies, so a tool still reporting "glob"/"grep" fails.
+    const std::string wd = "/tmp/tfc_re_wd";
+    const std::string outside = "/tmp/tfc_re_outside.txt";
+    ::mkdir(wd.c_str(), 0755);
+    write_file(outside, "needle\n");
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+
+    haicode::PermissionGate gate;
+    gate.set_session_rules({{"read", "*", haicode::PermissionEffect::Allow}});
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                              const nlohmann::json&) {
+        return haicode::PermissionEffect::Deny;
+    });
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = wd;
+    auto g = reg.execute("glob", {{"pattern", outside}}, ctx, gate);
+    CHECK(g.success, "read-everywhere should allow absolute glob outside workdir");
+    CHECK(!g.denied, "denied flag should not be set for read-everywhere glob");
+
+    auto s = reg.execute("grep", {{"pattern", "needle"}, {"path", outside}}, ctx, gate);
+    CHECK(s.success, "read-everywhere should allow grep outside workdir");
+    CHECK(!s.denied, "denied flag should not be set for read-everywhere grep");
+
+    std::remove(outside.c_str());
+    ::rmdir(wd.c_str());
+    std::cout << "[OK] read-everywhere allows glob/grep outside workdir\n";
+    return true;
+}
+
 // ============================================================
 
 int main() {
@@ -597,6 +631,7 @@ int main() {
     ok &= registry_read_system_headers_bypasses_gate();
     ok &= registry_glob_system_headers_bypasses_gate();
     ok &= registry_read_outside_still_denied();
+    ok &= registry_read_everywhere_allows_glob_and_grep_outside_workdir();
     ok &= registry_write_denied_sets_flag();
     ok &= registry_unknown_tool();
 

@@ -474,6 +474,9 @@ public:
             {"required", nlohmann::json::array({"pattern"})}
         };
     }
+    // Report the "read" action (not "glob") so the "Allow Read Everywhere"
+    // session rule covers out-of-tree patterns.
+    std::string required_permission() const override { return "read"; }
     std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
         (void)ctx;
         return input.value("pattern", "");
@@ -541,6 +544,9 @@ public:
             {"required", nlohmann::json::array({"pattern"})}
         };
     }
+    // Report the "read" action (not "grep") so the "Allow Read Everywhere"
+    // session rule covers out-of-tree paths.
+    std::string required_permission() const override { return "read"; }
     // Resource is the search path (where grep scans), not the regex — that's
     // what users typically want to scope with permission rules.
     std::string resource(const nlohmann::json& input, const ToolContext& ctx) const override {
