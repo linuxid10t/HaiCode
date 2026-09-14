@@ -420,6 +420,27 @@ json_w_long(json_writer *w, long v)
     return 0;
 }
 
+/*
+ * Shortest representation that still reads back as the same double.
+ *
+ * %.17g always round-trips but renders 0.95 as 0.94999999999999996, which is
+ * both ugly in a request and ~15 wasted bytes per number. C89 has no
+ * shortest-form conversion, so try increasing precision and stop at the first
+ * one that survives a strtod round trip.
+ */
+static void
+w_fmt_double(char *out, double v)
+{
+    int prec;
+
+    for (prec = 15; prec < 17; prec++) {
+        sprintf(out, "%.*g", prec, v);
+        if (strtod(out, NULL) == v)
+            return;
+    }
+    sprintf(out, "%.17g", v);
+}
+
 int
 json_w_double(json_writer *w, double v)
 {
@@ -430,7 +451,7 @@ json_w_double(json_writer *w, double v)
     if (v != v || v > DBL_MAX || v < -DBL_MAX) {
         if (w_emit(w, "null", 4) != 0) return w->err;
     } else {
-        sprintf(tmp, "%.17g", v);
+        w_fmt_double(tmp, v);
         if (w_emit_s(w, tmp) != 0) return w->err;
     }
     w_post(w);

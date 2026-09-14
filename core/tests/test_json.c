@@ -132,6 +132,51 @@ test_writer_bad_utf8(void)
     buf_free(&out);
 }
 
+/* Numbers must be compact *and* exact: %.17g is exact but renders 0.95 as
+ * 0.94999999999999996, which costs bytes on every request. */
+static void
+test_writer_doubles(void)
+{
+    static const double vals[] = {
+        0.95, 0.1, 1.0, 0.0, -2.5, 1e-7, 1.5e300, 0.3333333333333333
+    };
+    buf         out;
+    json_writer w;
+    json_arena *a;
+    json_value *v;
+    int         i;
+
+    for (i = 0; i < 8; i++) {
+        buf_init(&out);
+        json_w_init(&w, json_buf_sink, &out);
+        json_w_double(&w, vals[i]);
+        a = json_arena_new();
+        v = json_parse(a, out.data, out.len);
+        OK(v != NULL && json_as_num(v, -1.0) == vals[i],
+           "double round-trips exactly");
+        json_arena_free(a);
+        buf_free(&out);
+    }
+
+    buf_init(&out);
+    json_w_init(&w, json_buf_sink, &out);
+    json_w_double(&w, 0.95);
+    EQSTR(buf_cstr(&out), "0.95", "0.95 renders compactly");
+    buf_free(&out);
+
+    buf_init(&out);
+    json_w_init(&w, json_buf_sink, &out);
+    json_w_double(&w, 1.0 / 0.0 * 0.0);   /* NaN */
+    EQSTR(buf_cstr(&out), "null", "NaN becomes null (JSON has no NaN)");
+    buf_free(&out);
+
+    buf_init(&out);
+    json_w_init(&w, json_buf_sink, &out);
+    json_w_double(&w, 1e308 * 10.0);      /* +inf */
+    EQSTR(buf_cstr(&out), "null", "infinity becomes null");
+    buf_free(&out);
+}
+
 static void
 test_writer_misuse(void)
 {
@@ -303,6 +348,7 @@ main(void)
     test_writer_count_matches();
     test_writer_escapes();
     test_writer_bad_utf8();
+    test_writer_doubles();
     test_writer_misuse();
     test_parse_basic();
     test_parse_strings();

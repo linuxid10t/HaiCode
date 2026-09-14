@@ -14,6 +14,7 @@
 #include "../http.h"
 #include "../sse.h"
 #include "../json.h"
+#include "../provider.h"
 #include "../buf.h"
 #include "tap.h"
 
@@ -85,12 +86,9 @@ psock_connect(psock *s, const char *host, const char *port)
 /* ---------------------------------------------------------------------- */
 
 typedef struct {
-    buf text;
-    buf tool_args;
-    int events;
-    int done;
-    int bad_json;
-} state;
+    buf live;      /* text as delivered by the streaming callback */
+    int errors;
+} live_sink;
 
 static void
 on_body(void *ctx, const char *p, size_t n)
@@ -99,72 +97,77 @@ on_body(void *ctx, const char *p, size_t n)
 }
 
 static void
-on_event(void *ctx, const char *event, const char *data, size_t dlen)
+live_text(void *ctx, const char *p, size_t n)
 {
-    state      *st = (state *)ctx;
-    json_arena *a;
-    json_value *root;
-    json_value *delta;
-    json_value *tcalls;
-    const char *frag;
+    buf_append(&((live_sink *)ctx)->live, p, n);
+}
 
-    (void)event;
-    st->events++;
+static void
+live_error(void *ctx, const char *msg)
+{
+    ((live_sink *)ctx)->errors++;
+    fprintf(stderr, "  provider error: %s\n", msg);
+}
 
-    if (dlen == 6 && memcmp(data, "[DONE]", 6) == 0) {
-        st->done = 1;
-        return;
-    }
+/* Emits the request body. Called twice: once to measure, once to send. */
+static void
+emit_body(json_writer *w, prov_req *r)
+{
+    prov_write_request(w, r);
+}
 
-    a = json_arena_new();
-    root = json_parse(a, data, dlen);
-    if (root == NULL) {
-        st->bad_json++;
-        fprintf(stderr, "  unparseable event: %.*s\n", (int)dlen, data);
-        json_arena_free(a);
-        return;
-    }
+/* ------------------------------------------------ message source --------- */
 
-    delta = json_path(json_at(json_get(root, "choices"), 0), "delta");
+typedef struct {
+    const prov_msg *msgs;
+    size_t          n;
+    size_t          pos;
+} src;
 
-    frag = json_as_str(json_get(delta, "content"), NULL);
-    if (frag != NULL)
-        buf_puts(&st->text, frag);
+static void src_rewind(void *c) { ((src *)c)->pos = 0; }
 
-    /* Tool-call arguments arrive as string fragments that must be concatenated
-     * before they parse as JSON -- the case that breaks when SSE state is not
-     * carried across reads. */
-    tcalls = json_get(delta, "tool_calls");
-    if (tcalls != NULL) {
-        const char *args = json_as_str(
-            json_path(json_at(tcalls, 0), "function.arguments"), NULL);
-        if (args != NULL)
-            buf_puts(&st->tool_args, args);
-    }
-
-    json_arena_free(a);
+static int
+src_next(void *c, prov_msg *out)
+{
+    src *a = (src *)c;
+    if (a->pos >= a->n)
+        return 0;
+    *out = a->msgs[a->pos++];
+    return 1;
 }
 
 int
 main(int argc, char **argv)
 {
+    static const prov_msg msgs[] = {
+        { PROV_ROLE_SYSTEM, "be terse",              8, NULL, 0, NULL },
+        { PROV_ROLE_USER,   "hi \303\251 \342\226\266", 10, NULL, 0, NULL }
+    };
+    static const prov_tool tools[] = {
+        { "read", "Read a file",
+          "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}" }
+    };
+
     psock          s;
     http_transport t;
     http_req       req;
     http_resp      resp;
     sse_parser     p;
-    state          st;
+    prov_stream    st;
+    prov_callbacks cb;
+    live_sink      ls;
+    src            msrc;
+    prov_req       r;
     json_writer    w;
-    long           len = 0;
+    long           len;
     char           hostport[128];
     char           ctype[64];
-    int            i;
+    int            rc;
 
     if (argc < 3) {
         printf("test_live: skipped (no server given)\n");
         return 0;
     }
-
     if (psock_connect(&s, argv[1], argv[2]) != 0) {
         printf("test_live: cannot connect to %s:%s\n", argv[1], argv[2]);
         return 1;
@@ -175,78 +178,84 @@ main(int argc, char **argv)
     t.xsend = psock_send;
     t.xrecv = psock_recv;
 
-    /* Pass 1: measure. */
-    json_w_init(&w, json_count_sink, &len);
-    json_w_obj_open(&w);
-      json_w_key(&w, "model");     json_w_str(&w, "local");
-      json_w_key(&w, "stream");    json_w_bool(&w, 1);
-      json_w_key(&w, "messages");
-      json_w_arr_open(&w);
-        json_w_obj_open(&w);
-          json_w_key(&w, "role");    json_w_str(&w, "user");
-          json_w_key(&w, "content"); json_w_str(&w, "hi \303\251 \342\226\266");
-        json_w_obj_close(&w);
-      json_w_arr_close(&w);
-    json_w_obj_close(&w);
-    OK(json_w_finish(&w) == 0, "counting pass clean");
+    msrc.msgs = msgs;
+    msrc.n    = 2;
+    msrc.pos  = 0;
 
-    /* Pass 2: emit onto the socket. */
+    prov_req_init(&r, "local");
+    r.msgs.ctx    = &msrc;
+    r.msgs.rewind = src_rewind;
+    r.msgs.next   = src_next;
+    r.tools       = tools;
+    r.ntools      = 1;
+    r.max_tokens  = 256;
+
+    /* Pass 1: measure. Pass 2: emit onto the socket. */
+    len = prov_request_length(&r);
+    OK(len > 0, "request length measured");
+
     http_req_begin(&req, t, "POST", "/v1/chat/completions", hostport);
     http_req_header(&req, "Content-Type", "application/json");
     http_req_body_begin(&req, len);
     json_w_init(&w, http_req_body_write, &req);
-    json_w_obj_open(&w);
-      json_w_key(&w, "model");     json_w_str(&w, "local");
-      json_w_key(&w, "stream");    json_w_bool(&w, 1);
-      json_w_key(&w, "messages");
-      json_w_arr_open(&w);
-        json_w_obj_open(&w);
-          json_w_key(&w, "role");    json_w_str(&w, "user");
-          json_w_key(&w, "content"); json_w_str(&w, "hi \303\251 \342\226\266");
-        json_w_obj_close(&w);
-      json_w_arr_close(&w);
-    json_w_obj_close(&w);
+    emit_body(&w, &r);
     http_req_body_end(&req);
     OK(json_w_finish(&w) == 0, "streamed emit clean");
     OK(req.err == 0, "request sent without error");
 
-    buf_init(&st.text);
-    buf_init(&st.tool_args);
-    st.events = 0;
-    st.done = 0;
-    st.bad_json = 0;
+    buf_init(&ls.live);
+    ls.errors = 0;
+    cb.ctx          = &ls;
+    cb.on_text      = live_text;
+    cb.on_reasoning = NULL;
+    cb.on_error     = live_error;
 
-    sse_init(&p, on_event, &st);
+    prov_stream_init(&st, &cb);
+    sse_init(&p, prov_on_sse, &st);
     http_resp_init(&resp, on_body, &p);
 
-    i = http_pump(&resp, t);
+    rc = http_pump(&resp, t);
     sse_finish(&p);
 
-    EQLONG(i, 0, "pump completed");
+    EQLONG(rc, 0, "pump completed");
     EQLONG(resp.status, 200, "HTTP 200");
     OK(http_resp_header(&resp, "content-type", ctype, sizeof(ctype)) == 1,
        "content-type present");
     OK(strstr(ctype, "text/event-stream") != NULL, "server streamed SSE");
-    EQLONG(st.bad_json, 0, "every event parsed as JSON");
+    EQLONG(st.bad_events, 0, "every event parsed");
+    EQLONG(ls.errors, 0, "no provider errors");
     OK(st.done == 1, "saw [DONE]");
-    OK(st.events > 1, "received multiple events");
 
-    printf("  assembled text : %s\n", buf_cstr(&st.text));
-    printf("  tool arguments : %s\n", buf_cstr(&st.tool_args));
-    printf("  event count    : %d\n", st.events);
+    printf("  text     : %s\n", buf_cstr(&st.text));
+    printf("  live     : %s\n", buf_cstr(&ls.live));
+    printf("  finish   : %d\n", st.finish);
+    printf("  calls    : %d\n", prov_ncalls(&st));
+    if (prov_ncalls(&st) > 0) {
+        printf("  call[0]  : %s %s\n",
+               prov_call_name(&st, 0), prov_call_args(&st, 0));
+    }
+    printf("  tokens   : %ld in, %ld out\n",
+           st.prompt_tokens, st.completion_tokens);
 
     EQSTR(buf_cstr(&st.text),
           "Hello from llama.cpp, caf\303\251 \342\226\266 \360\237\232\200!",
           "streamed text reassembled exactly");
-    EQSTR(buf_cstr(&st.tool_args),
+    EQSTR(buf_cstr(&ls.live), buf_cstr(&st.text),
+          "live callback saw the same bytes");
+    EQLONG(st.finish, PROV_FINISH_TOOLS, "finished for tool calls");
+    EQLONG(prov_ncalls(&st), 1, "one tool call decoded");
+    EQSTR(prov_call_name(&st, 0), "read", "tool name");
+    EQSTR(prov_call_args(&st, 0),
           "{\"path\":\"C:\\\\OS2\\\\CONFIG.SYS\",\"limit\":100}",
-          "fragmented tool arguments reassembled into valid JSON");
+          "fragmented arguments reassembled");
+    OK(prov_calls_valid(&st), "assembled call validates");
+    EQLONG(st.prompt_tokens, 42, "usage reported");
 
-    /* And the reassembled arguments must themselves parse. */
     {
         json_arena *a = json_arena_new();
-        json_value *v = json_parse(a, st.tool_args.data, st.tool_args.len);
-        OK(v != NULL, "reassembled tool arguments re-parse");
+        json_value *v = json_parse(a, prov_call_args(&st, 0),
+                                   strlen(prov_call_args(&st, 0)));
+        OK(v != NULL, "arguments re-parse");
         EQSTR(json_as_str(json_get(v, "path"), NULL), "C:\\OS2\\CONFIG.SYS",
               "escaped backslashes survive the round trip");
         json_arena_free(a);
@@ -254,9 +263,9 @@ main(int argc, char **argv)
 
     http_resp_free(&resp);
     sse_free(&p);
+    prov_stream_free(&st);
     http_req_free(&req);
-    buf_free(&st.text);
-    buf_free(&st.tool_args);
+    buf_free(&ls.live);
     close(s.fd);
 
     TAP_REPORT("test_live");

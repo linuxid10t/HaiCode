@@ -13,9 +13,10 @@ debugger.
 | File | Lines | What it does |
 |------|-------|--------------|
 | `buf.c` | 110 | growable byte buffer, sticky OOM flag |
-| `json.c` | 1070 | arena + DOM parser + **sink-based** writer |
+| `json.c` | 1090 | arena + DOM parser + **sink-based** writer |
 | `sse.c` | 190 | Server-Sent Events framing |
 | `http.c` | 520 | HTTP/1.1 request/response, chunked transfer |
+| `provider.c` | 490 | OpenAI-compatible requests and stream decoding |
 
 ## Build
 
@@ -56,6 +57,50 @@ The tests pin this down hard: `test_all_split_points` feeds a stream at every
 possible split, `test_byte_at_a_time` feeds one byte per call, and
 `test_full_stack` drives HTTP → SSE → JSON at every read size from 1 to 40.
 
+## provider.c
+
+One implementation covers llama.cpp's server, Ollama and LM Studio — all three
+expose the same `/v1/chat/completions` shape over plain HTTP.
+
+**Requests pull from an iterator, not an array.** `prov_msgsrc` has `rewind`
+and `next`, so the store can read messages off disk one at a time and a 256K
+conversation never exists in memory. The rewind hook is there because the
+two-pass Content-Length scheme emits the document twice;
+`prov_write_request` calls it before emitting, which makes the contract hard
+to get wrong. `test_request_length_matches` asserts both passes agree and that
+the source was rewound twice.
+
+**Tool schemas are pre-encoded JSON strings** (`prov_tool.schema`), normally a
+literal on the tool itself, emitted with `json_w_raw`. A schema DSL in C89
+would cost more than it saves.
+
+**Stream decoding handles the parts that actually break.** `prov_on_sse` has
+the `sse_cb` signature and plugs straight into an `sse_parser`. Text and
+reasoning arrive through callbacks so the UI can paint live; tool calls
+accumulate internally because a half-received argument list is no use to
+anyone. Specifically:
+
+- `arguments` dribbles in as fragments that are only valid JSON once
+  concatenated — and is carried on the wire as a *string* containing JSON, so
+  it survives double encoding.
+- `tool_calls[].index` selects the slot, but some servers omit it on
+  continuation deltas. Appending a fragment to the wrong call produces a
+  plausible-looking wrong tool invocation, which is worse than an error, so
+  index-less deltas continue the last slot touched and that case has its own
+  test.
+- `prov_calls_valid()` reports whether every accumulated call has a name and
+  arguments that parse. A truncated stream is detectable rather than silently
+  dispatched.
+- A malformed frame is counted in `bad_events` and skipped; one bad keep-alive
+  must not discard a turn that is otherwise arriving fine.
+- Non-streamed responses (`message` instead of `delta`), `reasoning_content`
+  and `reasoning`, in-stream `error` objects, and `usage` are all handled.
+
+`test_decode_then_resend` closes the loop: decode a tool call off the wire,
+feed it back as an assistant turn, and confirm the arguments are byte-identical
+and still parse. That is the cycle the agentic loop runs every step, and it is
+where double-encoding bugs hide.
+
 ## Notes for the target compilers
 
 - **509-char string literals.** C89 only requires that much, and old compilers
@@ -76,7 +121,6 @@ possible split, `test_byte_at_a_time` feeds one byte per call, and
 
 ## What is not here yet
 
-`sock.c` (OS/2 sockets), `provider.c` (request building and stream decoding for
-the OpenAI-compatible `/v1/chat/completions` shape), `loop.c` (the agentic
-loop), `store.c` (JSONL sessions), and the tools. Those come next; the UI layer
-is separate and is the only part that cares which compiler you picked.
+`sock.c` (OS/2 sockets), `loop.c` (the agentic loop), `store.c` (JSONL
+sessions), and the tools. Those come next; the UI layer is separate and is the
+only part that cares which compiler you picked.

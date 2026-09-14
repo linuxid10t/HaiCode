@@ -19,10 +19,21 @@ def sse_payloads():
     # Tool-call arguments arrive as fragments that only form valid JSON once
     # concatenated -- split at awkward points, including inside an escape.
     cuts = [0, 3, 9, 14, 15, 22, 30, len(TOOL_ARGS)]
+    first = True
     for a, b in zip(cuts, cuts[1:]):
-        yield json.dumps({"choices": [{"index": 0, "delta": {"tool_calls": [
-            {"index": 0, "function": {"arguments": TOOL_ARGS[a:b]}}]}}]},
+        call = {"index": 0, "function": {"arguments": TOOL_ARGS[a:b]}}
+        if first:
+            call["id"] = "call_cfg"
+            call["type"] = "function"
+            call["function"]["name"] = "read"
+            first = False
+        yield json.dumps(
+            {"choices": [{"index": 0, "delta": {"tool_calls": [call]}}]},
             ensure_ascii=False)
+    yield json.dumps({"choices": [{"index": 0, "delta": {},
+                                   "finish_reason": "tool_calls"}],
+                      "usage": {"prompt_tokens": 42,
+                                "completion_tokens": 17}})
     yield None  # [DONE]
 
 
