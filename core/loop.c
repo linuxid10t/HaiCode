@@ -154,6 +154,10 @@ loop_round(loop_ctx *lc, prov_stream *out)
     http_req_begin(&req, t, "POST", lc->cfg->endpoint, hostport);
     http_req_header(&req, "Content-Type", "application/json");
     http_req_header(&req, "Accept", "text/event-stream");
+    /* One connection per step, so say so: the server releases the socket
+     * promptly, and a response with no Content-Length becomes legitimately
+     * EOF-delimited instead of hanging until the read timeout. */
+    http_req_header(&req, "Connection", "close");
     http_req_body_begin(&req, len);
     json_w_init(&w, http_req_body_write, &req);
     prov_write_request(&w, &pr);

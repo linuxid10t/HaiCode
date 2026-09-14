@@ -9,3 +9,4 @@ tests/test_store
 tests/test_tools
 tests/test_config
 tests/test_loop
+tests/test_sock

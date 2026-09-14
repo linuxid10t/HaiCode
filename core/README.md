@@ -23,6 +23,7 @@ debugger inside a Warp 3 VM.
 | `tools.c` | 770 | read, write, edit, ls, grep, cmd |
 | `config.c` | 210 | two-file JSON config |
 | `loop.c` | 385 | the agentic loop |
+| `sock.c` | 315 | TCP client + `loop_net`, both platforms from one source |
 | `plat_posix.c` | 330 | host platform layer (dev only) |
 | `plat_os2.c` | 375 | **OS/2 platform layer — never compiled** |
 
@@ -31,7 +32,7 @@ debugger inside a Warp 3 VM.
 ```sh
 make           # objects
 make check     # 454 assertions, no network
-make live      # end-to-end over a real socket against a fake llama.cpp
+make live      # 58 more: sockets, then the whole client over a real socket
 make portable  # proves the shipping sources are strict C89
 ```
 
@@ -75,6 +76,25 @@ compile-time selected, because OS/2 filesystems are case-insensitive and POSIX
 ones are not — getting that backwards makes the check too permissive on one of
 them. `path_normalize()` deliberately preserves case, since its output is used
 to actually open files.
+
+**`sock.c` is one source for both platforms, not two.** POSIX and OS/2 differ
+in about six places, all inside a single block at the top of the file, so the
+code path the tests exercise is the code path that ships rather than an OS/2
+twin nobody has run. That is also why name resolution uses `gethostbyname()`
+rather than `getaddrinfo()`: the older call exists on both, and using it keeps
+one tested path instead of two. IPv4 only — OS/2's stack is IPv4 anyway.
+
+The six differences: `sock_init()` must run first; handles are not file
+descriptors, so `soclose()` not `close()`; `sock_errno()` not `errno`;
+`select()` takes a different argument list; no `getaddrinfo`; link
+`tcpip32.lib` and use the 32-bit stack, not Warp 3's original 16-bit IAK.
+`gethostbyname()` is not re-entrant, so only the engine worker thread may call
+into this file.
+
+**Reads have a timeout, writes complete or fail.** A server that accepts and
+then says nothing would otherwise hang the worker thread, freezing the Stop
+button along with it. Default 60s. `sock_send_all` treats a partial write
+followed by an error as an error, so the caller never assumes bytes arrived.
 
 **`sprintf` only ever formats numbers.** Every longer string is assembled with
 `buf_puts`, which cannot overrun. C89 has no `snprintf`, and GCC caught a real
@@ -123,10 +143,35 @@ overflow in an earlier draft of `tools.c` that had mixed the two.
   the stack, because OS/2 threads get small stacks.
 - No `long long`, no `//`, no declarations after statements, no `snprintf`.
 
+## make live
+
+Two real servers and two binaries:
+
+`test_sock` drives `sock.c` against three listeners — one that echoes, one that
+accepts and stays silent, one that closes immediately — plus a port that is
+bound and released so connecting to it is refused. It covers resolution
+failure, refused connections, a 200 KB transfer across partial writes, the read
+timeout, clean EOF, and the `loop_net` open/close cycle the agentic loop
+performs every step.
+
+`test_live` then runs **everything except Presentation Manager**: config, the
+store, the agentic loop, request emission through a real TCP socket, chunked
+HTTP, SSE framing, provider decoding, the permission gate, and the `read` tool
+touching a real file on disk. Two turns — the model asks for a file, then
+answers from its contents.
+
+The server is not passive. `tests/fake_llama.py` asserts that the second
+request replays the assistant turn **with** its `tool_calls` and the matching
+tool result, and answers HTTP 400 naming the failed assertion if not. Checking
+that on the wire is stronger than checking it in the client's own tests;
+deleting the `tool_calls` from `persist_assistant()` makes six assertions fail,
+which is how it was verified to be a real check rather than a vacuous one.
+
+It also fragments the stream deliberately: chunk boundaries land inside JSON
+strings, inside SSE field names and between CR and LF, and tool-call arguments
+are split mid-escape across five events.
+
 ## What is not here
 
-`sock.c` (OS/2 sockets: `sock_init()` first, handles are not file descriptors,
-`soclose()` not `close()`, `sock_errno()` not `errno`, `select()` on sockets
-only) and the Presentation Manager UI. `loop_net` is the seam the first plugs
-into; the tests fill it with a scripted in-process server, so every decision in
-`loop.c` is already exercised.
+The Presentation Manager UI, and nothing else. `plat_os2.c` and the platform
+block in `sock.c` are the only code the target needs that has not been run.

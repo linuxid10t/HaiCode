@@ -1,20 +1,27 @@
-/* test_live.c - drives core/ against a real HTTP server over a real socket.
- *
- * The fake transport in test_http.c controls read sizes exactly; this one does
- * not, which is the point -- it exercises whatever segmentation the kernel and
- * the server actually produce.
- *
- * The POSIX socket code here is test scaffolding. The OS/2 implementation is a
- * separate sock.c and differs in ways that matter: sock_init() must be called
- * first, handles are not file descriptors, and close() must be soclose().
+/* test_live.c - the whole client, end to end, over a real socket.
  *
  *     usage: test_live <host> <port>
+ *
+ * Everything except Presentation Manager runs here: config, the store, the
+ * agentic loop, request emission through a real TCP socket, chunked HTTP,
+ * SSE framing, provider decoding, the permission gate, and a real tool
+ * touching a real file on disk. The only pieces the target swaps are
+ * plat_os2.c and the six calls inside sock.c's platform block.
+ *
+ * The server on the other end is not passive: it asserts that the second
+ * request replays the assistant turn WITH its tool_calls and the matching
+ * tool result, and answers HTTP 400 with the reason if not. Checking that on
+ * the wire is stronger than checking it in the client's own tests.
  */
 
-#include "../http.h"
-#include "../sse.h"
+#include "../loop.h"
+#include "../sock.h"
+#include "../store.h"
+#include "../tool.h"
+#include "../perm.h"
+#include "../config.h"
+#include "../plat.h"
 #include "../json.h"
-#include "../provider.h"
 #include "../buf.h"
 #include "tap.h"
 
@@ -22,251 +29,185 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <unistd.h>
+static char g_root[512];
+static char g_work[512];
 
-typedef struct { int fd; } psock;
-
-static int
-psock_send(void *ctx, const char *p, size_t n)
-{
-    psock *s = (psock *)ctx;
-    size_t off = 0;
-
-    while (off < n) {
-        ssize_t w = send(s->fd, p + off, n - off, 0);
-        if (w <= 0)
-            return -1;
-        off += (size_t)w;
-    }
-    return 0;
-}
-
-static int
-psock_recv(void *ctx, char *p, size_t n)
-{
-    psock  *s = (psock *)ctx;
-    ssize_t r = recv(s->fd, p, n, 0);
-    if (r < 0)
-        return -1;
-    return (int)r;
-}
-
-static int
-psock_connect(psock *s, const char *host, const char *port)
-{
-    struct addrinfo  hints;
-    struct addrinfo *res;
-    struct addrinfo *ai;
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    if (getaddrinfo(host, port, &hints, &res) != 0)
-        return -1;
-
-    s->fd = -1;
-    for (ai = res; ai != NULL; ai = ai->ai_next) {
-        int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0)
-            continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
-            s->fd = fd;
-            break;
-        }
-        close(fd);
-    }
-    freeaddrinfo(res);
-    return (s->fd >= 0) ? 0 : -1;
-}
-
-/* ---------------------------------------------------------------------- */
+/* ------------------------------------------------------------ UI probe --- */
 
 typedef struct {
-    buf live;      /* text as delivered by the streaming callback */
+    buf text;
+    int steps;
+    int tools;
     int errors;
-} live_sink;
+    buf last_error;
+    buf last_tool;
+    buf last_tool_out;
+    long tin;
+    long tout;
+} probe;
 
-static void
-on_body(void *ctx, const char *p, size_t n)
-{
-    sse_feed((sse_parser *)ctx, p, n);
-}
+static void p_text(void *c, const char *p, size_t n)
+{ buf_append(&((probe *)c)->text, p, n); }
+static void p_step(void *c, int s, int m) { (void)s; (void)m; ((probe *)c)->steps++; }
+static void p_tstart(void *c, const char *n, const char *a)
+{ probe *p = (probe *)c; (void)a; buf_clear(&p->last_tool);
+  buf_puts(&p->last_tool, n); p->tools++; }
+static void p_tdone(void *c, const char *n, int ok, int den, const char *o)
+{ probe *p = (probe *)c; (void)n; (void)ok; (void)den;
+  buf_clear(&p->last_tool_out); buf_puts(&p->last_tool_out, o); }
+static void p_usage(void *c, long i, long o)
+{ probe *p = (probe *)c; p->tin = i; p->tout = o; }
+static void p_err(void *c, const char *m)
+{ probe *p = (probe *)c; p->errors++;
+  buf_clear(&p->last_error); buf_puts(&p->last_error, m); }
 
-static void
-live_text(void *ctx, const char *p, size_t n)
-{
-    buf_append(&((live_sink *)ctx)->live, p, n);
-}
+/* ------------------------------------------------------------------------ */
 
-static void
-live_error(void *ctx, const char *msg)
-{
-    ((live_sink *)ctx)->errors++;
-    fprintf(stderr, "  provider error: %s\n", msg);
-}
-
-/* Emits the request body. Called twice: once to measure, once to send. */
-static void
-emit_body(json_writer *w, prov_req *r)
-{
-    prov_write_request(w, r);
-}
-
-/* ------------------------------------------------ message source --------- */
-
-typedef struct {
-    const prov_msg *msgs;
-    size_t          n;
-    size_t          pos;
-} src;
-
-static void src_rewind(void *c) { ((src *)c)->pos = 0; }
-
-static int
-src_next(void *c, prov_msg *out)
-{
-    src *a = (src *)c;
-    if (a->pos >= a->n)
-        return 0;
-    *out = a->msgs[a->pos++];
-    return 1;
-}
+static perm_effect
+allow_all(void *c, const char *a, const char *r, const char *i)
+{ (void)c; (void)a; (void)r; (void)i; return PERM_ALLOW; }
 
 int
 main(int argc, char **argv)
 {
-    static const prov_msg msgs[] = {
-        { PROV_ROLE_SYSTEM, "be terse",              8, NULL, 0, NULL },
-        { PROV_ROLE_USER,   "hi \303\251 \342\226\266", 10, NULL, 0, NULL }
-    };
-    static const prov_tool tools[] = {
-        { "read", "Read a file",
-          "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}}}" }
-    };
-
-    psock          s;
-    http_transport t;
-    http_req       req;
-    http_resp      resp;
-    sse_parser     p;
-    prov_stream    st;
-    prov_callbacks cb;
-    live_sink      ls;
-    src            msrc;
-    prov_req       r;
-    json_writer    w;
-    long           len;
-    char           hostport[128];
-    char           ctype[64];
-    int            rc;
+    store         st;
+    char          sid[STORE_ID_LEN];
+    tool_registry reg;
+    perm_gate     gate;
+    config        cfg;
+    sock_net      net;
+    probe         pr;
+    loop_ctx      lc;
+    buf           p;
+    FILE         *f;
+    int           steps = 0;
+    int           rc;
 
     if (argc < 3) {
         printf("test_live: skipped (no server given)\n");
         return 0;
     }
-    if (psock_connect(&s, argv[1], argv[2]) != 0) {
-        printf("test_live: cannot connect to %s:%s\n", argv[1], argv[2]);
-        return 1;
+
+    sprintf(g_root, "/tmp/haios2_live_%ld", (long)plat_time());
+    sprintf(g_work, "%.400s/work", g_root);
+    plat_mkdir_p(g_work);
+
+    /* The file the model is going to ask for. */
+    buf_init(&p);
+    buf_puts(&p, g_work);
+    buf_puts(&p, "/probe.txt");
+    f = fopen(buf_cstr(&p), "wb");
+    OK(f != NULL, "scratch file created");
+    if (f != NULL) { fputs("HELLO FROM OS2\n", f); fclose(f); }
+    buf_free(&p);
+
+    OK(store_open(&st, g_root) == 0, "store opens");
+    OK(store_create(&st, g_work, "local", sid) == 0, "session created");
+
+    tool_registry_init(&reg);
+    tool_register_builtins(&reg);
+    perm_init(&gate);
+    perm_set_ask(&gate, allow_all, NULL);
+
+    config_defaults(&cfg);
+    strncpy(cfg.host, argv[1], sizeof(cfg.host) - 1);
+    cfg.port      = atoi(argv[2]);
+    cfg.max_steps = 4;
+    strcpy(cfg.model, "local");
+
+    OK(sock_startup() == 0, "TCP/IP stack up");
+    sock_net_init(&net, cfg.host, cfg.port, 10000);
+
+    memset(&pr, 0, sizeof(pr));
+    buf_init(&pr.text);
+    buf_init(&pr.last_error);
+    buf_init(&pr.last_tool);
+    buf_init(&pr.last_tool_out);
+
+    lc.st            = &st;
+    lc.session_id    = sid;
+    lc.tools         = &reg;
+    lc.gate          = &gate;
+    lc.cfg           = &cfg;
+    lc.workdir       = g_work;
+    lc.net           = sock_net_loop(&net);
+    lc.interrupt     = NULL;
+    lc.ui.ctx           = &pr;
+    lc.ui.on_text       = p_text;
+    lc.ui.on_reasoning  = NULL;
+    lc.ui.on_step       = p_step;
+    lc.ui.on_tool_start = p_tstart;
+    lc.ui.on_tool_done  = p_tdone;
+    lc.ui.on_usage      = p_usage;
+    lc.ui.on_error      = p_err;
+
+    rc = loop_run(&lc, "what does probe.txt say?", &steps);
+
+    printf("  steps      : %d\n", steps);
+    printf("  text       : %s\n", buf_cstr(&pr.text));
+    printf("  tool       : %s\n", buf_cstr(&pr.last_tool));
+    printf("  tool output: %s", buf_cstr(&pr.last_tool_out));
+    printf("  tokens     : %ld in, %ld out\n", pr.tin, pr.tout);
+    if (pr.errors > 0)
+        printf("  error      : %s\n", buf_cstr(&pr.last_error));
+
+    /* A 400 here means the server rejected what we sent; its message says
+     * exactly which assertion failed. */
+    EQLONG(rc, LOOP_OK, "loop completed over a real socket");
+    EQLONG(pr.errors, 0, "no errors reported");
+    EQLONG(steps, 2, "two steps: tool call, then answer");
+    EQLONG(pr.tools, 1, "one tool executed");
+    EQSTR(buf_cstr(&pr.last_tool), "read", "the read tool ran");
+    OK(strstr(buf_cstr(&pr.last_tool_out), "HELLO FROM OS2") != NULL,
+       "the tool really read the file off disk");
+
+    OK(strstr(buf_cstr(&pr.text), "Reading that file now") != NULL,
+       "turn 1 text streamed through");
+    OK(strstr(buf_cstr(&pr.text), "caf\303\251") != NULL,
+       "multi-byte UTF-8 survived the socket");
+    OK(strstr(buf_cstr(&pr.text), "\360\237\232\200") != NULL,
+       "a 4-byte code point survived too");
+    OK(strstr(buf_cstr(&pr.text), "HELLO FROM OS2") != NULL,
+       "turn 2 answer streamed through");
+    EQLONG(pr.tin, 91, "usage from the final turn");
+
+    /* The transcript on disk must be replayable. */
+    {
+        store_iter it;
+        prov_msg   m;
+        int        n = 0;
+        int        saw_call = 0;
+        int        saw_result = 0;
+
+        store_iter_open(&it, &st, sid);
+        while (store_iter_next(&it, &m) == 1) {
+            n++;
+            if (m.role == PROV_ROLE_ASSISTANT && m.ncalls > 0)
+                saw_call = 1;
+            if (m.role == PROV_ROLE_TOOL && m.tool_call_id != NULL &&
+                strcmp(m.tool_call_id, "call_probe") == 0)
+                saw_result = 1;
+        }
+        EQLONG(n, 4, "four records persisted");
+        OK(saw_call, "the assistant turn kept its tool call on disk");
+        OK(saw_result, "and the tool result is linked to it");
+        OK(it.skipped == 0, "no records were skipped");
+        store_iter_close(&it);
     }
-    sprintf(hostport, "%.60s:%.20s", argv[1], argv[2]);
-
-    t.ctx   = &s;
-    t.xsend = psock_send;
-    t.xrecv = psock_recv;
-
-    msrc.msgs = msgs;
-    msrc.n    = 2;
-    msrc.pos  = 0;
-
-    prov_req_init(&r, "local");
-    r.msgs.ctx    = &msrc;
-    r.msgs.rewind = src_rewind;
-    r.msgs.next   = src_next;
-    r.tools       = tools;
-    r.ntools      = 1;
-    r.max_tokens  = 256;
-
-    /* Pass 1: measure. Pass 2: emit onto the socket. */
-    len = prov_request_length(&r);
-    OK(len > 0, "request length measured");
-
-    http_req_begin(&req, t, "POST", "/v1/chat/completions", hostport);
-    http_req_header(&req, "Content-Type", "application/json");
-    http_req_body_begin(&req, len);
-    json_w_init(&w, http_req_body_write, &req);
-    emit_body(&w, &r);
-    http_req_body_end(&req);
-    OK(json_w_finish(&w) == 0, "streamed emit clean");
-    OK(req.err == 0, "request sent without error");
-
-    buf_init(&ls.live);
-    ls.errors = 0;
-    cb.ctx          = &ls;
-    cb.on_text      = live_text;
-    cb.on_reasoning = NULL;
-    cb.on_error     = live_error;
-
-    prov_stream_init(&st, &cb);
-    sse_init(&p, prov_on_sse, &st);
-    http_resp_init(&resp, on_body, &p);
-
-    rc = http_pump(&resp, t);
-    sse_finish(&p);
-
-    EQLONG(rc, 0, "pump completed");
-    EQLONG(resp.status, 200, "HTTP 200");
-    OK(http_resp_header(&resp, "content-type", ctype, sizeof(ctype)) == 1,
-       "content-type present");
-    OK(strstr(ctype, "text/event-stream") != NULL, "server streamed SSE");
-    EQLONG(st.bad_events, 0, "every event parsed");
-    EQLONG(ls.errors, 0, "no provider errors");
-    OK(st.done == 1, "saw [DONE]");
-
-    printf("  text     : %s\n", buf_cstr(&st.text));
-    printf("  live     : %s\n", buf_cstr(&ls.live));
-    printf("  finish   : %d\n", st.finish);
-    printf("  calls    : %d\n", prov_ncalls(&st));
-    if (prov_ncalls(&st) > 0) {
-        printf("  call[0]  : %s %s\n",
-               prov_call_name(&st, 0), prov_call_args(&st, 0));
-    }
-    printf("  tokens   : %ld in, %ld out\n",
-           st.prompt_tokens, st.completion_tokens);
-
-    EQSTR(buf_cstr(&st.text),
-          "Hello from llama.cpp, caf\303\251 \342\226\266 \360\237\232\200!",
-          "streamed text reassembled exactly");
-    EQSTR(buf_cstr(&ls.live), buf_cstr(&st.text),
-          "live callback saw the same bytes");
-    EQLONG(st.finish, PROV_FINISH_TOOLS, "finished for tool calls");
-    EQLONG(prov_ncalls(&st), 1, "one tool call decoded");
-    EQSTR(prov_call_name(&st, 0), "read", "tool name");
-    EQSTR(prov_call_args(&st, 0),
-          "{\"path\":\"C:\\\\OS2\\\\CONFIG.SYS\",\"limit\":100}",
-          "fragmented arguments reassembled");
-    OK(prov_calls_valid(&st), "assembled call validates");
-    EQLONG(st.prompt_tokens, 42, "usage reported");
 
     {
-        json_arena *a = json_arena_new();
-        json_value *v = json_parse(a, prov_call_args(&st, 0),
-                                   strlen(prov_call_args(&st, 0)));
-        OK(v != NULL, "arguments re-parse");
-        EQSTR(json_as_str(json_get(v, "path"), NULL), "C:\\OS2\\CONFIG.SYS",
-              "escaped backslashes survive the round trip");
-        json_arena_free(a);
+        buf cmd, out;
+        buf_init(&cmd); buf_init(&out);
+        buf_puts(&cmd, "rm -rf ");
+        buf_puts(&cmd, g_root);
+        plat_run(buf_cstr(&cmd), NULL, 10, &out, 1024);
+        buf_free(&cmd); buf_free(&out);
     }
 
-    http_resp_free(&resp);
-    sse_free(&p);
-    prov_stream_free(&st);
-    http_req_free(&req);
-    buf_free(&ls.live);
-    close(s.fd);
+    buf_free(&pr.text);
+    buf_free(&pr.last_error);
+    buf_free(&pr.last_tool);
+    buf_free(&pr.last_tool_out);
 
     TAP_REPORT("test_live");
 }
