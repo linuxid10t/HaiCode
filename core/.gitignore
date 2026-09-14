@@ -1,0 +1,5 @@
+*.o
+tests/test_json
+tests/test_sse
+tests/test_http
+tests/test_live
