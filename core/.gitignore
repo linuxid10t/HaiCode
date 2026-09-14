@@ -4,3 +4,8 @@ tests/test_sse
 tests/test_http
 tests/test_live
 tests/test_provider
+tests/test_path
+tests/test_store
+tests/test_tools
+tests/test_config
+tests/test_loop

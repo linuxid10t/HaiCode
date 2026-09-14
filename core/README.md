@@ -1,126 +1,132 @@
-# core/ — portable C89 layer
+# core/ — the portable layer
 
-The compiler-independent half of the OS/2 client. Nothing here knows about
-OS/2, sockets, or Presentation Manager, so it builds and runs on a modern host
-and compiles unchanged with VisualAge C++, Borland C++ or Open Watcom on the
-target.
+Everything the OS/2 client does except draw pixels. One file (`plat_os2.c`)
+knows about OS/2; the other twelve are strict C89 and build unchanged with
+VisualAge C++, Borland C++ or Open Watcom.
 
-This is the part worth developing here rather than inside a Warp 3 VM: the
-awkward bugs are all in chunk-boundary handling and text encoding, and they are
-far easier to find with a sanitizer and a scriptable server than with a 1995
-debugger.
+This is the half worth developing on a modern machine. The bugs here are all in
+chunk-boundary handling, text encoding and path arithmetic, and they are far
+cheaper to find with a sanitizer and a scriptable server than with a 1995
+debugger inside a Warp 3 VM.
 
 | File | Lines | What it does |
 |------|-------|--------------|
 | `buf.c` | 110 | growable byte buffer, sticky OOM flag |
-| `json.c` | 1090 | arena + DOM parser + **sink-based** writer |
+| `json.c` | 1090 | arena + DOM parser + sink-based writer |
 | `sse.c` | 190 | Server-Sent Events framing |
-| `http.c` | 520 | HTTP/1.1 request/response, chunked transfer |
+| `http.c` | 520 | HTTP/1.1, chunked transfer both directions |
 | `provider.c` | 490 | OpenAI-compatible requests and stream decoding |
+| `path.c` | 300 | normalisation, containment, globbing |
+| `perm.c` | 140 | permission gate |
+| `store.c` | 560 | sessions as directories of JSONL |
+| `tool.c` | 170 | registry and gated dispatch |
+| `tools.c` | 770 | read, write, edit, ls, grep, cmd |
+| `config.c` | 210 | two-file JSON config |
+| `loop.c` | 385 | the agentic loop |
+| `plat_posix.c` | 330 | host platform layer (dev only) |
+| `plat_os2.c` | 375 | **OS/2 platform layer — never compiled** |
 
 ## Build
 
 ```sh
-make          # library objects
-make check    # unit tests (no network)
-make live     # end-to-end against a local fake llama.cpp server
+make           # objects
+make check     # 454 assertions, no network
+make live      # end-to-end over a real socket against a fake llama.cpp
+make portable  # proves the shipping sources are strict C89
 ```
 
-`CFLAGS` defaults to `-std=c89 -pedantic -Wall -Wextra -Werror`. Keep it that
-way: the target compilers are 1993–1995 vintage and will not forgive C99-isms.
-The suite passes clean under GCC 13, Clang, and ASan + UBSan with leak
-detection.
+Clean under GCC 13, Clang, and ASan + UBSan with leak detection, at
+`-std=c89 -pedantic -Wall -Wextra -Werror`.
 
-## Two design decisions worth not undoing
+`plat_posix.c` and the tests are built with `-std=gnu89 -D_POSIX_C_SOURCE`,
+because `-std=c89` hides POSIX headers behind `__STRICT_ANSI__`. The C89
+*language* rules still apply; only the header gating is lifted, and `make
+portable` checks the shipping sources independently of the tests.
 
-**The JSON writer is sink-based.** It never materializes a document; bytes go
-straight to a callback. A 256K-token conversation is roughly 1.4 MB of request
-body, and assembling that in memory on a 16 MB machine — alongside the
-transcript it was built from — is how you run that machine out of RAM.
-`http_req_body_write` has exactly the `json_sink` signature, so the emitter
-writes onto the socket directly.
+## Decisions worth not undoing
 
-To get a `Content-Length` without buffering, emit twice: once into
-`json_count_sink` to measure, once into the socket. `test_request_two_pass`
-asserts the two passes agree byte for byte. Chunked request encoding is
-supported as an alternative (`http_req_body_begin(&r, -1)`) but needs a server
-that accepts chunked request bodies; the two-pass form works everywhere.
+**The JSON writer is sink-based.** It never materialises a document. A
+256K-token conversation is ~1.4 MB of request body, and assembling that in
+memory on a 16 MB machine — alongside the transcript it was built from — is how
+you run that machine out of RAM. `http_req_body_write` has exactly the
+`json_sink` signature, so the emitter writes onto the socket directly. To get a
+`Content-Length` without buffering, emit twice: once into `json_count_sink` to
+measure, once to send. Tests assert the two passes agree byte for byte.
+
+**Messages stream off disk.** `prov_msgsrc` is an iterator with `rewind` and
+`next`, and `store_iter` implements it, so building a request holds one message
+at a time. The rewind hook exists because the two-pass scheme emits twice;
+`prov_write_request` calls it itself so the contract is hard to get wrong.
 
 **All parser state lives in the parser struct, never in locals.** A single SSE
 event routinely straddles several network reads once tool-call arguments get
 large. Keeping the partial line in a local silently truncates the event, which
 surfaces much later as unparseable tool input rather than as a network error —
-the Haiku build shipped that bug and it was not obvious. `sse_parser` and
-`http_resp` both carry their line accumulators and CR/LF state across calls.
+the Haiku build shipped that bug. `sse_parser` and `http_resp` both carry their
+line accumulators and CR/LF state across calls, and the tests pin it down at
+every split point, one byte at a time, and at every read size from 1 to 48.
 
-The tests pin this down hard: `test_all_split_points` feeds a stream at every
-possible split, `test_byte_at_a_time` feeds one byte per call, and
-`test_full_stack` drives HTTP → SSE → JSON at every read size from 1 to 40.
+**`path_within()` is a security boundary, not a helper.** Read-only tools skip
+the permission prompt when their target is inside the working directory, and
+that exemption is only sound because containment is checked *after* `..` is
+resolved and *on component boundaries*. A prefix compare would admit both
+`proj/../../etc/passwd` and `/project2/x`. Case folding is explicit and
+compile-time selected, because OS/2 filesystems are case-insensitive and POSIX
+ones are not — getting that backwards makes the check too permissive on one of
+them. `path_normalize()` deliberately preserves case, since its output is used
+to actually open files.
 
-## provider.c
+**`sprintf` only ever formats numbers.** Every longer string is assembled with
+`buf_puts`, which cannot overrun. C89 has no `snprintf`, and GCC caught a real
+overflow in an earlier draft of `tools.c` that had mixed the two.
 
-One implementation covers llama.cpp's server, Ollama and LM Studio — all three
-expose the same `/v1/chat/completions` shape over plain HTTP.
+## Notable behaviours
 
-**Requests pull from an iterator, not an array.** `prov_msgsrc` has `rewind`
-and `next`, so the store can read messages off disk one at a time and a 256K
-conversation never exists in memory. The rewind hook is there because the
-two-pass Content-Length scheme emits the document twice;
-`prov_write_request` calls it before emitting, which makes the contract hard
-to get wrong. `test_request_length_matches` asserts both passes agree and that
-the source was rewound twice.
-
-**Tool schemas are pre-encoded JSON strings** (`prov_tool.schema`), normally a
-literal on the tool itself, emitted with `json_w_raw`. A schema DSL in C89
-would cost more than it saves.
-
-**Stream decoding handles the parts that actually break.** `prov_on_sse` has
-the `sse_cb` signature and plugs straight into an `sse_parser`. Text and
-reasoning arrive through callbacks so the UI can paint live; tool calls
-accumulate internally because a half-received argument list is no use to
-anyone. Specifically:
-
-- `arguments` dribbles in as fragments that are only valid JSON once
-  concatenated — and is carried on the wire as a *string* containing JSON, so
-  it survives double encoding.
-- `tool_calls[].index` selects the slot, but some servers omit it on
-  continuation deltas. Appending a fragment to the wrong call produces a
-  plausible-looking wrong tool invocation, which is worse than an error, so
-  index-less deltas continue the last slot touched and that case has its own
-  test.
-- `prov_calls_valid()` reports whether every accumulated call has a name and
-  arguments that parse. A truncated stream is detectable rather than silently
-  dispatched.
-- A malformed frame is counted in `bad_events` and skipped; one bad keep-alive
-  must not discard a turn that is otherwise arriving fine.
-- Non-streamed responses (`message` instead of `delta`), `reasoning_content`
-  and `reasoning`, in-stream `error` objects, and `usage` are all handled.
-
-`test_decode_then_resend` closes the loop: decode a tool call off the wire,
-feed it back as an assistant turn, and confirm the arguments are byte-identical
-and still parse. That is the cycle the agentic loop runs every step, and it is
-where double-encoding bugs hide.
+- **The system prompt is injected, not stored.** Editing config changes it for
+  existing sessions, and history stays a pure record of the conversation.
+- **A half-received tool call is discarded, never dispatched.** Running the
+  wrong thing from truncated arguments is worse than losing a turn.
+  `prov_calls_valid()` is what decides.
+- **Denials and unparseable arguments go back to the model as tool results**,
+  so it can adapt instead of waiting on a result that never arrives.
+- **The assistant turn is persisted with its `tool_calls` intact**, so the next
+  request replays them alongside the matching tool result. Dropping them
+  produces orphaned tool results and makes the model redo work — the failure
+  `CLAUDE.md` documents for the Haiku build. `test_tool_cycle_replays_correctly`
+  exists for this one case.
+- **An ambiguous `edit` is an error.** Silently editing the first of several
+  identical matches is how an agent corrupts a file.
+- **`ls` and `grep` walk directories themselves** rather than shelling out.
+  A stock OS/2 install has no `grep(1)` or `find(1)`, and depending on ported
+  GNU utilities would drag a package stack onto the target for something a
+  directory walk does in 200 lines.
+- **A crash-truncated JSONL line is skipped, not fatal.** Losing one message is
+  recoverable; losing the conversation is not.
+- **No ask callback means deny.** Unprompted defaults must fail closed.
 
 ## Notes for the target compilers
 
-- **509-char string literals.** C89 only requires that much, and old compilers
-  enforce it. Library sources stay inside the limit. The test fixtures do not
-  (suppressed via `-Wno-overlength-strings`); if a target compiler rejects
-  them, build those strings at runtime instead.
-- **`tests/test_live.c` is host-only scaffolding.** It is the one file that
-  calls POSIX sockets, and the Makefile relaxes `-std=c89` to `-std=gnu89` for
-  it alone. The OS/2 socket layer is a separate `sock.c` and differs in ways
-  that bite: `sock_init()` must be called before anything else, handles are not
-  file descriptors, `close()` must be `soclose()`, `errno` is not set (use
-  `sock_errno()`), and `select()` works only on sockets.
+- **509-char string literals.** C89 only requires that much and old compilers
+  enforce it. Shipping sources stay inside the limit; the test fixtures do not
+  (suppressed via `-Wno-overlength-strings`). If a target compiler rejects
+  them, build those strings at runtime.
+- **`plat_os2.c` has never been compiled.** It is written against the Control
+  Program API and uses only `Dos*` calls plus ANSI C, which all three
+  compilers provide, but expect to fix header names, `PSZ` casts and at least
+  one `DosFindFirst` argument. Its header comment lists the traps that cost
+  time: `INCL_*` before `<os2.h>`, `HDIR_CREATE`, trailing separators breaking
+  `DosQueryPathInfo`, and `DosMove` refusing to overwrite.
+- **`plat_run` on OS/2 redirects to a temp file** rather than using `popen`,
+  which the three compilers disagree about. Its `timeout` argument is accepted
+  and ignored there — do not rely on it to bound anything.
 - **`http_resp` carries its own 2 KB read buffer** rather than putting one on
-  the stack, because OS/2 threads are created with small stacks.
-- No `long long`, no `//` comments, no declarations after statements, no
-  `snprintf`. Every `sprintf` writes a bounded numeric conversion into a
-  fixed buffer with headroom.
+  the stack, because OS/2 threads get small stacks.
+- No `long long`, no `//`, no declarations after statements, no `snprintf`.
 
-## What is not here yet
+## What is not here
 
-`sock.c` (OS/2 sockets), `loop.c` (the agentic loop), `store.c` (JSONL
-sessions), and the tools. Those come next; the UI layer is separate and is the
-only part that cares which compiler you picked.
+`sock.c` (OS/2 sockets: `sock_init()` first, handles are not file descriptors,
+`soclose()` not `close()`, `sock_errno()` not `errno`, `select()` on sockets
+only) and the Presentation Manager UI. `loop_net` is the seam the first plugs
+into; the tests fill it with a scripted in-process server, so every decision in
+`loop.c` is already exercised.
