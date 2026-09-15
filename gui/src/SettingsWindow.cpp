@@ -478,10 +478,12 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     // ---- Skills tab ----
     // Default-enabled skills for new sessions. Same discovery as the
     // engine's (list_skills: global + project dirs, project shadows).
+    // Checkboxes live in a scrollable content view with a bounded height
+    // so large packs don't grow the Preferences window.
     {
-        auto* skills_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
-        BLayoutBuilder::Group<>(skills_tab)
-            .SetInsets(B_USE_DEFAULT_SPACING);
+        auto* content = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
+        BLayoutBuilder::Group<>(content)
+            .SetInsets(B_USE_SMALL_INSETS);
         auto skills = haicode::list_skills(project_dir_);
         for (auto& sk : skills) {
             auto* chk = new BCheckBox(("skill_" + sk.id).c_str(),
@@ -492,12 +494,23 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
                           != config_.default_skills.end()
                               ? B_CONTROL_ON : B_CONTROL_OFF);
             chk->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
-            skills_tab->AddChild(chk);
+            content->AddChild(chk);
             skill_checks_.emplace_back(sk.id, chk);
         }
-        skills_tab->AddChild(new BStringView("skills_note",
-            "(checked skills are enabled by default in new sessions)"));
-        skills_tab_ = skills_tab;
+
+        auto* scroll = new BScrollView("skills_scroll", content,
+                                       0, false, true, B_FANCY_BORDER);
+        // Cap the scrolled area's height (checkbox rows are ~22px each);
+        // the window still shrinks to fit when there are few skills.
+        scroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 240));
+        scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 320));
+
+        skills_tab_ = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
+        BLayoutBuilder::Group<>(skills_tab_)
+            .SetInsets(B_USE_DEFAULT_SPACING)
+            .Add(scroll, 1.f)
+            .Add(new BStringView("skills_note",
+                "(checked skills are enabled by default in new sessions)"));
     }
 
     // ---- Tabs ----
