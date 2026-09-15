@@ -11,6 +11,7 @@ file(GLOB_RECURSE HAICODE_SOURCES
     "src/tool/*.cpp"
     "src/permission/*.cpp"
     "src/pricing/*.cpp"
+    "src/skills/*.cpp"
     "src/util/*.cpp"
 )
 
@@ -66,3 +67,6 @@ target_link_libraries(test_screenshot haicode)
 
 add_executable(test_tool_safety tests/test_tool_safety.cpp)
 target_link_libraries(test_tool_safety haicode)
+
+add_executable(test_skills tests/test_skills.cpp)
+target_link_libraries(test_skills haicode)

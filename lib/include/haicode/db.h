@@ -96,6 +96,11 @@ public:
     void update_permission_flags(const std::string& session_id,
                                  bool auto_edits, bool yolo,
                                  bool read_everywhere);
+    // Overwrite the "skills" array (enabled skill ids) inside the session's
+    // model_json blob. Replaces the whole list in one write. No-op if the
+    // session does not exist.
+    void update_skills(const std::string& session_id,
+                       const std::vector<std::string>& skills);
     // Patch the "id" (model) and "provider_id" fields inside the session's
     // model_json blob. Either string may be empty to leave that field untouched.
     // No-op if the session does not exist.

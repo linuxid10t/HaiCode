@@ -3,6 +3,7 @@
 
 #include <Application.h>
 #include <Button.h>
+#include <CheckBox.h>
 #include <GroupView.h>
 #include <LayoutBuilder.h>
 #include <ListView.h>
@@ -17,11 +18,13 @@
 #include <TabView.h>
 #include <TextControl.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <nlohmann/json.hpp>
 
 #include <haicode/model_info.h>
+#include <haicode/skills.h>
 
 // ---------------------------------------------------------------------------
 // ProviderEditWindow
@@ -190,13 +193,15 @@ static const uint32 MSG_CANCEL = 'CANs';
 static const uint32 MSG_MODEL_CHANGED = 'MODc';  // model dropdown selection changed
 
 SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
-                               BMessenger target)
+                               BMessenger target,
+                               const std::string& project_dir)
     : BWindow(BRect(0, 0, 560, 400),
               "Preferences",
               B_TITLED_WINDOW,
               B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
     , config_(config)
     , target_(target)
+    , project_dir_(project_dir)
 {
     // ---- Providers tab ----
     list_ = new BListView("providers_list", B_SINGLE_SELECTION_LIST);
@@ -470,11 +475,43 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     _RememberKeyForEngine(ws_current_engine_.c_str());
     _UpdateKeyFieldVisibility();
 
+    // ---- Skills tab ----
+    // Default-enabled skills for new sessions. Same discovery as the
+    // engine's (list_skills: global + project dirs, project shadows).
+    {
+        auto* skills_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
+        BLayoutBuilder::Group<>(skills_tab)
+            .SetInsets(B_USE_DEFAULT_SPACING);
+        auto skills = haicode::list_skills(project_dir_);
+        if (skills.empty()) {
+            skills_tab->AddChild(new BStringView("skills_hint",
+                "(no skill files found — drop *.md into\n"
+                "<project>/.haicode/skills/ or\n"
+                "<settings>/haicode/skills/)"));
+        }
+        for (auto& sk : skills) {
+            auto* chk = new BCheckBox(("skill_" + sk.id).c_str(),
+                                      sk.name.c_str(), nullptr);
+            if (!sk.description.empty()) chk->SetToolTip(sk.description.c_str());
+            chk->SetValue(std::find(config_.default_skills.begin(),
+                                    config_.default_skills.end(), sk.id)
+                          != config_.default_skills.end()
+                              ? B_CONTROL_ON : B_CONTROL_OFF);
+            chk->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+            skills_tab->AddChild(chk);
+            skill_checks_.emplace_back(sk.id, chk);
+        }
+        skills_tab->AddChild(new BStringView("skills_note",
+            "(checked skills are enabled by default in new sessions)"));
+        skills_tab_ = skills_tab;
+    }
+
     // ---- Tabs ----
     auto* tab_view = new BTabView("prefs_tabs", B_WIDTH_FROM_WIDEST);
     tab_view->AddTab(providers_tab, new BTab());
     tab_view->AddTab(general_tab,   new BTab());
     tab_view->AddTab(tools_tab,     new BTab());
+    tab_view->AddTab(skills_tab_,   new BTab());
     tab_view->TabAt(0)->SetLabel("Providers");
     tab_view->TabAt(1)->SetLabel("General");
     tab_view->TabAt(2)->SetLabel("Tools");
@@ -905,6 +942,11 @@ SettingsWindow::_Save()
     }
     saved.AddString("vision_fallback_provider", fb_provider.c_str());
     saved.AddString("vision_fallback_model", fb_model.c_str());
+
+    // Default-enabled skills (Skills tab): repeated "default_skill" ids.
+    for (auto& [id, chk] : skill_checks_)
+        if (chk && chk->Value() == B_CONTROL_ON)
+            saved.AddString("default_skill", id.c_str());
 
     target_.SendMessage(&saved);
     Quit();

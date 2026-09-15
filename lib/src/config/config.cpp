@@ -1,6 +1,7 @@
 #include <haicode/config.h>
 #include <haicode/default_prompt.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <cstdio>
@@ -147,6 +148,13 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                     cfg.instructions.push_back(s.get<std::string>());
         }
 
+        // Default-enabled skills for new sessions: ["git-commit.md", ...]
+        if (j.contains("skills") && j["skills"].is_array()) {
+            for (auto& s : j["skills"])
+                if (s.is_string())
+                    cfg.default_skills.push_back(s.get<std::string>());
+        }
+
         // Per-model context-window overrides: {"models": {"foo": 128000, ...}}
         if (j.contains("models") && j["models"].is_object()) {
             for (auto& [k, v] : j["models"].items()) {
@@ -272,6 +280,14 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.permissions.push_back(r);
     for (auto& s : overlay.instructions)
         result.instructions.push_back(s);
+    // Append-with-dedup: a project config listing an already-default skill
+    // must not enable it twice (the prompt block would embed it twice).
+    for (auto& s : overlay.default_skills) {
+        if (std::find(result.default_skills.begin(),
+                      result.default_skills.end(), s)
+                == result.default_skills.end())
+            result.default_skills.push_back(s);
+    }
     for (auto& [k, v] : overlay.model_contexts)
         result.model_contexts[k] = v;
     for (auto& [k, v] : overlay.model_vision)
