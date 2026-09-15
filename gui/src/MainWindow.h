@@ -185,11 +185,15 @@ private:
     BListView*     todos_list_      = nullptr;
     BScrollView*   todos_scroll_    = nullptr;
 
-    // Skills side panel (4th tab): one checkbox per discovered skill,
-    // persisted per session via store_.update_skills.
+    // Skills side panel (4th tab): BListView rows "[ ] name"/"[x] name"
+    // (Todos style). Clicking a row toggles that skill for the active
+    // session (persisted via store_.update_skills).
+    BStringView*   skills_header_   = nullptr;
+    BListView*     skills_list_     = nullptr;
     BScrollView*   skills_scroll_   = nullptr;
-    BGroupView*    skills_rows_     = nullptr;
-    std::vector<std::pair<std::string, BCheckBox*>> skill_checks_;
+    std::vector<std::string> skill_ids_;      // parallel to list rows
+    std::vector<std::string> skill_names_;    // display names
+    std::vector<bool>        skill_enabled_;  // checkbox marks
 
     // Left-hand tabbed panel (Sessions / Inference / Todos)
     BTabView*      side_tabs_       = nullptr;
