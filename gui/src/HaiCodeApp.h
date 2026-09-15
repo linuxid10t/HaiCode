@@ -54,4 +54,10 @@ private:
     bool yolo_on_       = false;
     bool read_everywhere_on_ = false;
     void _ApplySessionRules();
+
+    // Stop the current engine (interrupt + cancel pending asks + destroy,
+    // which joins the agentic-loop threads) and construct a fresh one from
+    // the current config_. Returns the new engine. Used by MSG_SETTINGS_SAVED
+    // and MSG_DIR_CHANGED; must run before providers_ is mutated.
+    haicode::SessionEngine* _RecreateEngine();
 };

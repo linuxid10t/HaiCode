@@ -1,6 +1,15 @@
 #include <haicode/engine.h>
+#include <haicode/db.h>
+#include <haicode/provider.h>
+#include <haicode/tool.h>
+#include <haicode/config.h>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)
@@ -106,6 +115,108 @@ static bool test_placeholder_substitution() {
     return true;
 }
 
+// Regression for the settings-save crash: HaiCodeApp used to destroy the
+// engine while its agentic-loop thread was mid-run; ~SessionEngine() detached
+// the worker and freed mu_/config_/maps under it, so the worker's next
+// lock_guard(mu_) hit the pthread "mutex->owner == -1" assertion. The
+// destructor now joins the workers. Here stream() blocks on a gate the test
+// controls (simulating an in-flight HTTP request that ignores cancel());
+// we destroy the engine while the call is blocked and release the gate from
+// a helper thread only after destruction has begun. Assertions: the
+// destructor blocks until the worker drains (proving the join), and the
+// worker fully exited stream() before the destructor returned.
+class BlockingProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "blocking"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"blocking-model"};
+    }
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+        {
+            std::lock_guard<std::mutex> g(m);
+            ++entered;
+        }
+        entered_cv.notify_all();
+        {
+            std::unique_lock<std::mutex> lk(m);
+            release_cv.wait(lk, [&] { return release_flag; });
+            ++exited;
+        }
+        cb.on_text_delta("t", "ok");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    std::mutex m;
+    std::condition_variable entered_cv;
+    std::condition_variable release_cv;
+    int entered = 0;
+    int exited = 0;
+    bool release_flag = false;
+};
+
+static bool test_destructor_joins_running_loop() {
+    static const char* kDb = "/tmp/haicode_test_destructor_join.db";
+    remove(kDb);
+    haicode::Database db(kDb);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<BlockingProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "blocking-model";
+    cfg.provider = "blocking";
+    cfg.autoname_sessions = false;
+
+    std::thread releaser;
+    auto t0 = std::chrono::steady_clock::now();
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session("/tmp/proj", "build",
+                                                "blocking-model", "blocking");
+        engine.submit_prompt(sid, "hello");
+
+        // Wait until the worker is parked inside stream().
+        bool entered_stream = false;
+        {
+            std::unique_lock<std::mutex> lk(provider->m);
+            entered_stream = provider->entered_cv.wait_for(
+                lk, std::chrono::seconds(5),
+                [&] { return provider->entered > 0; });
+        }
+        CHECK(entered_stream, "worker reached the blocked stream() call");
+
+        // Flip the release gate 300ms from now — by then scope exit below has
+        // started the destructor, which (with the join-based dtor) is blocked
+        // waiting for this very flip. With the old detach behavior the dtor
+        // returned immediately and the released worker ran into freed memory.
+        releaser = std::thread([&]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            std::lock_guard<std::mutex> g(provider->m);
+            provider->release_flag = true;
+            provider->release_cv.notify_all();
+        });
+
+        t0 = std::chrono::steady_clock::now();
+    }  // ~SessionEngine(): flags set, providers cancelled, workers joined.
+
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0);
+    releaser.join();
+
+    CHECK(elapsed.count() >= 100,
+          "destructor blocked until the worker drained (join, not detach)");
+    CHECK(provider->entered == 1 && provider->exited == 1,
+          "worker entered and exited stream() exactly once");
+
+    std::cout << "[OK] destructor joins running loop (blocked "
+              << elapsed.count() << "ms for the in-flight call, no crash)\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -118,6 +229,7 @@ int main() {
     ok &= test_firm_tier();
     ok &= test_critical_tier();
     ok &= test_placeholder_substitution();
+    ok &= test_destructor_joins_running_loop();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";

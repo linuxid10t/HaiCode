@@ -312,9 +312,10 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             project_dir_ = path;
             haicode::ConfigLoader loader2;
             config_ = loader2.load(project_dir_);
-            // Recreate the engine so config_.agents_md takes effect for new sessions.
-            engine_ = std::make_unique<haicode::SessionEngine>(
-                *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
+            // Recreate the engine so config_.agents_md takes effect for new
+            // sessions. _RecreateEngine stops any running loop first — the
+            // destructor joins the workers, so this can't free a live engine.
+            engine_ = std::unique_ptr<haicode::SessionEngine>(_RecreateEngine());
             if (main_window_) main_window_->SetEngine(*engine_);
             break;
         }
@@ -605,8 +606,11 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             }
 
             // Recreate engine with updated provider registry and refresh the UI.
-            engine_ = std::make_unique<haicode::SessionEngine>(
-                *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
+            // _RecreateEngine stops any running loop first — the destructor
+            // joins the workers, so this can't free a live engine (the crash
+            // this fixes: saving settings mid-run destroyed mu_/config_ under
+            // the agentic-loop thread).
+            engine_ = std::unique_ptr<haicode::SessionEngine>(_RecreateEngine());
             main_window_->SetEngine(*engine_);
             main_window_->RebuildProviderMenu(config_.providers);
             main_window_->PostMessage(new BMessage(MSG_SETTINGS_SAVED));
@@ -625,6 +629,25 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         default:
             BApplication::MessageReceived(msg);
     }
+}
+
+haicode::SessionEngine*
+HaiCodeApp::_RecreateEngine()
+{
+    if (engine_) {
+        // Unblock any pending ask_user dialogs and interrupt the active
+        // session's in-flight request, then destroy the engine. The
+        // destructor joins the agentic-loop threads, so it returns only
+        // after the workers have fully exited — no use-after-free window.
+        engine_->cancel_pending_asks();
+        if (main_window_) {
+            std::string sid = main_window_->active_session_id();
+            if (!sid.empty()) engine_->interrupt(sid);
+        }
+        engine_.reset();
+    }
+    return new haicode::SessionEngine(
+        *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
 }
 
 void

@@ -429,27 +429,43 @@ SessionEngine::SessionEngine(SessionStore& store,
 {}
 
 SessionEngine::~SessionEngine() {
-    std::unique_lock<std::mutex> lock(mu_);
-    for (auto& [id, flag] : interrupt_flags_)
-        if (flag) flag->store(true);
-    auto threads = std::move(runner_threads_);
-    // Cancel all providers so in-flight HTTP requests abort immediately.
-    for (auto& [id, provider] : session_providers_) {
+    // 1. Signal every runner to stop and cancel in-flight HTTP requests.
+    cancel_pending_asks();
+    {
+        std::unique_lock<std::mutex> lock(mu_);
+        for (auto& [id, flag] : interrupt_flags_)
+            if (flag) flag->store(true);
+        auto providers = session_providers_;
         lock.unlock();
-        provider->cancel();
-        lock.lock();
+        for (auto& [id, provider] : providers)
+            provider->cancel();
     }
-    lock.unlock();
-    // Detach threads — they will finish on their own once the interrupt flag
-    // fires and cancel() unblocks the HTTP request. We cannot safely join
-    // here because a thread may be blocked on a permission future (waiting
-    // for user input that will never come during shutdown). In practice the
-    // caller (HaiCodeApp::QuitRequested) calls exit() immediately after,
-    // so the OS cleans up.
-    for (auto& [id, t] : threads)
-        if (t.joinable()) t.detach();
+
+    // 2. Wait for the runners to drain. shutdown_mu_ is held by agentic_loop
+    // for its whole body, so once we hold it no worker is executing loop
+    // code and the joins below only wait for thread teardown. A worker
+    // blocked on a permission future cannot be waited out here; callers must
+    // not destroy a running engine while a permission dialog is pending
+    // (the GUI routes through _RecreateEngine(); the app-quit path calls
+    // exit() before destruction ever runs).
+    std::lock_guard<std::mutex> shutdown_guard(shutdown_mu_);
+    for (auto& [id, t] : runner_threads_)
+        if (t.joinable()) t.join();
+
+    // 3. Free per-session interrupt flags (workers are gone by now).
     for (auto& [id, flag] : interrupt_flags_)
         delete flag;
+}
+
+void SessionEngine::cancel_pending_asks() {
+    std::lock_guard<std::mutex> lock(ask_mu_);
+    for (auto& [call_id, pa] : pending_ask_) {
+        if (!pa.replied) {
+            pa.answer = "(interrupted)";
+            pa.replied = true;
+        }
+    }
+    asking_cv_.notify_all();
 }
 
 std::string SessionEngine::create_session(const std::string& project_dir,
@@ -724,6 +740,11 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
 }
 
 void SessionEngine::agentic_loop(const std::string& session_id) {
+    // Held for the whole loop body so ~SessionEngine() can join runner
+    // threads the moment it acquires shutdown_mu_ — no worker is ever
+    // executing loop code against a freed engine. See engine.h.
+    std::lock_guard<std::mutex> shutdown_guard(shutdown_mu_);
+
     auto session_opt = store_.get(session_id);
     if (!session_opt) return;
 

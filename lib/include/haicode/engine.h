@@ -103,6 +103,12 @@ public:
                       const std::string& call_id,
                       const std::string& answer);
 
+    // Cancel all pending ask_user questions: mark each one replied with an
+    // "(interrupted)" placeholder and wake the agentic-loop threads blocked
+    // in asking_cv_.wait. Called by the GUI before swapping the engine
+    // mid-run and by ~SessionEngine() before joining runner threads.
+    void cancel_pending_asks();
+
     const AppConfig& config() const { return config_; }
 
     // Read-only access to the provider registry (used by the UI to look up
@@ -203,6 +209,12 @@ private:
     std::map<std::string, PendingAsk> pending_ask_;
     std::mutex ask_mu_;
     std::condition_variable asking_cv_;
+
+    // Held for the whole body of agentic_loop and acquired (uncontended in
+    // the loop) by ~SessionEngine() before joining runner threads, so a
+    // worker can never still be executing loop code once the destructor's
+    // join returns. Outermost lock: never taken while holding mu_/ask_mu_.
+    std::mutex shutdown_mu_;
 };
 
 // Parse a "## Tasks" checklist from plan markdown into seed-ready Todo items.
