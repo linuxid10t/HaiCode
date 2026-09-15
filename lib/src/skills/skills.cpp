@@ -84,8 +84,25 @@ std::string parse_skill_frontmatter(const std::string& content,
                      || (val.front() == '\'' && val.back() == '\'')))
                     val = val.substr(1, val.size() - 2);
                 if (key == "name" && name.empty()) name = val;
-                else if (key == "description" && description.empty())
-                    description = val;
+                else if (key == "description" && description.empty()) {
+                    // ">" or "|" starts a YAML block scalar: join the
+                    // following indented lines (agentskills.io packs use
+                    // folded multi-line descriptions).
+                    if (val == ">" || val == "|" || val == ">-"
+                            || val == "|-") {
+                        std::string folded;
+                        std::string cont;
+                        while (std::getline(fm, cont)) {
+                            std::string tc = trim(cont);
+                            if (tc.empty()) continue;
+                            if (!folded.empty()) folded += " ";
+                            folded += tc;
+                        }
+                        description = folded;
+                    } else {
+                        description = val;
+                    }
+                }
             }
             return content.substr(body);
         }
@@ -94,32 +111,91 @@ std::string parse_skill_frontmatter(const std::string& content,
     return content; // no closing fence: treat the whole file as body
 }
 
-// Collect id → path for *.md entries of one directory. Later collections
-// shadow earlier ones by id, so call with project last.
-static void collect_dir(const std::string& dir,
-                        std::map<std::string, SkillInfo>& out) {
+// Depth-aware collection state: nearest-to-root wins on duplicate
+// directory-skill names ("skills/foo/SKILL.md" beats "plugins/x/foo/SKILL.md").
+struct Collected {
+    SkillInfo info;
+    int depth = 0;
+};
+
+static void collect_into(const std::string& dir,
+                         std::map<std::string, Collected>& out,
+                         int depth) {
+    if (depth > 6) return;  // pack layouts are shallow; hard-stop cruft
     DIR* d = opendir(dir.c_str());
     if (!d) return;
     struct dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         std::string fname = ent->d_name;
+        if (fname == "." || fname == "..") continue;
+
+        std::string full = dir + "/" + fname;
+        struct stat st;
+        if (::lstat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (!fname.empty() && fname[0] == '.') continue;
+            if (fname == "node_modules") continue;
+            collect_into(full, out, depth + 1);
+            continue;
+        }
+
         if (fname.size() < 4 || fname.substr(fname.size() - 3) != ".md")
             continue;
+
         SkillInfo info;
-        info.id = fname;
-        info.path = dir + "/" + fname;
-        std::string content = read_file(info.path);
-        std::string body = parse_skill_frontmatter(content, info.name,
-                                                   info.description);
-        if (info.name.empty()) {
-            // Fall back to the filename stem ("git-commit.md" →
-            // "git-commit").
-            info.name = fname.substr(0, fname.size() - 3);
+        bool is_dir_skill = false;
+        if (fname == "SKILL.md") {
+            // Directory skill: id = parent dir name ("caveman-commit").
+            std::string parent = dir;
+            size_t slash = parent.rfind('/');
+            std::string pname = (slash == std::string::npos)
+                ? parent : parent.substr(slash + 1);
+            if (pname.empty()) continue;
+            info.id = pname;
+            info.path = full;
+            is_dir_skill = true;
+        } else {
+            // Loose .md files are skills only directly in the ROOT;
+            // nested ones are pack documentation (README.md, CLAUDE.md).
+            if (depth != 0) continue;
+            info.id = fname;
+            info.path = full;
         }
-        (void)body;
-        out[info.id] = std::move(info); // project entry shadows global
+        std::string content = read_file(info.path);
+        parse_skill_frontmatter(content, info.name, info.description);
+        if (info.name.empty()) {
+            // Fall back to the stem ("git-commit.md" → "git-commit",
+            // "caveman/SKILL.md" → "caveman").
+            std::string stem = info.id;
+            if (stem.size() > 3 && stem.substr(stem.size() - 3) == ".md")
+                stem = stem.substr(0, stem.size() - 3);
+            info.name = stem;
+        }
+        auto it = out.find(info.id);
+        // NB: hoist the key — in `out[info.id] = {std::move(info), depth}`
+        // the RHS braced-init moves info.id away BEFORE operator[] reads it
+        // (C++17 sequences E2 before E1), keying every entry under "".
+        std::string key = info.id;
+        if (it == out.end()) {
+            out[key] = {std::move(info), depth};
+        } else if (is_dir_skill) {
+            // Duplicate dir-skill name: shallower path wins; equal depth
+            // keeps the existing entry (readdir order is arbitrary).
+            if (depth < it->second.depth)
+                out[key] = {std::move(info), depth};
+        } else {
+            // Loose file with the same id: later call wins (project root
+            // shadows global root — list_skills calls project last).
+            out[key] = {std::move(info), depth};
+        }
     }
     closedir(d);
+}
+
+static void collect_dir(const std::string& dir,
+                        std::map<std::string, SkillInfo>& out) {
+    std::map<std::string, Collected> collected;
+    collect_into(dir, collected, 0);
+    for (auto& [id, c] : collected) out[id] = std::move(c.info);
 }
 
 std::vector<SkillInfo> list_skills(const std::string& project_dir) {
@@ -139,19 +215,13 @@ std::vector<SkillInfo> list_skills(const std::string& project_dir) {
     return result;
 }
 
-// Resolve one skill id to its file: project dir shadows the global one.
+// Resolve one skill id to its file via discovery (handles both loose files
+// and directory SKILL.md skills). Project entries shadow same-id global
+// ones because collect order in list_skills runs project last.
 static std::string resolve_skill_path(const std::string& project_dir,
                                       const std::string& id) {
-    if (!project_dir.empty()) {
-        std::string p = project_dir + "/.haicode/skills/" + id;
-        struct stat dummy;
-        if (::stat(p.c_str(), &dummy) == 0) return p;
-    }
-    std::string gdir = global_skills_dir();
-    if (!gdir.empty()) {
-        std::string p = gdir + "/" + id;
-        struct stat dummy;
-        if (::stat(p.c_str(), &dummy) == 0) return p;
+    for (auto& sk : list_skills(project_dir)) {
+        if (sk.id == id) return sk.path;
     }
     return "";
 }

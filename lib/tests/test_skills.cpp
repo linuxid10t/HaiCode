@@ -76,22 +76,43 @@ static void test_discovery() {
     write_file(proj + "/.haicode/skills/gamma.md",
         "---\nname: 'Gamma'\ndescription: quoted-single\n---\nGamma body.\n");
 
+    // Directory skills (agentskills.io pack layout): SKILL.md inside a
+    // subdirectory, discovered recursively. Id = parent dir name.
+    // (mkdirs first — write_file/ofstream does not create parents.)
+    mkdirs(gdir + "/pack/skills/dirskill");
+    write_file(gdir + "/pack/skills/dirskill/SKILL.md",
+        "---\nname: DirSkill\ndescription: >\n  Folded description line one\n"
+        "  and line two.\n---\nDirSkill body.\n");
+    // Duplicate dir-skill name deeper in a pack: nearest-to-root wins.
+    mkdirs(gdir + "/pack/plugins/x/skills/dirskill");
+    write_file(gdir + "/pack/plugins/x/skills/dirskill/SKILL.md",
+        "deep duplicate; must lose\n");
+    // Nested non-SKILL.md docs are not skills.
+    mkdirs(gdir + "/pack/skills/other");
+    write_file(gdir + "/pack/skills/other/README.md", "doc; not a skill\n");
+
     setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
     auto skills = haicode::list_skills(proj);
-    CHECK(skills.size() == 4);  // alpha, beta, gamma, shadowed (.txt skipped)
+    CHECK(skills.size() == 5);  // alpha, beta, gamma, shadowed, dirskill
     // Case-sensitive sort by name: capitals sort before lowercase, and the
     // no-frontmatter fallback is the lowercase filename stem.
     CHECK(skills[0].name == "Alpha");
     CHECK(skills[0].description == "First skill");
-    CHECK(skills[1].name == "Gamma");
-    CHECK(skills[1].description == "quoted-single");
-    CHECK(skills[2].name == "Shadow");         // project shadows global
-    CHECK(skills[2].path == proj + "/.haicode/skills/shadowed.md");
-    CHECK(skills[3].name == "beta");           // stem fallback
-    CHECK(skills[3].description.empty());
+    CHECK(skills[1].name == "DirSkill");
+    CHECK(skills[1].id == "dirskill");
+    CHECK(skills[1].description ==
+          "Folded description line one and line two.");
+    CHECK(skills[1].path.find("/pack/skills/dirskill/SKILL.md")
+          != std::string::npos);  // canonical, not the plugins/ duplicate
+    CHECK(skills[2].name == "Gamma");
+    CHECK(skills[2].description == "quoted-single");
+    CHECK(skills[3].name == "Shadow");         // project shadows global
+    CHECK(skills[3].path == proj + "/.haicode/skills/shadowed.md");
+    CHECK(skills[4].name == "beta");           // stem fallback
+    CHECK(skills[4].description.empty());
 
     auto block = haicode::build_skills_block(
-        proj, {"alpha.md", "shadowed.md", "missing.md"});
+        proj, {"alpha.md", "shadowed.md", "dirskill", "missing.md"});
     CHECK(block.find("# Skills") != std::string::npos);
     CHECK(block.find("## Alpha (alpha.md)") != std::string::npos);
     CHECK(block.find("Alpha body.") != std::string::npos);
@@ -99,6 +120,10 @@ static void test_discovery() {
     CHECK(block.find("project version") != std::string::npos);
     CHECK(block.find("global version") == std::string::npos);
     CHECK(block.find("name: Alpha") == std::string::npos);  // fm stripped
+    CHECK(block.find("## DirSkill (dirskill)") != std::string::npos);
+    CHECK(block.find("DirSkill body.") != std::string::npos);
+    CHECK(block.find("Folded description") == std::string::npos);
+    CHECK(block.find("deep duplicate") == std::string::npos);
     CHECK(block.find("missing.md") == std::string::npos);   // skipped id
 
     CHECK(haicode::build_skills_block(proj, {}).empty());
