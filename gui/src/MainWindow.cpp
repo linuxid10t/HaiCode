@@ -453,8 +453,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     BLayoutBuilder::Group<>(side_panel)
         .Add(side_tabs_)
     .End();
-    side_panel->SetExplicitMinSize(BSize(220, B_SIZE_UNSET));
-    side_panel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    // Wide enough for all four B_WIDTH_FROM_WIDEST tab labels (Sessions /
+    // Inference / Todos / Skills) so "Skills" is never clipped at the
+    // default window size. BTabView cannot scroll its tab strip.
+    side_panel->SetExplicitMinSize(BSize(360, B_SIZE_UNSET));
+    side_panel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 
     // Menu bar sits at the top; content area below with window insets.
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
