@@ -509,6 +509,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     tab_view->TabAt(0)->SetLabel("Providers");
     tab_view->TabAt(1)->SetLabel("General");
     tab_view->TabAt(2)->SetLabel("Tools");
+    tab_view->TabAt(3)->SetLabel("Skills");
 
     auto* save_btn   = new BButton("save",   "Save",   new BMessage(MSG_SAVE));
     auto* cancel_btn = new BButton("cancel", "Cancel", new BMessage(MSG_CANCEL));
