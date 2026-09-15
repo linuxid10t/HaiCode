@@ -1823,15 +1823,7 @@ MainWindow::_RefreshSkills()
     skill_checks_.clear();
 
     auto skills = haicode::list_skills(project_dir_);
-    if (skills.empty()) {
-        auto* hint = new BStringView("skills_hint",
-            "(no skill files found — drop *.md into\n"
-            "<project>/.haicode/skills/ or\n"
-            "<settings>/haicode/skills/)");
-        hint->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
-        skills_rows_->AddChild(hint);
-        return;
-    }
+    if (skills.empty()) return;
 
     // Enabled set for the active session (absent key = all unchecked).
     std::vector<std::string> enabled;

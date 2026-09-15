@@ -483,12 +483,6 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         BLayoutBuilder::Group<>(skills_tab)
             .SetInsets(B_USE_DEFAULT_SPACING);
         auto skills = haicode::list_skills(project_dir_);
-        if (skills.empty()) {
-            skills_tab->AddChild(new BStringView("skills_hint",
-                "(no skill files found — drop *.md into\n"
-                "<project>/.haicode/skills/ or\n"
-                "<settings>/haicode/skills/)"));
-        }
         for (auto& sk : skills) {
             auto* chk = new BCheckBox(("skill_" + sk.id).c_str(),
                                       sk.name.c_str(), nullptr);
