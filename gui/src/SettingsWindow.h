@@ -17,6 +17,8 @@ class BPopUpMenu;
 class BMenuItem;
 class BTabView;
 class BButton;
+class BCheckBox;
+class BGroupView;
 
 // Modal-ish editor for a single provider entry. Owned by SettingsWindow;
 // posts MSG_PROVIDER_DIALOG_DONE back to the parent with the edited fields.
@@ -43,9 +45,12 @@ private:
 class SettingsWindow : public BWindow {
 public:
     // config is the full current AppConfig; its providers seed the Providers
-    // tab and its scalars seed the General/Tools tabs.
+    // tab and its scalars seed the General/Tools tabs. project_dir locates
+    // project-level skill files for the Skills tab (global + project dirs
+    // are scanned; project entries shadow same-name global ones).
     SettingsWindow(const haicode::AppConfig& config,
-                   BMessenger target);
+                   BMessenger target,
+                   const std::string& project_dir);
 
     void MessageReceived(BMessage* msg) override;
 
@@ -117,6 +122,13 @@ private:
     // Keys typed but not yet saved, keyed by engine, so switching engines in
     // the dropdown doesn't lose in-progress input.
     std::map<std::string, std::string> ws_typed_keys_;
+
+    // Skills tab: default-enabled skills for new sessions. One checkbox per
+    // discovered skill file; checked ids are sent as repeated
+    // "default_skill" strings in the MSG_SETTINGS_SAVED message.
+    std::string project_dir_;
+    std::vector<std::pair<std::string, BCheckBox*>> skill_checks_;
+    BGroupView* skills_tab_ = nullptr;
 
     BMessenger   target_;
 };

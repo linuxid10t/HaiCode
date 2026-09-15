@@ -104,6 +104,10 @@ private:
     void _RestoreInference();     // read model_json → fill inference fields
     void _RestoreInferenceFrom(const haicode::InferenceParams& p);
 
+    // Skills tab: rebuild the checkbox list from disk (list_skills) and
+    // mirror the active session's enabled set onto it.
+    void _RefreshSkills();
+
     // Attachments
     void _OpenAttachPanel();
     bool _VisionAvailable();
@@ -180,6 +184,16 @@ private:
     BStringView*   todos_header_    = nullptr;
     BListView*     todos_list_      = nullptr;
     BScrollView*   todos_scroll_    = nullptr;
+
+    // Skills side panel (4th tab): BListView rows "[ ] name"/"[x] name"
+    // (Todos style). Clicking a row toggles that skill for the active
+    // session (persisted via store_.update_skills).
+    BStringView*   skills_header_   = nullptr;
+    BListView*     skills_list_     = nullptr;
+    BScrollView*   skills_scroll_   = nullptr;
+    std::vector<std::string> skill_ids_;      // parallel to list rows
+    std::vector<std::string> skill_names_;    // display names
+    std::vector<bool>        skill_enabled_;  // checkbox marks
 
     // Left-hand tabbed panel (Sessions / Inference / Todos)
     BTabView*      side_tabs_       = nullptr;

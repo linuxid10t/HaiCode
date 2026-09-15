@@ -41,6 +41,7 @@
 #include <haicode/db.h>
 #include <haicode/default_prompt.h>
 #include <haicode/model_info.h>
+#include <haicode/skills.h>
 
 #include <nlohmann/json.hpp>
 
@@ -92,6 +93,32 @@ public:
             delete menu;                          // safe now — tracking is done
         } else {
             BListView::MouseDown(where);
+        }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// SkillsListView — BListView that reports a click on every MouseDown.
+// A plain selection message only fires when the selection CHANGES, so
+// clicking the same row twice (toggle off) would be swallowed. This posts
+// MSG_SKILL_TOGGLED with the clicked index every time.
+// ---------------------------------------------------------------------------
+
+class SkillsListView : public BListView {
+public:
+    SkillsListView()
+        : BListView("skills_list", B_SINGLE_SELECTION_LIST)
+    {
+    }
+
+    void MouseDown(BPoint where) override
+    {
+        BListView::MouseDown(where);
+        int32 idx = IndexOf(where);
+        if (idx >= 0) {
+            BMessage toggle(MSG_SKILL_TOGGLED);
+            toggle.AddInt32("index", idx);
+            Window()->PostMessage(&toggle);
         }
     }
 };
@@ -397,12 +424,28 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(todos_scroll_)
     .End();
 
+    // Skills tab — BListView rows "[ ] name"/"[x] name" (Todos pattern).
+    // Row selection toggles the skill for the active session.
+    skills_header_ = new BStringView("skills_header", "Skills");
+    skills_header_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    skills_list_   = new SkillsListView();
+    skills_scroll_ = new BScrollView("skills_scroll", skills_list_,
+                                     0, false, true, B_FANCY_BORDER);
+    auto* skills_tab_view = new BView("skills_tab", B_SUPPORTS_LAYOUT);
+    BLayoutBuilder::Group<>(skills_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
+        .SetInsets(B_USE_SMALL_INSETS)
+        .Add(skills_header_)
+        .Add(skills_scroll_)
+    .End();
+
     side_tabs_->AddTab(sessions_tab_view, new BTab());
     side_tabs_->AddTab(inf_tab_view, new BTab());
     side_tabs_->AddTab(todos_tab_view, new BTab());
+    side_tabs_->AddTab(skills_tab_view, new BTab());
     side_tabs_->TabAt(0)->SetLabel("Sessions");
     side_tabs_->TabAt(1)->SetLabel("Inference");
     side_tabs_->TabAt(2)->SetLabel("Todos");
+    side_tabs_->TabAt(3)->SetLabel("Skills");
 
     // Group wrapping the tab view so we can enforce a minimum width on the
     // left column (replacing the old sessions_group split child).
@@ -410,8 +453,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     BLayoutBuilder::Group<>(side_panel)
         .Add(side_tabs_)
     .End();
-    side_panel->SetExplicitMinSize(BSize(220, B_SIZE_UNSET));
-    side_panel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    // Wide enough for all four B_WIDTH_FROM_WIDEST tab labels (Sessions /
+    // Inference / Todos / Skills) and no wider: measured strip 296px + 11px
+    // left inset + ~6px right inset = 313. BTabView cannot scroll its tabs.
+    side_panel->SetExplicitMinSize(BSize(315, B_SIZE_UNSET));
+    side_panel->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 
     // Menu bar sits at the top; content area below with window insets.
     BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
@@ -564,6 +610,7 @@ MainWindow::MessageReceived(BMessage* msg)
                 if (entry.GetPath(&path) == B_OK && entry.IsDirectory()) {
                     project_dir_ = path.Path();
                     dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
+                    _RefreshSkills();  // project skill dir is relative
                     if (!active_session_id_.empty())
                         store_.update_directory(active_session_id_, project_dir_);
                     BMessage notify(MSG_DIR_CHANGED);
@@ -669,6 +716,42 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_ASK_USER_REPLY:
             _HandleAskUserReply(msg);
             break;
+        case MSG_SKILL_TOGGLED: {
+            // A skills-list row was clicked: toggle that skill for the
+            // active session, persist, and redraw the row marks. Selection
+            // is read live (the message may not carry an index — same
+            // pattern as MSG_SELECT_SESSION).
+            if (!skills_list_ || active_session_id_.empty()) break;
+            int32 idx = skills_list_->CurrentSelection();
+            if (msg->FindInt32("index", &idx) != B_OK)
+                idx = skills_list_->CurrentSelection();
+            if (idx < 0 || idx >= (int32)skill_ids_.size()) break;
+            skill_enabled_[idx] = !skill_enabled_[idx];
+            std::vector<std::string> enabled;
+            int on = 0;
+            for (size_t i = 0; i < skill_ids_.size(); ++i) {
+                if (skill_enabled_[i]) {
+                    enabled.push_back(skill_ids_[i]);
+                    ++on;
+                }
+            }
+            store_.update_skills(active_session_id_, enabled);
+            // Redraw marks without rebuilding (keeps selection).
+            for (size_t i = 0; i < skill_ids_.size(); ++i) {
+                if (auto* item = dynamic_cast<BStringItem*>(
+                        skills_list_->ItemAt(i))) {
+                    const char* mark = skill_enabled_[i] ? "[x]" : "[ ]";
+                    item->SetText((std::string(mark) + " "
+                                   + skill_names_[i]).c_str());
+                }
+            }
+            skills_list_->Invalidate();
+            char hdr[32];
+            snprintf(hdr, sizeof(hdr), "Skills (%d/%zu on)", on,
+                     skill_ids_.size());
+            if (skills_header_) skills_header_->SetText(hdr);
+            break;
+        }
         case MSG_MODE_SELECTED: {
             // Mode menu item; radio mode has already marked the item, so a
             // cancelled confirmation must re-mark the engine's actual mode.
@@ -686,8 +769,10 @@ MainWindow::MessageReceived(BMessage* msg)
             _ApplyInference();
             break;
         case MSG_SETTINGS_SAVED:
-            // Engine was recreated with new config — refresh the context meter.
+            // Engine was recreated with new config — refresh the context meter
+            // and the skills list (default skills may have changed).
             _UpdateMaxContext();
+            _RefreshSkills();
             break;
         case MSG_SHOW_SETTINGS:
             be_app->PostMessage(msg);
@@ -937,6 +1022,7 @@ MainWindow::_NewSession()
     _UpdateMaxContext();
     _RefreshModeButton();
     _RefreshTodosFromEngine();
+    _RefreshSkills();
     _RestoreInference();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
@@ -1054,6 +1140,7 @@ MainWindow::_SelectSession(int idx)
     _UpdateMaxContext();
     _RefreshModeButton();
     _RefreshTodosFromEngine();
+    _RefreshSkills();
     _RestoreInference();
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
@@ -1777,6 +1864,51 @@ MainWindow::_RefreshTodosFromEngine()
     char hdr[64];
     snprintf(hdr, sizeof(hdr), "Todos (%d/%zu done)", done, todos.size());
     if (todos_header_) todos_header_->SetText(hdr);
+}
+
+void
+MainWindow::_RefreshSkills()
+{
+    if (!skills_list_) return;
+    skills_list_->MakeEmpty();
+    skill_ids_.clear();
+    skill_names_.clear();
+    skill_enabled_.clear();
+
+    auto skills = haicode::list_skills(project_dir_);
+
+    // Enabled set for the active session (absent key = all unchecked).
+    std::vector<std::string> enabled;
+    if (!active_session_id_.empty()) {
+        if (auto si = store_.get(active_session_id_)) {
+            try {
+                auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
+                if (mj.is_object() && mj.contains("skills")
+                        && mj["skills"].is_array()) {
+                    for (auto& s : mj["skills"])
+                        if (s.is_string())
+                            enabled.push_back(s.get<std::string>());
+                }
+            } catch (...) {}
+        }
+    }
+
+    int on = 0;
+    for (auto& sk : skills) {
+        bool is_on = std::find(enabled.begin(), enabled.end(), sk.id)
+                         != enabled.end();
+        const char* mark = is_on ? "[x]" : "[ ]";
+        skills_list_->AddItem(new BStringItem((std::string(mark) + " "
+                                               + sk.name).c_str()));
+        skill_ids_.push_back(sk.id);
+        skill_names_.push_back(sk.name);
+        skill_enabled_.push_back(is_on);
+        if (is_on) ++on;
+    }
+
+    char hdr[32];
+    snprintf(hdr, sizeof(hdr), "Skills (%d/%zu on)", on, skills.size());
+    if (skills_header_) skills_header_->SetText(hdr);
 }
 
 void

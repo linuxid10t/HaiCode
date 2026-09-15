@@ -87,6 +87,11 @@ struct AppConfig {
     // Initial mode for newly created sessions: "plan" or "build".
     // Defaults to "plan" so new sessions start in Plan mode unless overridden.
     std::string default_mode = "plan";
+    // Skill ids (filenames, e.g. "git-commit.md") enabled by default for
+    // newly created sessions. Parsed from the top-level "skills" array in
+    // config.json (global or project); seeded into each new session's
+    // model_json by SessionEngine::create_session.
+    std::vector<std::string> default_skills;
 
     // Auto-compaction: when the input-token usage for a session approaches the
     // model's context window, summarize the older portion of the conversation

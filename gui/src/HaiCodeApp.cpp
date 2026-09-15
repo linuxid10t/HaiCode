@@ -371,7 +371,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_SHOW_SETTINGS: {
-            SettingsWindow* win = new SettingsWindow(config_, BMessenger(this));
+            SettingsWindow* win = new SettingsWindow(config_, BMessenger(this),
+                                                     project_dir_);
             win->Show();
             break;
         }
@@ -479,6 +480,19 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 config_.vision_fallback_model    = fb_model    ? fb_model    : "";
             }
 
+            // Default skills for new sessions (Settings Skills tab).
+            // Repeated field: replace the whole list on every save.
+            config_.default_skills.clear();
+            {
+                const char* def_skill = nullptr;
+                for (int32 i = 0;
+                        msg->FindString("default_skill", i, &def_skill) == B_OK;
+                        ++i) {
+                    if (def_skill && *def_skill)
+                        config_.default_skills.push_back(def_skill);
+                }
+            }
+
             // Persist the full providers map, preserving other top-level keys.
             BPath settings_path;
             if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
@@ -504,6 +518,16 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     {"engine", config_.web_search_engine},
                     {"max_results", config_.web_search_max_results},
                 };
+                // Default-enabled skills; erase-when-empty so unchecking
+                // every skill fully clears the persisted list.
+                if (!config_.default_skills.empty()) {
+                    nlohmann::json skills_j = nlohmann::json::array();
+                    for (auto& s : config_.default_skills)
+                        skills_j.push_back(s);
+                    j["skills"] = skills_j;
+                } else {
+                    j.erase("skills");
+                }
                 // Preserve any API keys the user set by hand in config.json
                 // (the Settings UI has no key-entry field; keys live in
                 // config.json or env vars only).

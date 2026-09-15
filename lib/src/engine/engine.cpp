@@ -4,6 +4,7 @@
 #include <haicode/pricing.h>
 #include <haicode/model_info.h>
 #include <haicode/compaction.h>
+#include <haicode/skills.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <thread>
@@ -470,6 +471,7 @@ std::string SessionEngine::create_session(const std::string& project_dir,
     model_json["id"]          = eff_model;
     model_json["provider_id"] = eff_provider;
     model_json["mode"]        = config_.default_mode;
+    model_json["skills"]      = config_.default_skills;
 
     auto session = store_.create(project_dir, eff_agent, model_json.dump());
     return session.id;
@@ -827,6 +829,18 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             "your system prompt for every future session in this project.";
     }
 
+    // Skills block: markdown files enabled for this session (persisted in
+    // model_json["skills"]). Rebuilt each step so mid-session toggles in the
+    // UI take effect on the next step. Part of the stable prompt body, like
+    // agents.md — skill changes are rare, so prefix-cache impact matches.
+    std::vector<std::string> enabled_skills;
+    if (model_json.contains("skills") && model_json["skills"].is_array()) {
+        for (auto& s : model_json["skills"])
+            if (s.is_string()) enabled_skills.push_back(s.get<std::string>());
+    }
+    std::string skills_block = build_skills_block(session.directory,
+                                                  enabled_skills);
+
     // Inject the most recent plan file so the agent has it in context even
     // when starting a fresh session after planning was done in a prior one.
     std::string latest_plan_block;
@@ -857,6 +871,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
     std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
                        + agents_md_block
+                       + skills_block
                        + latest_plan_block
                        + instructions_block
                        + plan_mode_block
@@ -900,6 +915,19 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             if (mj_now.is_object()) {
                 if (auto v = mj_now.value("id", ""); !v.empty())        model_id    = v;
                 if (auto v = mj_now.value("provider_id", ""); !v.empty()) provider_id = v;
+                // Skills can be toggled mid-session from the UI; rebuild the
+                // block so the change lands on the next step.
+                std::vector<std::string> skills_now;
+                if (mj_now.contains("skills") && mj_now["skills"].is_array()) {
+                    for (auto& s : mj_now["skills"])
+                        if (s.is_string())
+                            skills_now.push_back(s.get<std::string>());
+                }
+                if (skills_now != enabled_skills) {
+                    enabled_skills = std::move(skills_now);
+                    skills_block = build_skills_block(session.directory,
+                                                      enabled_skills);
+                }
             }
         }
 
@@ -917,7 +945,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
         // stay current.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
-                               max_steps - step) + agents_md_block + latest_plan_block
+                               max_steps - step) + agents_md_block + skills_block
+                              + latest_plan_block
                               + instructions_block + plan_mode_block + chat_mode_block;
         // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
         system_dynamic = render_dynamic_prompt(model_id, os_info,

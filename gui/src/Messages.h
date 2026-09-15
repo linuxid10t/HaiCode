@@ -73,6 +73,10 @@ static const uint32 MSG_PERSIST_PM      = 'PMps';
 // Inference settings — Inference tab Apply button → MainWindow
 static const uint32 MSG_APPLY_INFERENCE = 'APin';
 
+// Skills — Skills tab list row selected (click toggles that skill);
+// "index" int32 into the skills list
+static const uint32 MSG_SKILL_TOGGLED   = 'SKtg';
+
 // Session tracking
 static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string
 static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32
