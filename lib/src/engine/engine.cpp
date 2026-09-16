@@ -278,13 +278,18 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     if (i == last_user_prompt_idx) {
                         if (data.contains("skill_block")) {
                             skill_prefix = "[skill invoked: /" + sid
-                                + " — one-shot instructions for this message]\n"
+                                + " — apply the following skill instructions "
+                                  "to this message; they override your "
+                                  "defaults for this turn only]\n"
                                 + data.value("skill_block", "")
-                                + "\n[end of skill /" + sid + " instructions]";
+                                + "\n[end of skill /" + sid
+                                + " instructions — they do not apply to "
+                                  "later turns]";
                         } else if (data.value("skill_active", false)) {
                             skill_prefix = "[skill '/" + sid
-                                + "' invoked; it is already active this "
-                                  "session via the Skills tab]";
+                                + "' invoked for this message; it is already "
+                                  "active this session — apply it now with "
+                                  "priority]";
                         } else {
                             // Matched at submit but the body could not be
                             // resolved (file vanished / unreadable).

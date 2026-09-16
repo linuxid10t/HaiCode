@@ -230,7 +230,11 @@ std::string build_skills_block(const std::string& project_dir,
                                const std::vector<std::string>& enabled_ids) {
     if (enabled_ids.empty()) return "";
 
-    std::string block = "\n\n# Skills\n";
+    std::string block =
+        "\n\n# Skills\n\n"
+        "The following skills are active operating instructions, not "
+        "reference documentation: apply each one whenever it is relevant "
+        "to the task at hand, without waiting to be asked.\n";
     size_t used = 0;
     for (auto& id : enabled_ids) {
         if (id.empty()) continue;
@@ -251,7 +255,10 @@ std::string build_skills_block(const std::string& project_dir,
         }
         if (name.empty()) name = id;
 
-        std::string section = "\n\n## " + name + " (" + id + ")\n\n" + body;
+        std::string section = "\n\n## " + name + " (" + id + ")\n\n";
+        if (!desc.empty())
+            section += "When to use: " + desc + "\n\n";
+        section += body;
         if (used + section.size() > kSkillsBlockCap) {
             fprintf(stderr,
                     "[skills] warning: skills block exceeds %zu KB; truncating at '%s'\n",

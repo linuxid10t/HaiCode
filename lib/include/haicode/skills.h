@@ -19,12 +19,15 @@ struct SkillInfo {
 // name. The global dir can be overridden via $HPCODE_SKILLS_DIR (tests).
 std::vector<SkillInfo> list_skills(const std::string& project_dir);
 
-// Build the "# Skills" block appended to the system prompt: one
-// "## <name> (<id>)" section per enabled skill, frontmatter stripped.
-// Files are resolved project-first (same shadowing as list_skills).
-// Unknown ids are skipped with a stderr warning. The total block is
-// capped at 64 KB with a "[skills truncated]" marker. Returns "" when
-// nothing is enabled or no enabled file can be read.
+// Build the "# Skills" block appended to the system prompt: a directive
+// preamble (skills are active operating instructions, not reference docs)
+// followed by one "## <name> (<id>)" section per enabled skill. Each
+// section leads with "When to use: <description>" when frontmatter carries
+// one; the rest of the frontmatter is stripped. Files are resolved
+// project-first (same shadowing as list_skills). Unknown ids are skipped
+// with a stderr warning. The total block is capped at 64 KB with a
+// "[skills truncated]" marker. Returns "" when nothing is enabled or no
+// enabled file can be read.
 std::string build_skills_block(const std::string& project_dir,
                                const std::vector<std::string>& enabled_ids);
 

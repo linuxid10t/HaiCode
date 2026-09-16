@@ -120,15 +120,20 @@ static void test_discovery() {
     auto block = haicode::build_skills_block(
         proj, {"alpha.md", "shadowed.md", "dirskill", "missing.md"});
     CHECK(block.find("# Skills") != std::string::npos);
+    // Directive framing: the block must command application, not just list.
+    CHECK(block.find("active operating instructions") != std::string::npos);
     CHECK(block.find("## Alpha (alpha.md)") != std::string::npos);
     CHECK(block.find("Alpha body.") != std::string::npos);
+    CHECK(block.find("When to use: First skill") != std::string::npos);
     CHECK(block.find("## Shadow (shadowed.md)") != std::string::npos);
     CHECK(block.find("project version") != std::string::npos);
     CHECK(block.find("global version") == std::string::npos);
     CHECK(block.find("name: Alpha") == std::string::npos);  // fm stripped
     CHECK(block.find("## DirSkill (dirskill)") != std::string::npos);
     CHECK(block.find("DirSkill body.") != std::string::npos);
-    CHECK(block.find("Folded description") == std::string::npos);
+    // Folded frontmatter description is now emitted as a when-to-use line.
+    CHECK(block.find("When to use: Folded description line one and line two.")
+          != std::string::npos);
     CHECK(block.find("deep duplicate") == std::string::npos);
     CHECK(block.find("missing.md") == std::string::npos);   // skipped id
 
