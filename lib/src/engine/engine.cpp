@@ -263,6 +263,41 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 // submit_prompt attached it here; it goes out with this
                 // request only and is never rendered in the transcript.
                 std::string notice = data.value("mode_notice", "");
+                // One-shot slash-command skill invocation: submit_prompt
+                // resolved "/<id> args" at submit time and stored the body
+                // on this row. The framed body is emitted only while this
+                // row is the current turn's prompt (same past-turn rule as
+                // MAX_OLD_TOOL_RESULT); later turns see a compact marker so
+                // the body applies to exactly one turn. The model receives
+                // the args, not the raw "/<id>" command text.
+                std::string skill_prefix;
+                std::string text_out = data.value("text", "");
+                if (data.contains("skill")) {
+                    std::string sid   = data.value("skill", "");
+                    std::string sargs = data.value("skill_args", "");
+                    if (i == last_user_prompt_idx) {
+                        if (data.contains("skill_block")) {
+                            skill_prefix = "[skill invoked: /" + sid
+                                + " — one-shot instructions for this message]\n"
+                                + data.value("skill_block", "")
+                                + "\n[end of skill /" + sid + " instructions]";
+                        } else if (data.value("skill_active", false)) {
+                            skill_prefix = "[skill '/" + sid
+                                + "' invoked; it is already active this "
+                                  "session via the Skills tab]";
+                        } else {
+                            // Matched at submit but the body could not be
+                            // resolved (file vanished / unreadable).
+                            skill_prefix = "[skill '/" + sid
+                                + "' invoked but its file could not be read]";
+                        }
+                    } else {
+                        skill_prefix = "[skill '/" + sid
+                            + "' was invoked one-shot for this turn; its "
+                              "instructions no longer apply]";
+                    }
+                    text_out = sargs;
+                }
                 if (data.contains("attachments") && data["attachments"].is_array()
                         && !data["attachments"].empty()) {
                     // Mixed text + image content — Anthropic block style.
@@ -271,9 +306,11 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     nlohmann::json content = nlohmann::json::array();
                     if (!notice.empty())
                         content.push_back({{"type", "text"}, {"text", notice}});
-                    std::string text = data.value("text", "");
-                    if (!text.empty())
-                        content.push_back({{"type", "text"}, {"text", text}});
+                    if (!skill_prefix.empty())
+                        content.push_back({{"type", "text"},
+                                           {"text", skill_prefix}});
+                    if (!text_out.empty())
+                        content.push_back({{"type", "text"}, {"text", text_out}});
                     for (const auto& att : data["attachments"]) {
                         if (model_accepts_images) {
                             content.push_back({
@@ -291,7 +328,16 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     }
                     m["content"] = content;
                 } else {
-                    m["content"] = notice + data.value("text", "");
+                    std::string combined = notice;
+                    if (!skill_prefix.empty()) {
+                        if (!combined.empty()) combined += "\n";
+                        combined += skill_prefix;
+                    }
+                    if (!text_out.empty()) {
+                        if (!combined.empty()) combined += "\n";
+                        combined += text_out;
+                    }
+                    m["content"] = combined;
                 }
                 result.push_back(m);
             } else if (msg.type == "assistant_text") {
@@ -516,12 +562,54 @@ void SessionEngine::submit_prompt(const std::string& session_id,
         }
     }
 
+    // Slash-command skill invocation ("/caveman fix the commit"): one-shot.
+    // The skill body is resolved now (submit time) so the row is immutable
+    // even if the file changes mid-session, and rides this row as metadata
+    // exactly like mode_notice. The transcript keeps the raw text. When the
+    // skill is already enabled for the session (model_json["skills"]) the
+    // system prompt carries it — record that instead of duplicating the
+    // body.
+    std::string skill_id, skill_args, skill_block;
+    bool skill_active = false;
+    {
+        auto sess = store_.get(session_id);
+        if (sess) {
+            SkillInfo sk;
+            std::string args;
+            if (parse_skill_invocation(sess->directory, text, sk, args)) {
+                skill_id = sk.id;
+                skill_args = args;
+                auto mj = nlohmann::json::parse(sess->model_json, nullptr,
+                                                false);
+                if (mj.is_object() && mj.contains("skills")
+                        && mj["skills"].is_array()) {
+                    for (auto& s : mj["skills"]) {
+                        if (s.is_string() && s.get<std::string>() == sk.id) {
+                            skill_active = true;
+                            break;
+                        }
+                    }
+                }
+                if (!skill_active)
+                    skill_block = build_skills_block(sess->directory, {sk.id});
+            }
+        }
+    }
+
     // Persist the user message
     nlohmann::json data;
     data["role"] = "user";
     data["text"] = text;
     if (!mode_notice.empty())
         data["mode_notice"] = mode_notice;
+    if (!skill_id.empty()) {
+        data["skill"] = skill_id;
+        data["skill_args"] = skill_args;
+        if (skill_active)
+            data["skill_active"] = true;
+        else if (!skill_block.empty())
+            data["skill_block"] = skill_block;
+    }
     if (!attachments.empty()) {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& att : attachments) {

@@ -33,6 +33,19 @@ std::string build_skills_block(const std::string& project_dir,
 // the UI and tests.
 std::string global_skills_dir();
 
+// Detect a slash-command skill invocation at the start of `text`
+// ("/caveman fix the commit message"). The first whitespace-delimited token
+// is matched against discovered skills in tiers: exact id ("caveman"),
+// exact filename ("alpha.md"), then filename stem ("alpha" → alpha.md).
+// On match, fills `out` with the skill and `args` with the remainder of the
+// message (leading whitespace trimmed), and returns true. Returns false for
+// anything that isn't a skill command — ordinary text, non-matching slashes
+// (e.g. "/boot/home/...") — leaving text to pass through unchanged.
+bool parse_skill_invocation(const std::string& project_dir,
+                            const std::string& text,
+                            SkillInfo& out,
+                            std::string& args);
+
 // Parse the leading "---" frontmatter block of a skill file. Fills
 // name/description (empty when absent) and returns the body after the
 // closing "---". A file with no frontmatter returns the content unchanged.

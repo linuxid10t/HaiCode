@@ -267,4 +267,46 @@ std::string build_skills_block(const std::string& project_dir,
     return block;
 }
 
+bool parse_skill_invocation(const std::string& project_dir,
+                            const std::string& text,
+                            SkillInfo& out,
+                            std::string& args) {
+    args.clear();
+
+    // First non-whitespace char must be '/'.
+    size_t start = text.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos || text[start] != '/') return false;
+
+    // Token runs to the next whitespace.
+    size_t end = text.find_first_of(" \t\r\n", start);
+    if (end == std::string::npos) end = text.size();
+    std::string cmd = text.substr(start + 1, end - start - 1);
+    if (cmd.empty()) return false;
+
+    // Tiered match: exact id first ("/caveman" → dir skill "caveman",
+    // "/alpha.md" → loose file "alpha.md"), then stem ("/alpha" →
+    // "alpha.md"). Exact wins so a dir skill "alpha" is not hijacked by
+    // a loose "alpha.md" in the same breath.
+    auto skills = list_skills(project_dir);
+    const SkillInfo* hit = nullptr;
+    for (auto& sk : skills)
+        if (sk.id == cmd) { hit = &sk; break; }
+    if (!hit) {
+        for (auto& sk : skills) {
+            const std::string& id = sk.id;
+            if (id.size() > 3 && id.compare(id.size() - 3, 3, ".md") == 0
+                    && id.compare(0, id.size() - 3, cmd) == 0) {
+                hit = &sk;
+                break;
+            }
+        }
+    }
+    if (!hit) return false;
+
+    out = *hit;
+    if (end < text.size())
+        args = trim(text.substr(end));
+    return true;
+}
+
 } // namespace haicode

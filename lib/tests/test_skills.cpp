@@ -4,6 +4,9 @@
 #include <haicode/skills.h>
 #include <haicode/config.h>
 #include <haicode/db.h>
+#include <haicode/engine.h>
+#include <haicode/provider.h>
+#include <haicode/tool.h>
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -11,8 +14,11 @@
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <fstream>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 static int g_fail = 0;
@@ -190,10 +196,268 @@ static void test_store() {
     store.update_skills("nope", skills);
 }
 
+static void test_parse_invocation() {
+    std::string tmp = "/tmp/hc_test_skills_inv_XXXXXX";
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", tmp.c_str());
+    if (!mkdtemp(buf)) { CHECK(false); return; }
+    tmp = buf;
+    std::string gdir = tmp + "/global_skills";
+    std::string proj = tmp + "/proj";
+    mkdirs(gdir);
+    mkdirs(proj + "/.haicode/skills");
+    write_file(gdir + "/alpha.md",
+        "---\nname: Alpha\ndescription: \"First\"\n---\nAlpha body.\n");
+    write_file(gdir + "/beta.md", "Beta body.\n");
+    mkdirs(gdir + "/pack/skills/dirskill");
+    write_file(gdir + "/pack/skills/dirskill/SKILL.md", "DirSkill body.\n");
+    write_file(proj + "/.haicode/skills/gamma.md", "Gamma body.\n");
+
+    setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
+
+    haicode::SkillInfo sk;
+    std::string args;
+
+    CHECK(parse_skill_invocation(proj, "/dirskill make it so", sk, args));
+    CHECK(sk.id == "dirskill");
+    CHECK(args == "make it so");
+
+    CHECK(parse_skill_invocation(proj, "/alpha.md fix this", sk, args));
+    CHECK(sk.id == "alpha.md");            // exact-id tier (filename is the id)
+    CHECK(args == "fix this");
+
+    CHECK(parse_skill_invocation(proj, "/alpha fix this", sk, args));
+    CHECK(sk.id == "alpha.md");            // stem tier
+    CHECK(args == "fix this");
+
+    CHECK(parse_skill_invocation(proj, "/gamma hi", sk, args));
+    CHECK(sk.id == "gamma.md");            // project skill
+    CHECK(sk.path == proj + "/.haicode/skills/gamma.md");
+    CHECK(args == "hi");
+
+    // Command only: match, empty args.
+    CHECK(parse_skill_invocation(proj, "/alpha", sk, args));
+    CHECK(sk.id == "alpha.md");
+    CHECK(args.empty());
+
+    // Leading whitespace tolerated.
+    CHECK(parse_skill_invocation(proj, "  /alpha   spaced  ", sk, args));
+    CHECK(sk.id == "alpha.md");
+    CHECK(args == "spaced");
+
+    // Non-matches pass through untouched.
+    CHECK(!parse_skill_invocation(proj, "/nope hi", sk, args));
+    CHECK(!parse_skill_invocation(proj, "hello /alpha", sk, args));
+    CHECK(!parse_skill_invocation(proj, "/boot/home/README.md is the file",
+                                  sk, args));
+    CHECK(!parse_skill_invocation(proj, "/", sk, args));      // empty command
+    CHECK(!parse_skill_invocation(proj, "", sk, args));
+    CHECK(!parse_skill_invocation(proj, "/Alpha fix", sk, args)); // case-sensitive
+
+    unsetenv("HPCODE_SKILLS_DIR");
+    rm_rf(tmp);
+}
+
+static haicode::SessionMessage make_msg(int seq, const std::string& data) {
+    haicode::SessionMessage m;
+    m.type = "user_prompted";
+    m.seq = seq;
+    m.data_json = data;
+    return m;
+}
+
+static const char* kSkillRow =
+    "{\"role\":\"user\",\"text\":\"/alpha do the thing\","
+    "\"skill\":\"alpha.md\",\"skill_args\":\"do the thing\","
+    "\"skill_block\":\"\\n\\n# Skills\\n\\n## Alpha (alpha.md)\\n\\n"
+    "Alpha body.\\n\"}";
+
+static void test_assemble_skill_rows() {
+    haicode::ContextBuilder builder;
+
+    // Current-turn row carries the framed body; a past-turn copy of the
+    // same row collapses to the compact marker (one-shot drop-off).
+    std::vector<haicode::SessionMessage> msgs;
+    msgs.push_back(make_msg(1, kSkillRow));
+    msgs.push_back(make_msg(2, kSkillRow));
+    auto out = builder.assemble_messages(msgs, true);
+    CHECK(out.size() == 2);
+    std::string past = out[0]["content"].get<std::string>();
+    std::string cur  = out[1]["content"].get<std::string>();
+    CHECK(past.find("no longer apply") != std::string::npos);
+    CHECK(past.find("Alpha body.") == std::string::npos);
+    CHECK(past.find("do the thing") != std::string::npos);   // args stay
+    CHECK(cur.find("[skill invoked: /alpha") != std::string::npos);
+    CHECK(cur.find("Alpha body.") != std::string::npos);
+    CHECK(cur.find("do the thing") != std::string::npos);
+    CHECK(cur.find("/alpha do the thing") == std::string::npos); // no raw cmd
+
+    // Already active via the Skills tab: short note, no body.
+    msgs.clear();
+    msgs.push_back(make_msg(1,
+        "{\"role\":\"user\",\"text\":\"/alpha go\",\"skill\":\"alpha.md\","
+        "\"skill_args\":\"go\",\"skill_active\":true}"));
+    out = builder.assemble_messages(msgs, true);
+    cur = out[0]["content"].get<std::string>();
+    CHECK(cur.find("already active this session") != std::string::npos);
+    CHECK(cur.find("Alpha body.") == std::string::npos);
+    CHECK(cur.find("go") != std::string::npos);
+
+    // mode_notice rides first, skill block second, args last.
+    std::string with_notice = std::string(kSkillRow);
+    with_notice.insert(with_notice.size() - 1,
+                       ",\"mode_notice\":\"[mode changed to plan]\"");
+    msgs.clear();
+    msgs.push_back(make_msg(1, with_notice));
+    out = builder.assemble_messages(msgs, true);
+    cur = out[0]["content"].get<std::string>();
+    auto pos_notice = cur.find("[mode changed to plan]");
+    auto pos_skill  = cur.find("[skill invoked: /alpha");
+    auto pos_args   = cur.find("do the thing");
+    CHECK(pos_notice != std::string::npos && pos_skill != std::string::npos
+          && pos_args != std::string::npos);
+    CHECK(pos_notice < pos_skill && pos_skill < pos_args);
+
+    // Attachment path: skill text block + args block + image block.
+    msgs.clear();
+    msgs.push_back(make_msg(1,
+        "{\"role\":\"user\",\"text\":\"/alpha look\",\"skill\":\"alpha.md\","
+        "\"skill_args\":\"look\","
+        "\"skill_block\":\"\\n\\n# Skills\\n\\n## Alpha (alpha.md)\\n\\n"
+        "Alpha body.\\n\","
+        "\"attachments\":[{\"media_type\":\"image/png\",\"path\":\"x.png\","
+        "\"data_b64\":\"Zm9v\"}]}"));
+    out = builder.assemble_messages(msgs, true);
+    CHECK(out[0]["content"].is_array());
+    auto& blocks = out[0]["content"];
+    CHECK(blocks.size() == 3);
+    CHECK(blocks[0].value("type", "") == "text");
+    CHECK(blocks[0].value("text", "").find("[skill invoked: /alpha")
+          != std::string::npos);
+    CHECK(blocks[1].value("type", "") == "text");
+    CHECK(blocks[1].value("text", "") == "look");
+    CHECK(blocks[2].value("type", "") == "image");
+
+    // Plain rows are untouched.
+    msgs.clear();
+    msgs.push_back(make_msg(1, "{\"role\":\"user\",\"text\":\"plain\"}"));
+    out = builder.assemble_messages(msgs, true);
+    CHECK(out[0]["content"].get<std::string>() == "plain");
+}
+
+// Mirrors test_compaction.cpp's FakeProvider: captures the last chat request.
+class FakeProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "fake"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"fake-model"};
+    }
+    int get_model_context(const std::string&) const override { return 0; }
+    void stream(const haicode::LLMRequest& req,
+                haicode::StreamCallbacks cb) override {
+        ++calls;
+        last_chat_request = req;
+        cb.on_text_delta("t", "ok");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    int calls = 0;
+    haicode::LLMRequest last_chat_request;
+
+    static std::string dump_messages(
+            const std::vector<nlohmann::json>& msgs) {
+        std::string out;
+        for (const auto& m : msgs) out += m.dump();
+        return out;
+    }
+};
+
+static void test_engine_slash_e2e() {
+    std::string tmp = "/tmp/hc_test_skills_e2e_XXXXXX";
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", tmp.c_str());
+    if (!mkdtemp(buf)) { CHECK(false); return; }
+    tmp = buf;
+    std::string gdir = tmp + "/global_skills";  // empty: isolate from user's
+    std::string proj = tmp + "/proj";
+    mkdirs(gdir);
+    mkdirs(proj + "/.haicode/skills");
+    write_file(proj + "/.haicode/skills/alpha.md",
+        "---\nname: Alpha\n---\nAlpha body.\n");
+    setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
+
+    std::string dbp = tmp + "/e2e.db";
+    haicode::Database db(dbp);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "fake-model";
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(proj, "build",
+                                                "fake-model", "fake");
+
+        engine.submit_prompt(sid, "/alpha do the thing");
+        for (int i = 0; i < 100; ++i) {
+            if (store.load_messages(sid).size() >= 2) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        CHECK(store.load_messages(sid).size() >= 2);
+        std::string reqd = FakeProvider::dump_messages(
+            provider->last_chat_request.messages);
+        CHECK(reqd.find("[skill invoked: /alpha") != std::string::npos);
+        CHECK(reqd.find("Alpha body.") != std::string::npos);
+        CHECK(reqd.find("do the thing") != std::string::npos);
+        CHECK(reqd.find("/alpha do the thing") == std::string::npos);
+
+        // Second, plain turn: body drops off; only the compact marker
+        // references the earlier invocation.
+        engine.submit_prompt(sid, "plain second prompt");
+        for (int i = 0; i < 100; ++i) {
+            if (store.load_messages(sid).size() >= 4) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        CHECK(store.load_messages(sid).size() >= 4);
+        std::string reqd2 = FakeProvider::dump_messages(
+            provider->last_chat_request.messages);
+        CHECK(reqd2.find("plain second prompt") != std::string::npos);
+        CHECK(reqd2.find("Alpha body.") == std::string::npos);
+        CHECK(reqd2.find("[skill invoked:") == std::string::npos);
+        CHECK(reqd2.find("no longer apply") != std::string::npos);
+
+        // The stored row keeps the verbatim command for transcript replay.
+        auto rows = store.load_messages(sid);
+        bool saw_raw = false;
+        for (auto& r : rows) {
+            if (r.type != "user_prompted") continue;
+            auto d = nlohmann::json::parse(r.data_json, nullptr, false);
+            if (d.is_object() && d.value("text", "") == "/alpha do the thing")
+                saw_raw = true;
+        }
+        CHECK(saw_raw);
+    }  // ~SessionEngine joins the loop threads
+
+    unsetenv("HPCODE_SKILLS_DIR");
+    rm_rf(tmp);
+}
+
 int main() {
     test_discovery();
     test_config();
     test_store();
+    test_parse_invocation();
+    test_assemble_skill_rows();
+    test_engine_slash_e2e();
     if (g_fail == 0) {
         printf("test_skills: ALL PASSED\n");
         return 0;
