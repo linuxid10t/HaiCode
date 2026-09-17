@@ -14,6 +14,7 @@
 #include "GuiEventRelay.h"
 
 #include <string>
+#include <map>
 #include <memory>
 
 class HaiCodeApp : public BApplication {
@@ -45,15 +46,21 @@ private:
     // safely even if the callback outlives ReadyToRun scope
     std::shared_ptr<MainWindow*> window_holder_;
 
-    // Session-scoped permission state. always_rules_ accumulates per-resource
-    // Allow-Always rules from PermissionWindow. The three booleans track toolbar
-    // checkbox state. _ApplySessionRules() recomputes perm_gate_ session rules
-    // as the union of all layers whenever any layer changes.
-    std::vector<haicode::PermissionRule> always_rules_;
-    bool auto_edits_on_ = false;
-    bool yolo_on_       = false;
-    bool read_everywhere_on_ = false;
-    void _ApplySessionRules();
+    // Session-scoped permission state. Each session's toolbar-toggle flags
+    // are tracked independently and pushed into the PermissionGate under
+    // that session's id, so switching the selected session never changes
+    // the rules a background session runs under. Allow-Always grants live
+    // in the gate's per-session store, scoped by the same id.
+    struct SessionFlags {
+        bool auto_edits       = false;
+        bool yolo             = false;
+        bool read_everywhere  = false;
+    };
+    std::map<std::string, SessionFlags> session_flags_;
+    // Resolve the session a permission-related message targets: the message's
+    // "session_id" when present, else the currently selected session.
+    std::string _TargetSession(const BMessage* msg) const;
+    void _ApplySessionRules(const std::string& session_id);
 
     // Stop the current engine (interrupt + cancel pending asks + destroy,
     // which joins the agentic-loop threads) and construct a fresh one from

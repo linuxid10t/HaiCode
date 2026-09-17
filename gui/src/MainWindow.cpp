@@ -801,6 +801,9 @@ MainWindow::MessageReceived(BMessage* msg)
                     yo == B_CONTROL_ON,
                     re == B_CONTROL_ON);
             }
+            // Tag with the session so be_app scopes the rule change to it —
+            // a background session's rules must not follow the selection.
+            msg->AddString("session_id", active_session_id_.c_str());
             be_app->PostMessage(msg);
             break;
         case MSG_FETCH_MODELS: {
@@ -919,15 +922,19 @@ MainWindow::MessageReceived(BMessage* msg)
             msg->FindInt32("effect", &effect_int);
 
             if (effect_int == 1) {
-                // "Allow Always" — persist the rule in the PermissionGate via be_app
+                // "Allow Always" — persist the rule in the PermissionGate via
+                // be_app, scoped to the session that asked.
                 const char* action   = nullptr;
                 const char* resource = nullptr;
+                const char* sid      = nullptr;
                 msg->FindString("action",   &action);
                 msg->FindString("resource", &resource);
+                msg->FindString("session_id", &sid);
                 if (action && resource) {
                     BMessage perm(MSG_ADD_PERMISSION);
                     perm.AddString("action",   action);
                     perm.AddString("resource", resource);
+                    if (sid) perm.AddString("session_id", sid);
                     be_app->PostMessage(&perm);
                 }
             }
@@ -1028,8 +1035,8 @@ MainWindow::_NewSession()
     if (input_view_->Window()) input_view_->MakeFocus(true);
 
     // Reset permission checkboxes. SetValue() changes the visual state but
-    // does NOT invoke the message, so post explicit resets to be_app so it
-    // clears always_rules_ and toggle flags via _ApplySessionRules().
+    // does NOT invoke the message, so post explicit resets tagged with the
+    // new session's id so be_app scopes them via _ApplySessionRules(sid).
     if (auto_edits_chk_) auto_edits_chk_->SetValue(B_CONTROL_OFF);
     if (yolo_chk_)       yolo_chk_->SetValue(B_CONTROL_OFF);
     if (read_everywhere_chk_) read_everywhere_chk_->SetValue(B_CONTROL_OFF);
@@ -1037,16 +1044,19 @@ MainWindow::_NewSession()
     {
         BMessage m(MSG_AUTO_ALLOW_EDITS);
         m.AddInt32("be:value", B_CONTROL_OFF);
+        m.AddString("session_id", sid.c_str());
         be_app->PostMessage(&m);
     }
     {
         BMessage m(MSG_YOLO);
         m.AddInt32("be:value", B_CONTROL_OFF);
+        m.AddString("session_id", sid.c_str());
         be_app->PostMessage(&m);
     }
     {
         BMessage m(MSG_READ_EVERYWHERE);
         m.AddInt32("be:value", B_CONTROL_OFF);
+        m.AddString("session_id", sid.c_str());
         be_app->PostMessage(&m);
     }
 }
@@ -1132,10 +1142,13 @@ MainWindow::_SelectSession(int idx)
     chat_view_->Clear();
     _LoadHistory(active_session_id_);
     _RestoreDraft(active_session_id_);
-    interrupt_btn_->SetEnabled(false);
     _RestoreSessionTotals(active_session_id_);
-    engine_running_ = false;
-    streaming_state_ = "idle";
+    // A background session may still be running its agentic loop. Restore the
+    // running state so it can be watched and interrupted immediately instead
+    // of waiting for the next step boundary.
+    engine_running_ = engine_ && engine_->is_running(active_session_id_);
+    interrupt_btn_->SetEnabled(engine_running_);
+    streaming_state_ = engine_running_ ? "thinking" : "idle";
     current_tool_name_.clear();
     _UpdateMaxContext();
     _RefreshModeButton();
@@ -1147,8 +1160,8 @@ MainWindow::_SelectSession(int idx)
 
     // Restore permission checkboxes from the session's model_json. SetValue()
     // changes the visual state but does NOT invoke the message, so post the
-    // restored values to be_app so it updates auto_edits_on_/yolo_on_ and
-    // reapplies rules — mirrors the pattern in _NewSession.
+    // restored values — tagged with this session's id — to be_app so it
+    // reapplies that session's rules; other sessions are untouched.
     if (auto_edits_chk_) auto_edits_chk_->SetValue(
         restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
     if (yolo_chk_)       yolo_chk_->SetValue(
@@ -1158,16 +1171,19 @@ MainWindow::_SelectSession(int idx)
     {
         BMessage m(MSG_AUTO_ALLOW_EDITS);
         m.AddInt32("be:value", restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
+        m.AddString("session_id", active_session_id_.c_str());
         be_app->PostMessage(&m);
     }
     {
         BMessage m(MSG_YOLO);
         m.AddInt32("be:value", restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
+        m.AddString("session_id", active_session_id_.c_str());
         be_app->PostMessage(&m);
     }
     {
         BMessage m(MSG_READ_EVERYWHERE);
         m.AddInt32("be:value", restore_read_everywhere ? B_CONTROL_ON : B_CONTROL_OFF);
+        m.AddString("session_id", active_session_id_.c_str());
         be_app->PostMessage(&m);
     }
     _RefreshModeButton();
@@ -1627,14 +1643,30 @@ MainWindow::_HandlePermissionReq(BMessage* msg)
     const char* action   = nullptr;
     const char* resource = nullptr;
     const char* detail   = nullptr;
+    const char* sid      = nullptr;
     void* promise_raw    = nullptr;
 
     msg->FindString("action",   &action);
     msg->FindString("resource", &resource);
     msg->FindString("detail",   &detail);
+    msg->FindString("session_id", &sid);
     msg->FindPointer("promise_ptr", &promise_raw);
 
+    std::string session_id = sid ? sid : "";
+    // Display label: the session title when known, else the id's tail —
+    // same fallback formatting _RefreshSessionList uses.
+    std::string label = session_id;
+    if (!session_id.empty()) {
+        auto si = store_.get(session_id);
+        if (si && !si->title.empty())
+            label = si->title;
+        else if (session_id.size() > 8)
+            label = session_id.substr(session_id.size() - 8);
+    }
+
     PermissionWindow* perm_win = new PermissionWindow(
+        session_id,
+        label,
         action   ? action   : "",
         resource ? resource : "",
         detail   ? detail   : "",
@@ -1645,12 +1677,14 @@ MainWindow::_HandlePermissionReq(BMessage* msg)
 }
 
 void
-MainWindow::PostPermissionRequest(const std::string& action,
+MainWindow::PostPermissionRequest(const std::string& session_id,
+                                  const std::string& action,
                                   const std::string& resource,
                                   const std::string& detail,
                                   void* promise_ptr)
 {
     BMessage msg(MSG_PERMISSION_REQ);
+    msg.AddString("session_id", session_id.c_str());
     msg.AddString("action",   action.c_str());
     msg.AddString("resource", resource.c_str());
     msg.AddString("detail",   detail.c_str());
@@ -2011,11 +2045,13 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
             {
                 BMessage m(MSG_AUTO_ALLOW_EDITS);
                 m.AddInt32("be:value", B_CONTROL_OFF);
+                m.AddString("session_id", active_session_id_.c_str());
                 be_app->PostMessage(&m);
             }
             {
                 BMessage m(MSG_YOLO);
                 m.AddInt32("be:value", B_CONTROL_OFF);
+                m.AddString("session_id", active_session_id_.c_str());
                 be_app->PostMessage(&m);
             }
             if (chat) {
@@ -2023,6 +2059,7 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
                 read_everywhere_chk_->SetValue(B_CONTROL_OFF);
                 BMessage m(MSG_READ_EVERYWHERE);
                 m.AddInt32("be:value", B_CONTROL_OFF);
+                m.AddString("session_id", active_session_id_.c_str());
                 be_app->PostMessage(&m);
             }
             if (!active_session_id_.empty())
@@ -2043,6 +2080,7 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
             {
                 BMessage m(MSG_READ_EVERYWHERE);
                 m.AddInt32("be:value", B_CONTROL_OFF);
+                m.AddString("session_id", active_session_id_.c_str());
                 be_app->PostMessage(&m);
             }
             if (!active_session_id_.empty())

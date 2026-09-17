@@ -20,7 +20,9 @@ static const uint32 MSG_ALLOW_ONCE   = 'pAlo';
 static const uint32 MSG_ALLOW_ALWAYS = 'pAlA';
 static const uint32 MSG_DENY         = 'pDny';
 
-PermissionWindow::PermissionWindow(const std::string& action,
+PermissionWindow::PermissionWindow(const std::string& session_id,
+                                   const std::string& session_label,
+                                   const std::string& action,
                                    const std::string& resource,
                                    const std::string& detail,
                                    BMessenger reply_target,
@@ -31,12 +33,17 @@ PermissionWindow::PermissionWindow(const std::string& action,
               B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
     , reply_target_(reply_target)
     , promise_ptr_(promise_ptr)
+    , session_id_(session_id)
     , action_(action)
     , resource_(resource)
 {
-    // Build a description string
-    std::string desc = "Action:    " + action + "\n"
-                     + "Resource:  " + resource + "\n";
+    // Build a description string. The session line identifies which session
+    // is asking — with concurrent sessions the action alone is ambiguous.
+    std::string desc;
+    if (!session_label.empty())
+        desc += "Session:   " + session_label + "\n";
+    desc += "Action:    " + action + "\n"
+          + "Resource:  " + resource + "\n";
     if (!detail.empty()) {
         desc += "\n" + detail;
     }
@@ -92,6 +99,7 @@ PermissionWindow::_SendReply(int32 effect)
     BMessage reply(MSG_PERMISSION_REP);
     reply.AddPointer("promise_ptr", promise_ptr_);
     reply.AddInt32("effect",        effect);
+    reply.AddString("session_id",   session_id_.c_str());
     reply.AddString("action",       action_.c_str());
     reply.AddString("resource",     resource_.c_str());
     reply_target_.SendMessage(&reply);

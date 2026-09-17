@@ -155,7 +155,8 @@ HaiCodeApp::ReadyToRun()
     std::shared_ptr<MainWindow*> holder = window_holder_;
 
     perm_gate_->set_ask_callback(
-        [holder](const std::string& action,
+        [holder](const std::string& session_id,
+                 const std::string& action,
                  const std::string& resource,
                  const nlohmann::json& input) -> haicode::PermissionEffect
         {
@@ -174,7 +175,7 @@ HaiCodeApp::ReadyToRun()
             std::future<haicode::PermissionEffect> fut = promise->get_future();
 
             // Post to MainWindow (thread-safe via BMessenger)
-            win->PostPermissionRequest(action, resource, detail,
+            win->PostPermissionRequest(session_id, action, resource, detail,
                                        static_cast<void*>(promise));
 
             // Block engine thread until user responds
@@ -228,36 +229,36 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             const char* resource = nullptr;
             msg->FindString("action",   &action);
             msg->FindString("resource", &resource);
-            if (action && resource) {
-                always_rules_.push_back(
-                    {action, resource, haicode::PermissionEffect::Allow});
-                _ApplySessionRules();
-            }
+            if (action && resource)
+                perm_gate_->add_allow(_TargetSession(msg), action, resource);
             break;
         }
         case MSG_NEW_SESSION:
-            always_rules_.clear();
-            _ApplySessionRules();
+            // Per-session allows are scoped by session id in the gate; there
+            // is no global layer left to clear here.
             break;
         case MSG_AUTO_ALLOW_EDITS: {
             int32 value = B_CONTROL_OFF;
             msg->FindInt32("be:value", &value);
-            auto_edits_on_ = (value == B_CONTROL_ON);
-            _ApplySessionRules();
+            std::string sid = _TargetSession(msg);
+            session_flags_[sid].auto_edits = (value == B_CONTROL_ON);
+            _ApplySessionRules(sid);
             break;
         }
         case MSG_YOLO: {
             int32 value = B_CONTROL_OFF;
             msg->FindInt32("be:value", &value);
-            yolo_on_ = (value == B_CONTROL_ON);
-            _ApplySessionRules();
+            std::string sid = _TargetSession(msg);
+            session_flags_[sid].yolo = (value == B_CONTROL_ON);
+            _ApplySessionRules(sid);
             break;
         }
         case MSG_READ_EVERYWHERE: {
             int32 value = B_CONTROL_OFF;
             msg->FindInt32("be:value", &value);
-            read_everywhere_on_ = (value == B_CONTROL_ON);
-            _ApplySessionRules();
+            std::string sid = _TargetSession(msg);
+            session_flags_[sid].read_everywhere = (value == B_CONTROL_ON);
+            _ApplySessionRules(sid);
             break;
         }
         case MSG_PERSIST_PM: {
@@ -650,15 +651,29 @@ HaiCodeApp::_RecreateEngine()
         *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
 }
 
-void
-HaiCodeApp::_ApplySessionRules()
+std::string
+HaiCodeApp::_TargetSession(const BMessage* msg) const
 {
-    std::vector<haicode::PermissionRule> rules = always_rules_;
-    if (auto_edits_on_)
-        rules.push_back({"write", "*", haicode::PermissionEffect::Allow});
-    if (yolo_on_)
-        rules.push_back({"*", "*", haicode::PermissionEffect::Allow});
-    if (read_everywhere_on_)
-        rules.push_back({"read", "*", haicode::PermissionEffect::Allow});
-    perm_gate_->set_session_rules(rules);
+    const char* sid = nullptr;
+    if (msg->FindString("session_id", &sid) == B_OK && sid && *sid)
+        return sid;
+    if (main_window_)
+        return main_window_->active_session_id();
+    return "";
+}
+
+void
+HaiCodeApp::_ApplySessionRules(const std::string& session_id)
+{
+    std::vector<haicode::PermissionRule> rules;
+    auto it = session_flags_.find(session_id);
+    if (it != session_flags_.end()) {
+        if (it->second.auto_edits)
+            rules.push_back({"write", "*", haicode::PermissionEffect::Allow});
+        if (it->second.yolo)
+            rules.push_back({"*", "*", haicode::PermissionEffect::Allow});
+        if (it->second.read_everywhere)
+            rules.push_back({"read", "*", haicode::PermissionEffect::Allow});
+    }
+    perm_gate_->set_session_rules(session_id, rules);
 }

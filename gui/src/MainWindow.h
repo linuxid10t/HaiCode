@@ -49,8 +49,10 @@ public:
     std::string active_session_id() const { return active_session_id_; }
 
     // Called by HaiCodeApp's permission callback (from any thread via PostMessage)
-    // Packs action/resource/detail/promise_ptr into MSG_PERMISSION_REQ and posts to self
-    void PostPermissionRequest(const std::string& action,
+    // Packs session_id/action/resource/detail/promise_ptr into
+    // MSG_PERMISSION_REQ and posts to self
+    void PostPermissionRequest(const std::string& session_id,
+                               const std::string& action,
                                const std::string& resource,
                                const std::string& detail,
                                void* promise_ptr);

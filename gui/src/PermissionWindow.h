@@ -10,7 +10,9 @@
 
 class PermissionWindow : public BWindow {
 public:
-    PermissionWindow(const std::string& action,
+    PermissionWindow(const std::string& session_id,
+                     const std::string& session_label,
+                     const std::string& action,
                      const std::string& resource,
                      const std::string& detail,
                      BMessenger reply_target,
@@ -25,6 +27,7 @@ private:
     BMessenger  reply_target_;
     void*       promise_ptr_;
     bool        promise_fulfilled_ = false;
+    std::string session_id_;
     std::string action_;
     std::string resource_;
 };

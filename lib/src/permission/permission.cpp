@@ -77,22 +77,38 @@ static bool is_within_always_readable_root(const std::string& path) {
 }
 
 void PermissionGate::set_rules(const std::vector<PermissionRule>& rules) {
+    std::lock_guard<std::mutex> lock(*mu_);
     rules_ = rules;
 }
 
 void PermissionGate::set_session_rules(const std::vector<PermissionRule>& rules) {
-    session_rules_ = rules;
+    set_session_rules("", rules);
 }
 
-void PermissionGate::add_allow(const std::string& action, const std::string& resource) {
+void PermissionGate::set_session_rules(const std::string& session_id,
+                                       const std::vector<PermissionRule>& rules) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    session_rules_[session_id] = rules;
+}
+
+void PermissionGate::add_allow(const std::string& action,
+                               const std::string& resource) {
+    add_allow("", action, resource);
+}
+
+void PermissionGate::add_allow(const std::string& session_id,
+                               const std::string& action,
+                               const std::string& resource) {
     PermissionRule r;
     r.action = action;
     r.resource = resource;
     r.effect = PermissionEffect::Allow;
-    session_rules_.push_back(r);
+    std::lock_guard<std::mutex> lock(*mu_);
+    session_allows_[session_id].push_back(r);
 }
 
 void PermissionGate::set_ask_callback(AskCallback cb) {
+    std::lock_guard<std::mutex> lock(*mu_);
     ask_cb_ = std::move(cb);
 }
 
@@ -113,19 +129,43 @@ PermissionEffect PermissionGate::match_rules(const std::vector<PermissionRule>& 
 PermissionEffect PermissionGate::check(const std::string& action,
                                         const std::string& resource,
                                         const nlohmann::json& input) {
-    // Session rules (from "allow always" decisions) take priority
-    auto session_result = match_rules(session_rules_, action, resource);
+    return check("", action, resource, input);
+}
+
+PermissionEffect PermissionGate::check(const std::string& session_id,
+                                       const std::string& action,
+                                       const std::string& resource,
+                                       const nlohmann::json& input) {
+    // Snapshot the relevant layers under the lock; matching and especially
+    // the ask callback (which blocks on a future) must run without it.
+    std::vector<PermissionRule> config_rules, sess_rules, sess_allows;
+    AskCallback ask;
+    {
+        std::lock_guard<std::mutex> lock(*mu_);
+        config_rules = rules_;
+        auto sr = session_rules_.find(session_id);
+        if (sr != session_rules_.end()) sess_rules = sr->second;
+        auto sa = session_allows_.find(session_id);
+        if (sa != session_allows_.end()) sess_allows = sa->second;
+        ask = ask_cb_;
+    }
+
+    // Session layers (Allow-Always grants + toggle rules) take priority
+    auto allows_result = match_rules(sess_allows, action, resource);
+    if (allows_result != PermissionEffect::Ask)
+        return allows_result;
+    auto session_result = match_rules(sess_rules, action, resource);
     if (session_result != PermissionEffect::Ask)
         return session_result;
 
     // Config rules
-    auto config_result = match_rules(rules_, action, resource);
+    auto config_result = match_rules(config_rules, action, resource);
     if (config_result != PermissionEffect::Ask)
         return config_result;
 
     // Ask the UI
-    if (ask_cb_)
-        return ask_cb_(action, resource, input);
+    if (ask)
+        return ask(session_id, action, resource, input);
 
     return PermissionEffect::Ask;
 }
@@ -250,7 +290,8 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
             return tool->execute(input, ctx);
     }
 
-    auto perm = gate.check(tool->required_permission(),
+    auto perm = gate.check(ctx.session_id,
+                           tool->required_permission(),
                            tool->resource(input, ctx),
                            input);
     if (perm == PermissionEffect::Deny) {

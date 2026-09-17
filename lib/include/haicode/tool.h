@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <nlohmann/json.hpp>
 
@@ -50,26 +51,45 @@ public:
 
 class PermissionGate {
 public:
+    // session_id is the id of the session the check runs for ("" = unscoped,
+    // used by tests and legacy callers).
     using AskCallback = std::function<PermissionEffect(
+        const std::string& session_id,
         const std::string& action,
         const std::string& resource,
         const nlohmann::json& input)>;
 
     void set_rules(const std::vector<PermissionRule>& rules);
+    // Un-keyed forms operate on the "" scope (tests / legacy callers).
     void set_session_rules(const std::vector<PermissionRule>& rules);
+    void set_session_rules(const std::string& session_id,
+                           const std::vector<PermissionRule>& rules);
     void add_allow(const std::string& action, const std::string& resource);
+    void add_allow(const std::string& session_id,
+                   const std::string& action,
+                   const std::string& resource);
     void set_ask_callback(AskCallback cb);
 
     PermissionEffect check(const std::string& action, const std::string& resource,
                            const nlohmann::json& input = nlohmann::json::object());
+    PermissionEffect check(const std::string& session_id,
+                           const std::string& action, const std::string& resource,
+                           const nlohmann::json& input);
 
 private:
     PermissionEffect match_rules(const std::vector<PermissionRule>& rules,
                                   const std::string& action,
                                   const std::string& resource) const;
 
-    std::vector<PermissionRule> rules_;
-    std::vector<PermissionRule> session_rules_;
+    // Held via unique_ptr so the gate remains movable (test helpers return it
+    // by value); the pointed-to mutex itself is never relocated.
+    mutable std::unique_ptr<std::mutex> mu_ = std::make_unique<std::mutex>();
+    std::vector<PermissionRule> rules_;               // config rules, global
+    // Toggle-derived rules per session, replaced wholesale per session.
+    std::map<std::string, std::vector<PermissionRule>> session_rules_;
+    // Allow-Always grants per session, kept separate so replacing a session's
+    // rules never wipes its accumulated grants.
+    std::map<std::string, std::vector<PermissionRule>> session_allows_;
     AskCallback ask_cb_;
 };
 

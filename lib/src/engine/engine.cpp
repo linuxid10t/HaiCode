@@ -776,6 +776,12 @@ void SessionEngine::interrupt(const std::string& session_id) {
     bus_.publish(events::EventType::Interrupted, ev);
 }
 
+bool SessionEngine::is_running(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = session_running_.find(session_id);
+    return it != session_running_.end() && it->second;
+}
+
 void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
     // Resolve the previous mode before either copy is overwritten (get_mode
     // reads the in-memory cache, else the DB value update_mode is about to

@@ -66,6 +66,10 @@ public:
     void inject_message(const std::string& session_id, const std::string& text);
     void interrupt(const std::string& session_id);
 
+    // True while the session's agentic loop is executing. Lets the UI restore
+    // the running/interrupt state when switching back to a background session.
+    bool is_running(const std::string& session_id);
+
     // Per-session Plan/Build mode. Persisted into model_json so it survives
     // process restarts; also cached in session_modes_ for synchronous reads.
     void      set_mode(const std::string& session_id, SessionMode mode);

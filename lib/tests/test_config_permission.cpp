@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -361,17 +362,20 @@ static bool perm_add_allow() {
 static bool perm_ask_callback_invoked() {
     haicode::PermissionGate gate;
     bool called = false;
-    gate.set_ask_callback([&](const std::string& action, const std::string& resource,
-                               const nlohmann::json&) -> haicode::PermissionEffect {
+    gate.set_ask_callback([&](const std::string& session_id,
+                              const std::string& action,
+                              const std::string& resource,
+                              const nlohmann::json&) -> haicode::PermissionEffect {
         called = true;
+        assert(session_id == "sess1" && "callback session mismatch");
         assert(action   == "bash"    && "callback action mismatch");
         assert(resource == "/my/cmd" && "callback resource mismatch");
         return haicode::PermissionEffect::Allow;
     });
-    auto r = gate.check("bash", "/my/cmd");
+    auto r = gate.check("sess1", "bash", "/my/cmd", nlohmann::json::object());
     CHECK(called, "ask callback should have been called");
     CHECK(r == haicode::PermissionEffect::Allow, "callback return value should propagate");
-    std::cout << "[OK] permission ask callback invoked\n";
+    std::cout << "[OK] permission ask callback invoked (session id forwarded)\n";
     return true;
 }
 
@@ -379,7 +383,7 @@ static bool perm_ask_callback_not_invoked_when_rule_matches() {
     bool called = false;
     auto gate = make_gate({{"bash", "*", haicode::PermissionEffect::Allow}});
     gate.set_ask_callback([&](const std::string&, const std::string&,
-                               const nlohmann::json&) -> haicode::PermissionEffect {
+                               const std::string&, const nlohmann::json&) -> haicode::PermissionEffect {
         called = true;
         return haicode::PermissionEffect::Deny;
     });
@@ -402,7 +406,7 @@ static bool registry_read_inside_workdir_bypasses_gate() {
     haicode::PermissionGate gate;
     gate.set_rules({{"read", "*", haicode::PermissionEffect::Deny}});
     gate.set_ask_callback([](const std::string&, const std::string&,
-                              const nlohmann::json&) {
+                              const std::string&, const nlohmann::json&) {
         return haicode::PermissionEffect::Deny;
     });
 
@@ -457,7 +461,7 @@ static haicode::PermissionGate make_deny_all_gate() {
         {"read", "*", haicode::PermissionEffect::Deny},
     });
     gate.set_ask_callback([](const std::string&, const std::string&,
-                              const nlohmann::json&) {
+                              const std::string&, const nlohmann::json&) {
         return haicode::PermissionEffect::Deny;
     });
     return gate;
@@ -564,7 +568,7 @@ static bool registry_read_everywhere_allows_glob_and_grep_outside_workdir() {
     haicode::PermissionGate gate;
     gate.set_session_rules({{"read", "*", haicode::PermissionEffect::Allow}});
     gate.set_ask_callback([](const std::string&, const std::string&,
-                              const nlohmann::json&) {
+                              const std::string&, const nlohmann::json&) {
         return haicode::PermissionEffect::Deny;
     });
 
@@ -581,6 +585,85 @@ static bool registry_read_everywhere_allows_glob_and_grep_outside_workdir() {
     std::remove(outside.c_str());
     ::rmdir(wd.c_str());
     std::cout << "[OK] read-everywhere allows glob/grep outside workdir\n";
+    return true;
+}
+
+// ============================================================
+// Per-session scoping
+// ============================================================
+
+static bool perm_session_rules_scoped() {
+    haicode::PermissionGate gate;
+    gate.set_session_rules("A", {{"bash", "*", haicode::PermissionEffect::Allow}});
+    CHECK(gate.check("A", "bash", "/any", nlohmann::json::object())
+              == haicode::PermissionEffect::Allow,
+          "session A rules should apply to A");
+    CHECK(gate.check("B", "bash", "/any", nlohmann::json::object())
+              == haicode::PermissionEffect::Ask,
+          "session A rules must not leak into B");
+    std::cout << "[OK] permission session rules scoped per session\n";
+    return true;
+}
+
+static bool perm_add_allow_scoped() {
+    haicode::PermissionGate gate;
+    gate.add_allow("A", "write", "/tmp/*");
+    CHECK(gate.check("A", "write", "/tmp/foo", nlohmann::json::object())
+              == haicode::PermissionEffect::Allow,
+          "add_allow should grant the granting session");
+    CHECK(gate.check("B", "write", "/tmp/foo", nlohmann::json::object())
+              == haicode::PermissionEffect::Ask,
+          "add_allow must not grant other sessions");
+    std::cout << "[OK] permission add_allow scoped per session\n";
+    return true;
+}
+
+static bool perm_session_rules_replaced_independently() {
+    haicode::PermissionGate gate;
+    gate.set_session_rules("A", {{"bash", "*", haicode::PermissionEffect::Allow}});
+    gate.set_session_rules("B", {{"read", "*", haicode::PermissionEffect::Allow}});
+    gate.set_session_rules("B", {});  // B's toggles changed — replacement
+    CHECK(gate.check("A", "bash", "/any", nlohmann::json::object())
+              == haicode::PermissionEffect::Allow,
+          "replacing B's rules must leave A intact");
+    CHECK(gate.check("B", "read", "/any", nlohmann::json::object())
+              == haicode::PermissionEffect::Ask,
+          "B's replaced rules should be gone");
+    // add_allow grants survive a set_session_rules replacement (two layers)
+    gate.add_allow("A", "write", "/tmp/*");
+    gate.set_session_rules("A", {});
+    CHECK(gate.check("A", "write", "/tmp/foo", nlohmann::json::object())
+              == haicode::PermissionEffect::Allow,
+          "Allow-Always grant must survive rule replacement");
+    std::cout << "[OK] permission session rules replaced independently\n";
+    return true;
+}
+
+static bool perm_check_thread_safety_smoke() {
+    haicode::PermissionGate gate;
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                              const std::string&, const nlohmann::json&) {
+        return haicode::PermissionEffect::Ask;
+    });
+    bool stop = false;
+    auto ok_all = true;
+    std::thread writer([&]() {
+        for (int i = 0; i < 20000 && !stop; ++i) {
+            gate.set_session_rules("X",
+                {{"bash", "*", haicode::PermissionEffect::Allow}});
+            gate.set_session_rules("X", {});
+        }
+    });
+    for (int i = 0; i < 20000; ++i) {
+        auto r = gate.check("X", "bash", "/any", nlohmann::json::object());
+        if (r != haicode::PermissionEffect::Allow
+                && r != haicode::PermissionEffect::Ask)
+            ok_all = false;
+    }
+    stop = true;
+    writer.join();
+    CHECK(ok_all, "concurrent check must only observe Allow/Ask, never crash");
+    std::cout << "[OK] permission gate concurrent set/check smoke\n";
     return true;
 }
 
@@ -625,6 +708,12 @@ int main() {
     ok &= perm_add_allow();
     ok &= perm_ask_callback_invoked();
     ok &= perm_ask_callback_not_invoked_when_rule_matches();
+
+    std::cout << "\n-- PermissionGate session scoping --\n";
+    ok &= perm_session_rules_scoped();
+    ok &= perm_add_allow_scoped();
+    ok &= perm_session_rules_replaced_independently();
+    ok &= perm_check_thread_safety_smoke();
 
     std::cout << "\n-- ToolRegistry + gate integration --\n";
     ok &= registry_read_inside_workdir_bypasses_gate();
