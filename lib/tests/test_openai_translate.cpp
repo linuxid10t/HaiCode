@@ -169,6 +169,32 @@ static bool test_image_only_no_text_block() {
     return true;
 }
 
+static bool test_text_attachment_blocks_join_with_newline() {
+    // A text attachment renders as a second text block (fenced body). It must
+    // reach OpenAI as plain text — never an image_url — with the blocks
+    // newline-joined so the body doesn't fuse into the prompt.
+    json prompt_block = {{"type", "text"}, {"text", "look at this"}};
+    json att_block = {
+        {"type", "text"},
+        {"text", "\n\nAttached file: /proj/main.cpp\n```\nint x;\n```\n"}
+    };
+    std::vector<json> src = {
+        json{{"role", "user"}, {"content", json::array({prompt_block, att_block})}}
+    };
+    auto out = haicode::translate_messages("SYS", "", src);
+    CHECK(out.size() == 2, "expect system + one user message");
+    CHECK(out[1].at("content").is_string(),
+          "text-only parts collapse back to a plain string");
+    std::string content = out[1].at("content").get<std::string>();
+    CHECK(content.find("data:") == std::string::npos,
+          "no data: URL may appear for text attachments");
+    CHECK(content == "look at this\n\n\nAttached file: /proj/main.cpp"
+                     "\n```\nint x;\n```\n",
+          "text blocks join with a single newline boundary");
+    std::cout << "[OK] text attachment blocks translate to joined plain text\n";
+    return true;
+}
+
 static bool test_text_only_stays_string() {
     // Regression: attachment-free histories must translate byte-identically
     // to the pre-image string form (llama.cpp prefix-cache).
@@ -191,6 +217,7 @@ int main() {
     ok &= test_no_system();
     ok &= test_image_translates_to_image_url();
     ok &= test_image_only_no_text_block();
+    ok &= test_text_attachment_blocks_join_with_newline();
     ok &= test_text_only_stays_string();
     std::cout << (ok ? "ALL PASS\n" : "FAILURES\n");
     return ok ? 0 : 1;

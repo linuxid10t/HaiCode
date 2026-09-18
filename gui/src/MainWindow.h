@@ -172,8 +172,9 @@ private:
     BFilePanel*    dir_panel_       = nullptr;
     BFilePanel*    attach_panel_    = nullptr;
     BGroupView*    attach_row_      = nullptr;   // removable attachment chips
-    // path + media_type of images staged for the next prompt (engine reads
-    // and base64-encodes the files at submit time)
+    // path + media_type of images and text files staged for the next prompt
+    // (engine reads and base64-encodes the files at submit time; kind is
+    // derived from the media type)
     std::vector<std::pair<std::string, std::string>> pending_attachments_;
     BMenuField*    model_field_     = nullptr;
     BPopUpMenu*    model_menu_      = nullptr;

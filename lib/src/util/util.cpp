@@ -59,6 +59,35 @@ std::string base64_encode(const std::string& raw) {
     return out;
 }
 
+std::string base64_decode(const std::string& in) {
+    // Reverse of base64_encode: standard alphabet, '=' padding terminates the
+    // final group, any other character stops decoding (best-effort prefix).
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string out;
+    out.reserve(in.size() / 4 * 3 + 3);
+    uint32_t n = 0;
+    int bits = 0;
+    for (char c : in) {
+        if (c == '=' || c == '\n' || c == '\r') break;
+        int v = val(c);
+        if (v < 0) break;
+        n = (n << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += (char)((n >> bits) & 0xFF);
+        }
+    }
+    return out;
+}
+
 std::string sanitize_utf8(const std::string& s) {
     static const char kReplacement[] = "\xEF\xBF\xBD"; // U+FFFD
     std::string out;

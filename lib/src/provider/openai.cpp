@@ -141,6 +141,10 @@ std::vector<nlohmann::json> translate_messages(
                         }
                         out.push_back(tr);
                     } else if (btype == "text") {
+                        // Newline-separate successive text blocks so a
+                        // follow-on attachment block can't fuse into the
+                        // prompt text without a boundary.
+                        if (!user_text.empty()) user_text += "\n";
                         user_text += block.value("text", "");
                     } else if (btype == "image") {
                         // Anthropic shape {type:"image", source:{media_type,data}}

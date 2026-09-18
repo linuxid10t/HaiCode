@@ -156,18 +156,51 @@ public:
 };
 
 // ---------------------------------------------------------------------------
-// Image attachment support
+// Attachment support (images + text/code files)
 // ---------------------------------------------------------------------------
 
-// File-panel filter: show directories (for navigation) and image files only.
-class ImageRefFilter : public BRefFilter {
+// Extension allowlist for text/code files Haiku's MIME sniffing may miss
+// (they report neither "image/*" nor "text/*").
+static bool has_text_extension(const char* name)
+{
+    static const char* exts[] = {
+        ".txt", ".md", ".markdown", ".c", ".h", ".cpp", ".hpp", ".cc",
+        ".cxx", ".hh", ".py", ".js", ".ts", ".tsx", ".jsx", ".json",
+        ".xml", ".yaml", ".yml", ".sh", ".bash", ".html", ".htm", ".css",
+        ".go", ".rs", ".java", ".rb", ".php", ".csv", ".tsv", ".ini",
+        ".toml", ".cfg", ".conf", ".log", ".mk", ".cmake", ".diff",
+        ".patch", ".sql", ".lua", ".pl", ".swift", ".kt", ".tex",
+    };
+    if (!name) return false;
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    for (const char* ext : exts)
+        if (lower.size() >= strlen(ext) &&
+            lower.compare(lower.size() - strlen(ext), strlen(ext), ext) == 0)
+            return true;
+    return false;
+}
+
+static bool is_text_attachment(const std::string& mimeType, const char* name)
+{
+    if (mimeType.rfind("image/", 0) == 0) return false;
+    if (mimeType.rfind("text/", 0) == 0) return true;
+    return has_text_extension(name);
+}
+
+// File-panel filter: directories (for navigation), image files, and
+// text/code files. Each kind is re-classified on receipt in
+// _HandleAttachRefs, which routes images through the vision gate.
+class AttachmentRefFilter : public BRefFilter {
 public:
     bool Filter(const entry_ref* ref, BNode* node,
                 struct stat_beos* st, const char* mimeType) override
     {
-        (void)ref; (void)st;
+        (void)st;
         if (node && node->IsDirectory()) return true;
-        return mimeType && strncmp(mimeType, "image/", 6) == 0;
+        if (mimeType && strncmp(mimeType, "image/", 6) == 0) return true;
+        return ref && is_text_attachment(mimeType ? mimeType : "", ref->name);
     }
 };
 
@@ -1224,9 +1257,9 @@ MainWindow::_OpenAttachPanel()
         AddHandler(target);
         attach_panel_ = new BFilePanel(B_OPEN_PANEL, new BMessenger(target),
                                        nullptr, B_FILE_NODE, true,
-                                       nullptr, new ImageRefFilter());
+                                       nullptr, new AttachmentRefFilter());
         attach_panel_->SetButtonLabel(B_DEFAULT_BUTTON, "Attach");
-        attach_panel_->Window()->SetTitle("Attach Images");
+        attach_panel_->Window()->SetTitle("Attach Files");
     }
     BEntry entry(project_dir_.c_str());
     entry_ref ref;
@@ -1240,12 +1273,13 @@ MainWindow::_HandleAttachRefs(BMessage* msg)
 {
     static const size_t MAX_ATTACHMENTS = 4;
     static const off_t MAX_BYTES = 4 * 1024 * 1024;  // under Anthropic's 5 MB cap
+    static const off_t MAX_TEXT_BYTES = 256 * 1024;  // keeps one file from flooding context
 
     entry_ref ref;
     bool vision_alerted = false;
     for (int32 i = 0; msg->FindRef("refs", i, &ref) == B_OK; i++) {
         if (pending_attachments_.size() >= MAX_ATTACHMENTS) {
-            _NotifyAttachmentLimit("at most 4 images per prompt");
+            _NotifyAttachmentLimit("at most 4 attachments per prompt");
             break;
         }
         BEntry entry(&ref, true);
@@ -1253,39 +1287,55 @@ MainWindow::_HandleAttachRefs(BMessage* msg)
         if (entry.GetPath(&path) != B_OK) continue;
 
         struct stat st;
-        if (entry.GetStat(&st) == B_OK && st.st_size > MAX_BYTES) {
-            _NotifyAttachmentLimit(path.Leaf() + std::string(" is over 4 MB"));
-            continue;
-        }
+        bool have_stat = entry.GetStat(&st) == B_OK;
 
         BMimeType type;
         std::string mime;
         if (BMimeType::GuessMimeType(&ref, &type) == B_OK)
             mime = type.Type();
-        const char* ok[] = {"image/png", "image/jpeg", "image/gif", "image/webp"};
-        bool supported = false;
-        for (const char* m : ok) supported = supported || mime == m;
-        if (!supported) {
-            _NotifyAttachmentLimit(path.Leaf() + std::string(" is not a supported image"));
-            continue;
-        }
 
-        // Multimedia gate: the file is an image the model must be able to
-        // see. When neither the primary nor a usable fallback can, warn once
-        // per batch and skip the file.
-        if (!_VisionAvailable()) {
-            if (!vision_alerted) {
-                vision_alerted = true;
-                BAlert* alert = new BAlert("no_vision_model",
-                    "The current model can't see images, and no vision fallback "
-                    "is configured, so attachments would be ignored.\n\n"
-                    "Pick a vision-capable model or set a vision fallback first.",
-                    "Open Settings", "Cancel", nullptr,
-                    B_WIDTH_AS_USUAL, B_WARNING_ALERT);
-                if (alert->Go() == 0)
-                    be_app->PostMessage(MSG_SHOW_SETTINGS);
+        if (!is_text_attachment(mime, ref.name)) {
+            // Image path — unchanged semantics: size cap, supported-type list,
+            // vision gate.
+            if (have_stat && st.st_size > MAX_BYTES) {
+                _NotifyAttachmentLimit(path.Leaf() + std::string(" is over 4 MB"));
+                continue;
             }
-            continue;
+            const char* ok[] = {"image/png", "image/jpeg", "image/gif", "image/webp"};
+            bool supported = false;
+            for (const char* m : ok) supported = supported || mime == m;
+            if (!supported) {
+                _NotifyAttachmentLimit(path.Leaf()
+                    + std::string(" is not a supported image or text file"));
+                continue;
+            }
+
+            // Multimedia gate: the file is an image the model must be able to
+            // see. When neither the primary nor a usable fallback can, warn
+            // once per batch and skip the file.
+            if (!_VisionAvailable()) {
+                if (!vision_alerted) {
+                    vision_alerted = true;
+                    BAlert* alert = new BAlert("no_vision_model",
+                        "The current model can't see images, and no vision fallback "
+                        "is configured, so image attachments would be ignored.\n\n"
+                        "Pick a vision-capable model or set a vision fallback first.",
+                        "Open Settings", "Cancel", nullptr,
+                        B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+                    if (alert->Go() == 0)
+                        be_app->PostMessage(MSG_SHOW_SETTINGS);
+                }
+                continue;
+            }
+        } else {
+            // Text path: no vision gate, smaller cap. An empty MIME still
+            // round-trips — the engine treats anything not "image/*" as text.
+            if (have_stat && st.st_size > MAX_TEXT_BYTES) {
+                _NotifyAttachmentLimit(path.Leaf()
+                    + std::string(" is over the 256 KB text limit"));
+                continue;
+            }
+            if (mime.empty()) mime = "text/plain";
         }
 
         pending_attachments_.push_back({path.Path(), mime});
@@ -1370,6 +1420,7 @@ MainWindow::_SubmitPrompt()
     std::vector<haicode::Attachment> attachments;
     for (const auto& [path, mime] : pending_attachments_) {
         haicode::Attachment a;
+        a.kind       = (mime.rfind("image/", 0) == 0) ? "image" : "text";
         a.path       = path;
         a.media_type = mime;
         attachments.push_back(a);

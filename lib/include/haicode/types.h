@@ -30,11 +30,15 @@ struct ModelRef {
     std::string provider_id; // e.g. "anthropic"
 };
 
-// An image attached to a user prompt. `data_b64` is filled by the engine at
+// A file attached to a user prompt. `data_b64` is filled by the engine at
 // submit time (the GUI only supplies path + media_type) and persisted so
 // session replay survives the source file being moved or deleted.
 struct Attachment {
-    std::string media_type;  // "image/png", "image/jpeg", "image/gif", "image/webp"
+    // "image" → shipped as a vision block; "text" → decoded and shipped as a
+    // text content block. Defaults to image so callers predating text support
+    // keep working.
+    std::string kind = "image";
+    std::string media_type;  // "image/png", ... or "text/plain", "text/x-c++src", ...
     std::string path;        // source file path (display + provenance)
     std::string data_b64;    // base64 payload
 };

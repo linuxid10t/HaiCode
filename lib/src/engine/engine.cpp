@@ -230,6 +230,22 @@ static std::string render_image_as_text(const nlohmann::json& att) {
          + att.value("media_type", "image/png") + "]";
 }
 
+// True for attachments ingested as text (code/plain files) rather than
+// vision blocks. Defaults to "image" for rows persisted before text support.
+static bool att_is_text(const nlohmann::json& att) {
+    return att.value("kind", "image") == "text";
+}
+
+// Fenced, path-labeled text block carrying a decoded text attachment, so the
+// model sees provenance as well as content.
+static std::string render_text_attachment(const nlohmann::json& att) {
+    std::string body = util::sanitize_utf8(
+        util::base64_decode(att.value("data_b64", "")));
+    std::string path = att.value("path", "");
+    return "\n\nAttached file: " + (path.empty() ? "unnamed" : path)
+         + "\n```\n" + body + "\n```\n";
+}
+
 std::vector<nlohmann::json> ContextBuilder::assemble_messages(
     const std::vector<SessionMessage>& msgs,
     bool model_accepts_images)
@@ -317,7 +333,10 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     if (!text_out.empty())
                         content.push_back({{"type", "text"}, {"text", text_out}});
                     for (const auto& att : data["attachments"]) {
-                        if (model_accepts_images) {
+                        if (att_is_text(att)) {
+                            content.push_back({{"type", "text"},
+                                {"text", render_text_attachment(att)}});
+                        } else if (model_accepts_images) {
                             content.push_back({
                                 {"type", "image"},
                                 {"source", {
@@ -632,6 +651,7 @@ void SessionEngine::submit_prompt(const std::string& session_id,
             }
             if (b64.empty()) continue;
             arr.push_back({
+                {"kind",       att.kind},
                 {"media_type", att.media_type},
                 {"path",       att.path},
                 {"data_b64",   b64}
@@ -2221,6 +2241,7 @@ void SessionEngine::backfill_attachment_descriptions(
         bool changed = false;
         for (auto& att : data["attachments"]) {
             if (!att.is_object()) continue;
+            if (att.value("kind", "image") == "text") continue;  // no vision needed
             if (att.contains("description")) continue;  // describe once
             std::string desc = describe_image(*provider,
                                               config_.vision_fallback_model,

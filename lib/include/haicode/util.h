@@ -17,6 +17,10 @@ int64_t now_ms();
 // Base64-encode raw bytes (standard alphabet with padding).
 std::string base64_encode(const std::string& raw);
 
+// Reverse of base64_encode (standard alphabet). Decoding stops at '='
+// padding or the first invalid character, returning the best-effort prefix.
+std::string base64_decode(const std::string& in);
+
 // Return a copy of s that is guaranteed to be valid UTF-8: every invalid or
 // truncated byte sequence is replaced with U+FFFD. Valid input passes through
 // unchanged. Used on external content (web pages, command output) before it

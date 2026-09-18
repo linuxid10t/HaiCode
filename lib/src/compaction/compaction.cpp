@@ -193,6 +193,11 @@ std::string serialize_history(const std::vector<SessionMessage>& msgs,
                 out << "### User\n" << d.value("text", "") << "\n\n";
                 if (d.contains("attachments") && d["attachments"].is_array()) {
                     for (const auto& att : d["attachments"]) {
+                        if (att.value("kind", "image") == "text") {
+                            out << "[text attachment: " << att.value("path", "")
+                                << "]\n";
+                            continue;
+                        }
                         out << "[image attachment: " << att.value("name", "")
                             << ", " << att.value("media_type", "image/png")
                             << "]\n";
@@ -227,6 +232,11 @@ std::string serialize_history(const std::vector<SessionMessage>& msgs,
                     << (ok ? "success" : "error") << ")\n" << output << "\n";
                 if (d.contains("attachments") && d["attachments"].is_array()) {
                     for (const auto& att : d["attachments"]) {
+                        if (att.value("kind", "image") == "text") {
+                            out << "[text attachment: " << att.value("path", "")
+                                << "]\n";
+                            continue;
+                        }
                         out << "[image attachment: " << att.value("path", "")
                             << ", " << att.value("media_type", "image/png")
                             << "]\n";
