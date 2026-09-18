@@ -74,7 +74,7 @@ size_t serialized_size(const SessionMessage& m, size_t max_tool_output_bytes) {
         bytes += d.value("text", "").size();
         if (d.contains("attachments") && d["attachments"].is_array()) {
             for (const auto& att : d["attachments"])
-                bytes += 48 + att.value("name", "").size();
+                bytes += 48 + att.value("path", "").size();
         }
     } else if (m.type == "assistant_text") {
         bytes += d.value("text", "").size();
@@ -193,12 +193,17 @@ std::string serialize_history(const std::vector<SessionMessage>& msgs,
                 out << "### User\n" << d.value("text", "") << "\n\n";
                 if (d.contains("attachments") && d["attachments"].is_array()) {
                     for (const auto& att : d["attachments"]) {
+                        if (att.value("absent", false)) {
+                            out << "[attachment unavailable: "
+                                << att.value("path", "") << "]\n";
+                            continue;
+                        }
                         if (att.value("kind", "image") == "text") {
                             out << "[text attachment: " << att.value("path", "")
                                 << "]\n";
                             continue;
                         }
-                        out << "[image attachment: " << att.value("name", "")
+                        out << "[image attachment: " << att.value("path", "")
                             << ", " << att.value("media_type", "image/png")
                             << "]\n";
                     }
@@ -232,6 +237,11 @@ std::string serialize_history(const std::vector<SessionMessage>& msgs,
                     << (ok ? "success" : "error") << ")\n" << output << "\n";
                 if (d.contains("attachments") && d["attachments"].is_array()) {
                     for (const auto& att : d["attachments"]) {
+                        if (att.value("absent", false)) {
+                            out << "[attachment unavailable: "
+                                << att.value("path", "") << "]\n";
+                            continue;
+                        }
                         if (att.value("kind", "image") == "text") {
                             out << "[text attachment: " << att.value("path", "")
                                 << "]\n";

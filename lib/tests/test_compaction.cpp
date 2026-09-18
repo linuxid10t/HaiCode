@@ -403,6 +403,45 @@ static bool test_assembly_with_checkpoint() {
     return true;
 }
 
+// Attachments persist under the "path" key (engine-side contract); the
+// serializer must render that path, not a nonexistent "name" field that
+// silently serializes as an empty string.
+static bool test_serialize_attachment_paths() {
+    std::vector<haicode::SessionMessage> msgs;
+    haicode::SessionMessage up;
+    up.seq = 1; up.type = "user_prompted";
+    up.data_json = nlohmann::json{
+        {"text", "what is this?"},
+        {"attachments", nlohmann::json::array({
+            nlohmann::json{{"kind", "image"}, {"media_type", "image/png"},
+                           {"path", "/tmp/proj/shot.png"}, {"data_b64", "eHg="}},
+        })}
+    }.dump();
+    msgs.push_back(up);
+    haicode::SessionMessage tr;
+    tr.seq = 2; tr.type = "tool_result";
+    tr.data_json = nlohmann::json{
+        {"call_id", "c1"}, {"success", true}, {"output", "ok"},
+        {"attachments", nlohmann::json::array({
+            nlohmann::json{{"kind", "image"}, {"media_type", "image/jpeg"},
+                           {"path", "/tmp/proj/tool.jpg"}, {"data_b64", "eHg="}},
+        })}
+    }.dump();
+    msgs.push_back(tr);
+
+    std::string out = haicode::serialize_history(msgs, 4096);
+    CHECK(out.find("[image attachment: /tmp/proj/shot.png, image/png]")
+              != std::string::npos,
+          "user_prompted image renders its path");
+    CHECK(out.find("[image attachment: /tmp/proj/tool.jpg, image/jpeg]")
+              != std::string::npos,
+          "tool_result image renders its path");
+    CHECK(out.find("[image attachment: ,") == std::string::npos,
+          "no attachment serializes with an empty path");
+    std::cout << "[OK] serialize_history renders attachment paths\n";
+    return true;
+}
+
 static bool test_split_feeds_checkpoint_chain() {
     std::vector<haicode::SessionMessage> msgs;
     auto mk = [](int seq, const char* type, const std::string& text) {
@@ -495,6 +534,7 @@ int main() {
     ok &= test_list_complete_checkpoints();
     ok &= test_messages_survive();
     ok &= test_assembly_with_checkpoint();
+    ok &= test_serialize_attachment_paths();
     ok &= test_split_feeds_checkpoint_chain();
     ok &= test_get_context_window_and_hysteresis();
     if (ok) remove(kDbPath);

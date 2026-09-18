@@ -100,7 +100,7 @@ static bool test_serialize_history() {
     SessionMessage with_img = umsg(2, "see this");
     {
         nlohmann::json d = nlohmann::json::parse(with_img.data_json);
-        d["attachments"] = nlohmann::json::array({{{"name", "screenshot.png"},
+        d["attachments"] = nlohmann::json::array({{{"path", "screenshot.png"},
             {"media_type", "image/png"}, {"data_b64", "AAAA"}}});
         with_img.data_json = d.dump();
     }

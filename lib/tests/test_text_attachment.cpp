@@ -2,8 +2,15 @@
 #include <haicode/engine.h>
 #include <haicode/compaction.h>
 #include <haicode/util.h>
+#include <haicode/provider.h>
+#include <haicode/tool.h>
+#include <chrono>
+#include <cstdio>
+#include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #define CHECK(cond, msg) \
@@ -72,7 +79,8 @@ static bool test_text_attachment_becomes_text_block() {
 // Non-UTF-8 bytes inside a text attachment must not break serialization
 // (nlohmann's strict serializer throws on invalid UTF-8 otherwise).
 static bool test_text_attachment_sanitizes_utf8() {
-    std::string dirty("ok\xC3\x28bad");   // invalid UTF-8 sequence
+    // Split the literal so "\x28" doesn't greedily eat "bad" as hex digits.
+    std::string dirty("ok\xC3\x28" "bad");   // invalid UTF-8 sequence
     haicode::ContextBuilder builder;
     std::vector<haicode::SessionMessage> msgs = {
         make_prompt_row({text_attachment(dirty)})
@@ -138,6 +146,176 @@ static bool test_base64_roundtrip() {
     return true;
 }
 
+// ---- Engine-side persistence of absent markers -----------------------------
+
+static const char* kDbPath = "/tmp/haicode_test_text_att.db";
+
+class FakeProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "fake"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"fake-model"};
+    }
+    int get_model_context(const std::string&) const override { return 0; }
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+};
+
+// Submits prompts with unreadable/empty attachments against a real engine +
+// store, then inspects the persisted user_prompted row.
+static bool test_engine_marks_absent_attachments() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid = engine.create_session("/tmp/proj", "build",
+                                             "fake-model", "fake");
+
+    // Empty file: encodes to "" — must persist as an absent row, not vanish.
+    FILE* f = fopen("/tmp/haicode_test_empty.txt", "w");
+    CHECK(f != nullptr, "create empty file");
+    fclose(f);
+
+    std::vector<haicode::Attachment> atts;
+    haicode::Attachment empty_att;
+    empty_att.kind = "text";
+    empty_att.media_type = "text/plain";
+    empty_att.path = "/tmp/haicode_test_empty.txt";
+    atts.push_back(empty_att);
+    haicode::Attachment missing_att;
+    missing_att.kind = "image";
+    missing_att.media_type = "image/png";
+    missing_att.path = "/tmp/haicode_test_does_not_exist.png";
+    atts.push_back(missing_att);
+    engine.submit_prompt(sid, "here you go", atts);
+
+    auto msgs = store.load_messages(sid);
+    CHECK(!msgs.empty(), "user_prompted row stored");
+    json data = json::parse(msgs[0].data_json, nullptr, false);
+    CHECK(data.contains("attachments") && data["attachments"].is_array()
+              && data["attachments"].size() == 2,
+          "both attachments persisted as rows (none dropped)");
+
+    const auto& a0 = data["attachments"][0];
+    CHECK(a0.value("path", "") == "/tmp/haicode_test_empty.txt"
+              && a0.value("absent", false),
+          "empty file persisted with absent=true");
+    const auto& a1 = data["attachments"][1];
+    CHECK(a1.value("path", "") == "/tmp/haicode_test_does_not_exist.png"
+              && a1.value("absent", false),
+          "unreadable file persisted with absent=true");
+
+    // And the assembled request carries the markers as text blocks.
+    haicode::ContextBuilder builder;
+    auto out = builder.assemble_messages(msgs, false);
+    std::string dumped = out[0].dump();
+    CHECK(dumped.find("[attachment unavailable: /tmp/haicode_test_empty.txt]")
+              != std::string::npos,
+          "assembled request marks the empty attachment");
+    CHECK(dumped.find(
+              "[attachment unavailable: /tmp/haicode_test_does_not_exist.png]")
+              != std::string::npos,
+          "assembled request marks the missing attachment");
+
+    // Compaction serialization shows the same markers.
+    std::string ser = haicode::serialize_history(msgs, 4096);
+    CHECK(ser.find("[attachment unavailable: /tmp/haicode_test_empty.txt]")
+              != std::string::npos,
+          "serialize_history marks the empty attachment");
+
+    remove("/tmp/haicode_test_empty.txt");
+    std::cout << "[OK] engine persists absent markers for empty/unreadable files\n";
+    return true;
+}
+
+// Oversized text attachments are truncated at submit time to exactly the cap
+// plus a trailing marker; files at or under the cap pass through untouched.
+static bool test_engine_truncates_oversized_text() {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid = engine.create_session("/tmp/proj", "build",
+                                             "fake-model", "fake");
+
+    const size_t cap = 256 * 1024;
+    const size_t big = 300 * 1024;
+    {
+        std::ofstream f("/tmp/haicode_test_big.txt",
+                        std::ios::binary | std::ios::trunc);
+        CHECK(f.good(), "create oversized file");
+        f << std::string(big, 'x');
+    }
+    {
+        std::ofstream f("/tmp/haicode_test_atcap.txt",
+                        std::ios::binary | std::ios::trunc);
+        CHECK(f.good(), "create at-cap file");
+        f << std::string(cap, 'y');
+    }
+
+    std::vector<haicode::Attachment> atts;
+    haicode::Attachment big_att;
+    big_att.kind = "text";
+    big_att.media_type = "text/plain";
+    big_att.path = "/tmp/haicode_test_big.txt";
+    atts.push_back(big_att);
+    haicode::Attachment cap_att;
+    cap_att.kind = "text";
+    cap_att.media_type = "text/plain";
+    cap_att.path = "/tmp/haicode_test_atcap.txt";
+    atts.push_back(cap_att);
+    engine.submit_prompt(sid, "two files", atts);
+
+    auto msgs = store.load_messages(sid);
+    json data = json::parse(msgs[0].data_json, nullptr, false);
+    CHECK(data["attachments"].size() == 2, "both rows stored");
+
+    std::string big_dec = haicode::util::base64_decode(
+        data["attachments"][0].value("data_b64", ""));
+    std::string marker = "\n[truncated: " + std::to_string(big - cap)
+                       + " more bytes]";
+    CHECK(big_dec.size() == cap + marker.size(),
+          "oversized text clamped to cap + marker");
+    CHECK(big_dec.compare(0, cap, std::string(cap, 'x')) == 0,
+          "first cap bytes retained");
+    CHECK(big_dec.compare(cap, marker.size(), marker) == 0,
+          "truncation marker appended");
+
+    std::string cap_dec = haicode::util::base64_decode(
+        data["attachments"][1].value("data_b64", ""));
+    CHECK(cap_dec.size() == cap && cap_dec.find("[truncated:") == std::string::npos,
+          "at-cap file passes through untruncated");
+
+    remove("/tmp/haicode_test_big.txt");
+    remove("/tmp/haicode_test_atcap.txt");
+    std::cout << "[OK] engine truncates oversized text at 256 KB + marker\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok &= test_base64_roundtrip();
@@ -145,6 +323,8 @@ int main() {
     ok &= test_text_attachment_sanitizes_utf8();
     ok &= test_mixed_text_and_image_attachments();
     ok &= test_serialize_history_text_attachment();
+    ok &= test_engine_marks_absent_attachments();
+    ok &= test_engine_truncates_oversized_text();
     std::cout << (ok ? "ALL PASS\n" : "FAILURES\n");
     return ok ? 0 : 1;
 }

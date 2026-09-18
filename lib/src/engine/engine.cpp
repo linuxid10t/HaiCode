@@ -230,10 +230,35 @@ static std::string render_image_as_text(const nlohmann::json& att) {
          + att.value("media_type", "image/png") + "]";
 }
 
+// Marker row for an attachment whose file could not be read (or was empty):
+// the transcript must show that something was attached rather than silently
+// dropping it. Consumers render these as a short unavailable-text block.
+static nlohmann::json absent_attachment_row(const Attachment& att) {
+    return {
+        {"kind",       att.kind.empty() ? "image" : att.kind},
+        {"media_type", att.media_type},
+        {"path",       att.path},
+        {"absent",     true}
+    };
+}
+
 // True for attachments ingested as text (code/plain files) rather than
 // vision blocks. Defaults to "image" for rows persisted before text support.
 static bool att_is_text(const nlohmann::json& att) {
     return att.value("kind", "image") == "text";
+}
+
+// Engine-side mirror of the GUI's 256 KB text-attachment cap, enforced at the
+// submit boundary so programmatic callers can't flood context either. Same
+// marker phrasing as compaction's tool-result truncation.
+static constexpr size_t MAX_TEXT_ATTACHMENT_BYTES = 256 * 1024;
+
+static std::string clamp_text_attachment(std::string raw) {
+    if (raw.size() <= MAX_TEXT_ATTACHMENT_BYTES) return raw;
+    size_t dropped = raw.size() - MAX_TEXT_ATTACHMENT_BYTES;
+    raw.resize(MAX_TEXT_ATTACHMENT_BYTES);
+    raw += "\n[truncated: " + std::to_string(dropped) + " more bytes]";
+    return raw;
 }
 
 // Fenced, path-labeled text block carrying a decoded text attachment, so the
@@ -333,7 +358,11 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     if (!text_out.empty())
                         content.push_back({{"type", "text"}, {"text", text_out}});
                     for (const auto& att : data["attachments"]) {
-                        if (att_is_text(att)) {
+                        if (att.value("absent", false)) {
+                            content.push_back({{"type", "text"},
+                                {"text", "[attachment unavailable: "
+                                      + att.value("path", "") + "]"}});
+                        } else if (att_is_text(att)) {
                             content.push_back({{"type", "text"},
                                 {"text", render_text_attachment(att)}});
                         } else if (model_accepts_images) {
@@ -637,19 +666,36 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     if (!attachments.empty()) {
         nlohmann::json arr = nlohmann::json::array();
         for (const auto& att : attachments) {
+            // Text payloads are clamped to MAX_TEXT_ATTACHMENT_BYTES no
+            // matter which side of the boundary supplied them, so a
+            // programmatic caller can't flood context either.
+            const bool is_text = att.kind == "text";
             std::string b64 = att.data_b64;
+            if (!b64.empty() && is_text) {
+                b64 = util::base64_encode(
+                    clamp_text_attachment(util::base64_decode(b64)));
+            }
             if (b64.empty() && !att.path.empty()) {
                 std::ifstream f(att.path, std::ios::binary);
                 if (!f) {
-                    fprintf(stderr, "haicode: attachment unreadable, skipping: %s\n",
+                    fprintf(stderr, "haicode: attachment unreadable, marking absent: %s\n",
                             att.path.c_str());
+                    arr.push_back(absent_attachment_row(att));
                     continue;
                 }
                 std::ostringstream ss;
                 ss << f.rdbuf();
-                b64 = util::base64_encode(ss.str());
+                std::string raw = ss.str();
+                if (is_text) raw = clamp_text_attachment(raw);
+                b64 = util::base64_encode(raw);
             }
-            if (b64.empty()) continue;
+            if (b64.empty()) {
+                // 0-byte file (or neither payload nor path): keep a marker
+                // so the transcript shows something was attached instead of
+                // silently dropping it.
+                arr.push_back(absent_attachment_row(att));
+                continue;
+            }
             arr.push_back({
                 {"kind",       att.kind},
                 {"media_type", att.media_type},
@@ -2241,7 +2287,8 @@ void SessionEngine::backfill_attachment_descriptions(
         bool changed = false;
         for (auto& att : data["attachments"]) {
             if (!att.is_object()) continue;
-            if (att.value("kind", "image") == "text") continue;  // no vision needed
+            if (att.value("absent", false)) continue;  // nothing to describe
+            if (att_is_text(att)) continue;  // no vision needed
             if (att.contains("description")) continue;  // describe once
             std::string desc = describe_image(*provider,
                                               config_.vision_fallback_model,

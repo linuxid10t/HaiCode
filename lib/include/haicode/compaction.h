@@ -33,7 +33,9 @@ int split_history(const std::vector<SessionMessage>& msgs,
 // retained-recent-context measurement. Preserves roles, tool names, arguments,
 // outputs and errors. Tool outputs longer than max_tool_output bytes are
 // truncated with an explicit "[truncated: N more bytes]" marker; image
-// attachments render as "[image attachment: name, media_type]".
+// attachments render as "[image attachment: path, media_type]", text
+// attachments as "[text attachment: path]", and unreadable/empty ones as
+// "[attachment unavailable: path]".
 std::string serialize_history(const std::vector<SessionMessage>& msgs,
                               size_t max_tool_output_bytes);
 

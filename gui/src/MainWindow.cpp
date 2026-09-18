@@ -170,6 +170,14 @@ static bool has_text_extension(const char* name)
         ".go", ".rs", ".java", ".rb", ".php", ".csv", ".tsv", ".ini",
         ".toml", ".cfg", ".conf", ".log", ".mk", ".cmake", ".diff",
         ".patch", ".sql", ".lua", ".pl", ".swift", ".kt", ".tex",
+        ".rst", ".proto", ".graphql", ".gql", ".tf", ".hcl",
+        ".groovy", ".gradle", ".bat", ".cmd", ".ps1", ".psm1", ".nim",
+        ".cr", ".d", ".erl", ".hrl", ".ex", ".exs", ".clj", ".cljs",
+        ".edn", ".fs", ".fsi", ".fsx", ".ml", ".mli", ".r", ".m", ".mm",
+        ".asm", ".s", ".vbs", ".ahk", ".properties", ".rdef",
+        ".scala", ".hs", ".zig", ".vue", ".svelte",
+        // Deliberately excluded: ".env"/".tfvars" (secrets), ".rdefz"
+        // (gzip-compressed binary, not decodable text).
     };
     if (!name) return false;
     std::string lower = name;
@@ -1273,7 +1281,9 @@ MainWindow::_HandleAttachRefs(BMessage* msg)
 {
     static const size_t MAX_ATTACHMENTS = 4;
     static const off_t MAX_BYTES = 4 * 1024 * 1024;  // under Anthropic's 5 MB cap
-    static const off_t MAX_TEXT_BYTES = 256 * 1024;  // keeps one file from flooding context
+    // GUI pre-check with a friendly alert; the engine enforces the same cap
+    // at submit time (MAX_TEXT_ATTACHMENT_BYTES) for programmatic callers.
+    static const off_t MAX_TEXT_BYTES = 256 * 1024;
 
     entry_ref ref;
     bool vision_alerted = false;
