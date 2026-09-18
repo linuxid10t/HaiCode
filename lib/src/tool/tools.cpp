@@ -411,12 +411,14 @@ public:
 
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string path = input.value("path", "");
-        std::string content = input.value("content", "");
         if (path.empty())
             return {false, "", missing_field("write", "path", input)};
-        // content may be legitimately empty (writing an empty file) — but if
-        // path is also missing and input is otherwise empty, the streaming
-        // layer dropped the args. missing_field() above already flags that.
+        // `content` must be present and a string. A missing key must NOT
+        // default to "" — that would empty the target file. An explicitly
+        // empty string stays legal (writing an empty file).
+        if (!input.contains("content") || !input["content"].is_string())
+            return {false, "", missing_field("write", "content", input)};
+        std::string content = input["content"].get<std::string>();
 
         // Resolve relative paths
         if (path[0] != '/') {
@@ -428,29 +430,9 @@ public:
         if (!make_parent_dirs(path))
             return {false, "", "Cannot create parent directories for: " + path + ": " + strerror(errno)};
 
-        // Atomic write: write to tmp, then rename
-        std::string tmp_path = path + ".tmp_write";
-        {
-            std::ofstream f(tmp_path, std::ios::out | std::ios::trunc | std::ios::binary);
-            if (!f.is_open())
-                return {false, "", std::string("Cannot open temp file for write: ") + strerror(errno)};
-            f.write(content.data(), static_cast<std::streamsize>(content.size()));
-            if (!f.good()) {
-                f.close();
-                std::remove(tmp_path.c_str());
-                return {false, "", "Write error: " + std::string(strerror(errno))};
-            }
-            f.close();
-            if (!f.good()) {
-                std::remove(tmp_path.c_str());
-                return {false, "", "Flush error: " + std::string(strerror(errno))};
-            }
-        }
-
-        if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
-            std::remove(tmp_path.c_str());
-            return {false, "", "Cannot rename to target: " + path + ": " + strerror(errno)};
-        }
+        std::string err = util::atomic_write_file(path, content);
+        if (!err.empty())
+            return {false, "", err};
 
         return {true, "Written " + std::to_string(content.size()) + " bytes to " + path, ""};
     }
@@ -603,36 +585,6 @@ public:
 };
 
 // Atomic write: tmp file + rename. Creates parent dirs. Returns "" on success,
-// an error message otherwise. The tmp file is always cleaned up on failure.
-static std::string atomic_write(const std::string& path, const std::string& content) {
-    if (!make_parent_dirs(path))
-        return std::string("Cannot create parent directories for: ") + path + ": " + strerror(errno);
-
-    std::string tmp_path = path + ".tmp_write";
-    {
-        std::ofstream f(tmp_path, std::ios::out | std::ios::trunc | std::ios::binary);
-        if (!f.is_open())
-            return std::string("Cannot open temp file for write: ") + strerror(errno);
-        f.write(content.data(), static_cast<std::streamsize>(content.size()));
-        if (!f.good()) {
-            f.close();
-            std::remove(tmp_path.c_str());
-            return "Write error: " + std::string(strerror(errno));
-        }
-        f.close();
-        if (!f.good()) {
-            std::remove(tmp_path.c_str());
-            return "Flush error: " + std::string(strerror(errno));
-        }
-    }
-
-    if (std::rename(tmp_path.c_str(), path.c_str()) != 0) {
-        std::remove(tmp_path.c_str());
-        return "Cannot rename to target: " + path + ": " + strerror(errno);
-    }
-    return "";
-}
-
 // True if the buffer looks binary (null byte in first 8 KB).
 static bool looks_binary(const std::string& s) {
     size_t scan = std::min<size_t>(s.size(), 8192);
@@ -674,7 +626,6 @@ public:
     ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string path = input.value("path", "");
         std::string old_string = input.value("old_string", "");
-        std::string new_string = input.value("new_string", "");
         bool replace_all = input.value("replace_all", false);
 
         if (path.empty())
@@ -682,6 +633,12 @@ public:
         if (old_string.empty())
             return {false, "", "edit: old_string is empty; nothing to find. "
                                "To delete text, provide both old_string and an empty new_string."};
+        // `new_string` must be present and a string. A missing key must NOT
+        // default to "" — that would delete old_string. An explicitly empty
+        // string stays legal (deletion by design).
+        if (!input.contains("new_string") || !input["new_string"].is_string())
+            return {false, "", missing_field("edit", "new_string", input)};
+        std::string new_string = input["new_string"].get<std::string>();
 
         path = resolve_path(path, ctx.working_dir);
 
@@ -725,7 +682,7 @@ public:
             new_content = content.substr(0, pos) + new_string + content.substr(pos + old_string.size());
         }
 
-        std::string err = atomic_write(path, new_content);
+        std::string err = util::atomic_write_file(path, new_content);
         if (!err.empty())
             return {false, "", err};
 
@@ -1011,7 +968,7 @@ public:
 
         std::string path = plans_dir + "/plan_" + ts + "_" + rand_suffix + ".md";
 
-        std::string err = atomic_write(path,
+        std::string err = util::atomic_write_file(path,
             "<!-- haicode-status: active -->\n" + plan);
         if (!err.empty())
             return {false, "", err};
@@ -1076,7 +1033,7 @@ public:
         while (!base.empty() && base.back() == '/') base.pop_back();
         std::string path = base + "/agents.md";
 
-        std::string err = atomic_write(path, content);
+        std::string err = util::atomic_write_file(path, content);
         if (!err.empty())
             return {false, "", err};
 
@@ -1181,7 +1138,7 @@ public:
         if (pos != std::string::npos)
             content.replace(pos, old_header.size(), new_header);
 
-        std::string err = atomic_write(path, content);
+        std::string err = util::atomic_write_file(path, content);
         if (!err.empty())
             return {false, "", err};
 
@@ -1312,15 +1269,31 @@ public:
 
         path = resolve_path(path, ctx.working_dir);
 
-        // Write proposed content to a temp file
-        std::string tmp = path + ".tmp_diff";
+        // Write proposed content to a securely-created scratch file: mkstemp
+        // picks a unique name (O_EXCL), so a pre-existing sibling of a similar
+        // name can never be touched. Unlinked on every exit path below.
+        std::string tmp;
+        int tfd = util::make_secure_temp(path + ".tmp_diff_", tmp);
+        if (tfd < 0)
+            return {false, "", "Cannot create temp file for " + path + ": " + strerror(errno)};
         {
-            std::ofstream fout(tmp, std::ios::binary);
-            if (!fout.is_open())
-                return {false, "", "Cannot write temp file: " + tmp + ": " + strerror(errno)};
-            fout.write(content.data(), static_cast<std::streamsize>(content.size()));
-            if (!fout)
+            const char* data = content.data();
+            size_t remaining = content.size();
+            bool wfail = false;
+            while (remaining > 0) {
+                ssize_t n = ::write(tfd, data, remaining);
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    wfail = true;
+                    break;
+                }
+                data += n;
+                remaining -= static_cast<size_t>(n);
+            }
+            if (wfail || close(tfd) != 0) {
+                ::unlink(tmp.c_str());
                 return {false, "", "Write failed: " + tmp};
+            }
         }
 
         std::string cmd = "diff -u " + sq(path) + " " + sq(tmp) + " 2>&1";

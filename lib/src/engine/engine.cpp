@@ -85,6 +85,16 @@ static std::string render_prompt(const std::string& tmpl,
     return out;
 }
 
+// Wire label for a SessionMode. Shared by the skills-block build (mode
+// capability note) and log lines so the strings never drift apart.
+static std::string mode_label(SessionMode mode) {
+    switch (mode) {
+        case SessionMode::Plan: return "plan";
+        case SessionMode::Chat: return "chat";
+        default:                return "build";
+    }
+}
+
 std::string render_dynamic_prompt(const std::string& model,
                                   const std::string& os_info,
                                   const std::string& project_dir,
@@ -644,7 +654,8 @@ void SessionEngine::submit_prompt(const std::string& session_id,
                     }
                 }
                 if (!skill_active)
-                    skill_block = build_skills_block(sess->directory, {sk.id});
+                    skill_block = build_skills_block(sess->directory, {sk.id},
+                                                     mode_label(get_mode(session_id)));
             }
         }
     }
@@ -1019,13 +1030,18 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // model_json["skills"]). Rebuilt each step so mid-session toggles in the
     // UI take effect on the next step. Part of the stable prompt body, like
     // agents.md — skill changes are rare, so prefix-cache impact matches.
+    // The block carries a mode capability note, so it is also rebuilt when
+    // the mode flips mid-loop (block_mode caches what the current block
+    // was built with).
     std::vector<std::string> enabled_skills;
     if (model_json.contains("skills") && model_json["skills"].is_array()) {
         for (auto& s : model_json["skills"])
             if (s.is_string()) enabled_skills.push_back(s.get<std::string>());
     }
+    std::string block_mode = mode_label(mode);
     std::string skills_block = build_skills_block(session.directory,
-                                                  enabled_skills);
+                                                  enabled_skills,
+                                                  block_mode);
 
     // Inject the most recent plan file so the agent has it in context even
     // when starting a fresh session after planning was done in a prior one.
@@ -1072,8 +1088,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
-            mode == SessionMode::Plan ? "plan"
-                 : mode == SessionMode::Chat ? "chat" : "build",
+            mode_label(mode).c_str(),
             max_steps, config_.instructions.size());
     // The full prompt embeds project agents.md content; dump it only when
     // explicitly debugging prompt assembly.
@@ -1091,11 +1106,20 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     for (; step < max_steps; ++step) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
+        // Re-read mode each step, before the skills re-read below (the
+        // skills-block rebuild depends on it). The user can toggle Plan/Build
+        // mid-loop (the GUI's _ToggleMode calls set_mode, which updates the
+        // in-memory cache + DB synchronously); the tool allowlist and the
+        // plan-mode system block below must reflect the flip on the next step,
+        // not on the next turn.
+        mode = get_mode(session_id);
+
         // Re-read model_id/provider_id (and inference params) from the session
         // each step. The user can change either via the dropdown mid-loop, and
         // the system prompt (re-rendered below) plus the outgoing request must
         // reflect the new values on the very next step.
         nlohmann::json mj_now;
+        bool skills_changed = false;
         if (auto s_now = store_.get(session_id)) {
             mj_now = nlohmann::json::parse(s_now->model_json, nullptr, false);
             if (mj_now.is_object()) {
@@ -1111,22 +1135,23 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 }
                 if (skills_now != enabled_skills) {
                     enabled_skills = std::move(skills_now);
-                    skills_block = build_skills_block(session.directory,
-                                                      enabled_skills);
+                    skills_changed = true;
                 }
             }
         }
 
-        // Re-read mode each step. The user can toggle Plan/Build mid-loop
-        // (the GUI's _ToggleMode calls set_mode, which updates the
-        // in-memory cache + DB synchronously); the tool allowlist and the
-        // plan-mode system block below must reflect the flip on the next step,
-        // not on the next turn.
-        mode = get_mode(session_id);
         plan_mode_block = (mode == SessionMode::Plan) ? kPlanModeInstructions
                                                        : std::string{};
         chat_mode_block = (mode == SessionMode::Chat) ? kChatModeInstructions
                                                        : std::string{};
+
+        // The skills block carries a mode capability note: rebuild it when
+        // either the enabled set or the mode flipped this step.
+        if (skills_changed || mode_label(mode) != block_mode) {
+            block_mode = mode_label(mode);
+            skills_block = build_skills_block(session.directory,
+                                              enabled_skills, block_mode);
+        }
 
         // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
         // stay current.
@@ -1160,32 +1185,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
-        // Filter tools by mode. Plan and Chat use allowlists (fail-closed):
-        // anything not explicitly safe for that mode is hidden, so future
-        // tools don't silently leak into restricted turns. Build mode has no
-        // filter.
-        if (mode == SessionMode::Plan) {
-            static const std::set<std::string> plan_allowed = {
-                "read", "glob", "grep", "ls", "find",
-                "web_search", "web_extract",
-                "diff", "todo_write", "ask_user",
-                "propose_plan", "discard_plan",
-                "screenshot",
-            };
-            std::erase_if(tool_defs, [&](const ToolDefinition& td) {
-                return !plan_allowed.count(td.name);
-            });
-        } else if (mode == SessionMode::Chat) {
-            // Chat = conversation + web research only; zero local computer
-            // access. todo_write touches only app-internal session state and
-            // ask_user only round-trips to the UI.
-            static const std::set<std::string> chat_allowed = {
-                "web_search", "web_extract", "todo_write", "ask_user",
-            };
-            std::erase_if(tool_defs, [&](const ToolDefinition& td) {
-                return !chat_allowed.count(td.name);
-            });
-        }
+        // Filter tools by mode via the shared allowlist (tool_allowed_in_mode,
+        // also enforced at execution time in ToolRegistry::execute_impl, so
+        // the wire list and the execution check can never diverge). Plan and
+        // Chat are fail-closed: anything not explicitly safe for that mode is
+        // hidden, so future tools don't silently leak into restricted turns.
+        // Build mode has no filter. (Chat = conversation + web research only;
+        // todo_write touches only app-internal session state and ask_user
+        // only round-trips to the UI.)
+        std::erase_if(tool_defs, [&](const ToolDefinition& td) {
+            return !tool_allowed_in_mode(td.name, mode);
+        });
         // Vision gate: the screenshot tool returns an image the model must be
         // able to see. Hide it from text-only models unless a vision fallback
         // is configured (the returned PNG gets described by the backfill pass
@@ -1544,6 +1554,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ctx.call_id = call.id;
             ctx.working_dir = session.directory;
             ctx.config = &config_;
+            ctx.mode = mode;
 
             auto result = tools_.execute(call.name, call.input, ctx, permissions_);
 
@@ -1597,7 +1608,12 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     data["output"] = result.output;
                 }
             } else {
-                data["output"] = result.error;
+                // A failed tool may still have produced output (bash stdout,
+                // timeout captures) — that diagnostics text is what lets the
+                // model recover. Persist it alongside the failure status.
+                data["output"] = result.output.empty()
+                    ? result.error
+                    : result.error + "\n" + result.output;
             }
             store_.append_message(session_id, "tool_result", data.dump());
 
@@ -1761,11 +1777,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                             if (ppos != std::string::npos)
                                 pcontent.replace(ppos, kOld.size(), kNew);
                             // Best-effort: ignore write errors (plan still implemented).
-                            std::string tmp = plan_path + ".tmp_write";
-                            if (std::ofstream out{tmp, std::ios::binary}) {
-                                out.write(pcontent.data(), pcontent.size());
-                                if (out.good()) rename(tmp.c_str(), plan_path.c_str());
-                            }
+                            (void)util::atomic_write_file(plan_path, pcontent);
                         }
                     }
                 }

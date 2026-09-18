@@ -1,6 +1,9 @@
+#include <haicode/haicode.h>
 #include <haicode/tool.h>
 #include <haicode/util.h>
 #include <iostream>
+#include <fstream>
+#include <cstdio>
 #include <string>
 #include <stdexcept>
 #include <nlohmann/json.hpp>
@@ -184,6 +187,144 @@ static bool registry_sanitizes_invalid_output() {
 }
 
 // ============================================================
+// Gate tail: explicit-Allow requirement (review #10) and
+// execution-time mode enforcement (review #1)
+// ============================================================
+
+static bool registry_unresolved_ask_denied() {
+    // No rules, no ask callback: check() returns Ask. Must NOT execute.
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+
+    const std::string p = "/tmp/tts_unresolved.txt";
+    std::remove(p.c_str());
+    auto r = reg.execute("write", {{"path", p}, {"content", "x"}}, ctx, gate);
+    CHECK(!r.success, "unresolved Ask must not execute the tool");
+    CHECK(r.denied,   "denied flag should be set for unresolved Ask");
+    CHECK(r.error.find("not granted") != std::string::npos,
+          "error should say 'not granted', got: " + r.error);
+    std::ifstream f(p);
+    CHECK(!f.is_open(), "target file must not be created");
+    std::remove(p.c_str());
+    std::cout << "[OK] registry unresolved Ask is denied, not executed\n";
+    return true;
+}
+
+static bool registry_ask_callback_allow_executes() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                               const std::string&, const nlohmann::json&) {
+        return haicode::PermissionEffect::Allow;
+    });
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+
+    const std::string p = "/tmp/tts_ask_allow.txt";
+    std::remove(p.c_str());
+    auto r = reg.execute("write", {{"path", p}, {"content", "x"}}, ctx, gate);
+    CHECK(r.success, "Ask resolved to Allow by callback must execute: " + r.error);
+    std::ifstream f(p);
+    CHECK(f.is_open(), "file should exist after allowed write");
+    std::remove(p.c_str());
+    std::cout << "[OK] registry Ask resolved to Allow executes\n";
+    return true;
+}
+
+static bool registry_explicit_deny_still_denied() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"write", "*", haicode::PermissionEffect::Deny}});
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+
+    const std::string p = "/tmp/tts_deny.txt";
+    std::remove(p.c_str());
+    auto r = reg.execute("write", {{"path", p}, {"content", "x"}}, ctx, gate);
+    CHECK(!r.success, "explicit Deny must block execution");
+    CHECK(r.denied,   "denied flag should be set");
+    CHECK(r.error.find("Permission denied") != std::string::npos,
+          "error should say 'Permission denied', got: " + r.error);
+    std::remove(p.c_str());
+    std::cout << "[OK] registry explicit Deny still denied\n";
+    return true;
+}
+
+static bool registry_chat_mode_blocks_tools() {
+    // Rules allow everything — the mode restriction alone must block.
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+    ctx.mode = haicode::SessionMode::Chat;
+
+    const std::string p = "/tmp/tts_chat_write.txt";
+    std::remove(p.c_str());
+    auto w = reg.execute("write", {{"path", p}, {"content", "x"}}, ctx, gate);
+    CHECK(!w.success, "Chat mode must block write even when rules allow");
+    CHECK(!w.denied,   "mode restriction is not a permission denial");
+    CHECK(w.error.find("mode restriction") != std::string::npos,
+          "error should mention the mode restriction, got: " + w.error);
+    CHECK(w.error.find("chat") != std::string::npos, "error should name chat mode");
+    std::ifstream f(p);
+    CHECK(!f.is_open(), "file must not be created in Chat mode");
+
+    // Chat blocks even read (before the working-dir bypass).
+    const std::string rp = "/tmp/tts_chat_read.txt";
+    std::ofstream wf(rp); wf << "data\n"; wf.close();
+    auto rd = reg.execute("read", {{"path", rp}}, ctx, gate);
+    CHECK(!rd.success, "Chat mode must block read too");
+    CHECK(rd.error.find("mode restriction") != std::string::npos,
+          "read error should mention the mode restriction");
+    std::remove(p.c_str());
+    std::remove(rp.c_str());
+
+    // Allowed Chat tools still pass the mode gate (web_search needs no net
+    // access to prove the gate lets it through to execution).
+    auto ws = reg.execute("web_search", {{"query", "x"}, {"max_results", 1}}, ctx, gate);
+    CHECK(ws.error.find("mode restriction") == std::string::npos,
+          "web_search must not hit the mode restriction");
+
+    std::cout << "[OK] registry Chat mode blocks write/read, passes web_search\n";
+    return true;
+}
+
+static bool registry_plan_mode_blocks_write_allows_read() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+    ctx.mode = haicode::SessionMode::Plan;
+
+    const std::string p = "/tmp/tts_plan_write.txt";
+    std::remove(p.c_str());
+    auto w = reg.execute("write", {{"path", p}, {"content", "x"}}, ctx, gate);
+    CHECK(!w.success, "Plan mode must block write");
+    CHECK(w.error.find("plan") != std::string::npos,
+          "error should name plan mode, got: " + w.error);
+    std::ifstream f(p);
+    CHECK(!f.is_open(), "file must not be created in Plan mode");
+    std::remove(p.c_str());
+
+    const std::string rp = "/tmp/tts_plan_read.txt";
+    std::ofstream wf(rp); wf << "data\n"; wf.close();
+    auto rd = reg.execute("read", {{"path", rp}}, ctx, gate);
+    CHECK(rd.success, "Plan mode must still allow read: " + rd.error);
+    std::remove(rp.c_str());
+    std::cout << "[OK] registry Plan mode blocks write, allows read\n";
+    return true;
+}
+
+// ============================================================
 
 int main() {
     std::cout << "=== Tool Safety Tests ===\n\n";
@@ -203,6 +344,13 @@ int main() {
     std::cout << "\n-- ToolRegistry chokepoint --\n";
     ok &= registry_catches_tool_exception();
     ok &= registry_sanitizes_invalid_output();
+
+    std::cout << "\n-- Gate tail + mode enforcement --\n";
+    ok &= registry_unresolved_ask_denied();
+    ok &= registry_ask_callback_allow_executes();
+    ok &= registry_explicit_deny_still_denied();
+    ok &= registry_chat_mode_blocks_tools();
+    ok &= registry_plan_mode_blocks_write_allows_read();
 
     if (ok) {
         std::cout << "\nAll tool safety tests passed!\n";

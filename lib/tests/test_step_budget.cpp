@@ -3,13 +3,19 @@
 #include <haicode/provider.h>
 #include <haicode/tool.h>
 #include <haicode/config.h>
+#include <haicode/haicode.h>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
+#include <sys/stat.h>
+#include <nlohmann/json.hpp>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)
@@ -217,6 +223,211 @@ static bool test_destructor_joins_running_loop() {
     return true;
 }
 
+// ============================================================
+// Engine e2e: execution-time mode gate + failure-output persistence
+// ============================================================
+
+// First stream() emits the configured tool call; every later call ends the
+// turn. Drives the full engine loop without a real LLM.
+class ToolCallProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "toolcall"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"tc-model"};
+    }
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+        ++calls;
+        if (calls == 1) {
+            std::vector<haicode::ToolCall> tcs{pending};
+            cb.on_finish(haicode::FinishReason::ToolUse, {}, tcs);
+            return;
+        }
+        cb.on_text_delta("t", "done");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    int calls = 0;
+    haicode::ToolCall pending;
+};
+
+static bool wait_for_rows(haicode::SessionStore& store, const std::string& sid,
+                          size_t want) {
+    for (int i = 0; i < 200; ++i) {
+        if (store.load_messages(sid).size() >= want) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return store.load_messages(sid).size() >= want;
+}
+
+static std::string first_tool_result_output(haicode::SessionStore& store,
+                                            const std::string& sid) {
+    for (const auto& m : store.load_messages(sid)) {
+        if (m.type != "tool_result") continue;
+        auto j = nlohmann::json::parse(m.data_json, nullptr, false);
+        if (j.is_object()) return j.value("output", "");
+    }
+    return "";
+}
+
+// Review #1 e2e: Chat mode + a provider that returns a `write` call anyway.
+// The wire filter already hides write; the execution-time check must refuse
+// it even though the permission rules allow everything. The failed
+// tool_result persists (denied=false → turn continues) and the file is
+// never created.
+static bool test_chat_mode_write_blocked_e2e() {
+    std::string tmpl = "/tmp/hc_test_chat_e2e_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<ToolCallProvider>();
+    provider->pending.id = "c1";
+    provider->pending.name = "write";
+    provider->pending.input = {{"path", proj + "/target.txt"},
+                               {"content", "must not land"}};
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "tc-model";
+    cfg.provider = "toolcall";
+    cfg.autoname_sessions = false;
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(proj, "build", "tc-model",
+                                                "toolcall");
+        engine.set_mode(sid, haicode::SessionMode::Chat);
+        engine.submit_prompt(sid, "make a file");
+
+        CHECK(wait_for_rows(store, sid, 4),
+              "turn must complete: user + assistant(tool_calls) + tool_result"
+              " + final assistant text");
+        std::ifstream f(proj + "/target.txt");
+        CHECK(!f.is_open(), "Chat mode must not create the target file");
+        std::string out = first_tool_result_output(store, sid);
+        CHECK(out.find("mode restriction") != std::string::npos,
+              "tool_result should carry the mode-restriction error, got: " + out);
+        CHECK(out.find("write") != std::string::npos,
+              "error should name the blocked tool");
+    }
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e Chat mode blocks a provider-emitted write\n";
+    return true;
+}
+
+// Build-mode control for the above: identical provider + rules, Build mode —
+// the write executes and lands on disk.
+static bool test_build_mode_write_executes_e2e() {
+    std::string tmpl = "/tmp/hc_test_build_e2e_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<ToolCallProvider>();
+    provider->pending.id = "c1";
+    provider->pending.name = "write";
+    provider->pending.input = {{"path", proj + "/target.txt"},
+                               {"content", "landed"}};
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "tc-model";
+    cfg.provider = "toolcall";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";  // AppConfig defaults to plan; this is the Build control
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(proj, "build", "tc-model",
+                                                "toolcall");
+        engine.submit_prompt(sid, "make a file");
+
+        CHECK(wait_for_rows(store, sid, 4), "turn must complete in Build mode");
+        std::ifstream f(proj + "/target.txt");
+        CHECK(f.is_open(), "Build mode must execute the write");
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+        CHECK(content == "landed", "file content mismatch: " + content);
+    }
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e Build mode control executes the write\n";
+    return true;
+}
+
+// Review #6 e2e: a failing bash command must persist its captured output
+// alongside the exit status, so the model can read the diagnostics.
+static bool test_bash_failure_output_persisted_e2e() {
+    std::string tmpl = "/tmp/hc_test_bashfail_e2e_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<ToolCallProvider>();
+    provider->pending.id = "c1";
+    provider->pending.name = "bash";
+    provider->pending.input = {{"command", "echo boom; exit 3"}};
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "tc-model";
+    cfg.provider = "toolcall";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";  // bash is not in the plan allowlist
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(proj, "build", "tc-model",
+                                                "toolcall");
+        engine.submit_prompt(sid, "run it");
+
+        CHECK(wait_for_rows(store, sid, 4), "turn must complete");
+        std::string out = first_tool_result_output(store, sid);
+        CHECK(out.find("Exit code: 3") != std::string::npos,
+              "persisted tool_result must carry the exit status, got: " + out);
+        CHECK(out.find("boom") != std::string::npos,
+              "persisted tool_result must carry the command output, got: " + out);
+    }
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e bash failure persists exit status + output\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -230,6 +441,9 @@ int main() {
     ok &= test_critical_tier();
     ok &= test_placeholder_substitution();
     ok &= test_destructor_joins_running_loop();
+    ok &= test_chat_mode_write_blocked_e2e();
+    ok &= test_build_mode_write_executes_e2e();
+    ok &= test_bash_failure_output_persisted_e2e();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";

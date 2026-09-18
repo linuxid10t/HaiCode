@@ -27,6 +27,20 @@ std::string base64_decode(const std::string& in);
 // is embedded in JSON — nlohmann's strict serializer throws otherwise.
 std::string sanitize_utf8(const std::string& s);
 
+// Atomically replace `path` with `content`: the temp file is created via
+// mkstemp (O_CREAT|O_EXCL — it can never clobber a pre-existing sibling),
+// inherits the target's previous permission bits when the target existed
+// (an 0755 script keeps its execute bits), is fsynced, then renamed over
+// the target. Returns "" on success, error text otherwise. Parent-directory
+// creation is the caller's responsibility.
+std::string atomic_write_file(const std::string& path, const std::string& content);
+
+// Create a securely-named scratch file via mkstemp on tmpl_prefix +
+// "XXXXXX". For temp files that are deleted when done (not renamed over a
+// target). Returns the open fd (caller closes and unlinks), or -1 on
+// failure; out_path receives the created name.
+int make_secure_temp(const std::string& tmpl_prefix, std::string& out_path);
+
 } // namespace util
 
 // libcurl-based HTTP client with SSE support

@@ -170,6 +170,35 @@ PermissionEffect PermissionGate::check(const std::string& session_id,
     return PermissionEffect::Ask;
 }
 
+// ---- tool_allowed_in_mode ----
+//
+// Plan and Chat use fail-closed allowlists: anything not explicitly safe for
+// the mode is refused. Build mode has no restriction. The engine reuses this
+// for the wire-request filter so the two checks can never diverge.
+bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode) {
+    switch (mode) {
+    case SessionMode::Plan: {
+        static const std::set<std::string> plan_allowed = {
+            "read", "glob", "grep", "ls", "find",
+            "web_search", "web_extract",
+            "diff", "todo_write", "ask_user",
+            "propose_plan", "discard_plan",
+            "screenshot",
+        };
+        return plan_allowed.count(tool_name) > 0;
+    }
+    case SessionMode::Chat: {
+        static const std::set<std::string> chat_allowed = {
+            "web_search", "web_extract", "todo_write", "ask_user",
+        };
+        return chat_allowed.count(tool_name) > 0;
+    }
+    case SessionMode::Build:
+        return true;
+    }
+    return true;
+}
+
 // ---- ToolRegistry ----
 
 void ToolRegistry::register_tool(std::shared_ptr<Tool> tool) {
@@ -225,6 +254,21 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
         ToolResult r;
         r.success = false;
         r.error = "Unknown tool: " + name;
+        return r;
+    }
+
+    // Execution-time mode restriction. The engine filters tools out of the
+    // wire request, but a provider may still return a call for a hidden
+    // tool — refuse it here, before any always-allow bypass (Chat mode must
+    // block even `read`). Deliberately not a permission denial (denied=false)
+    // so the turn isn't killed: the failed tool_result persists and the model
+    // recovers with an allowed tool or a text reply.
+    if (!tool_allowed_in_mode(name, ctx.mode)) {
+        ToolResult r;
+        r.success = false;
+        r.error = "[mode restriction] tool '" + name + "' is not available in "
+                + (ctx.mode == SessionMode::Chat ? "chat" : "plan")
+                + " mode";
         return r;
     }
 
@@ -294,11 +338,17 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
                            tool->required_permission(),
                            tool->resource(input, ctx),
                            input);
-    if (perm == PermissionEffect::Deny) {
+    // Only an explicit Allow executes. An unresolved Ask — no rule matched
+    // and no ask callback resolved it (library consumers without a UI) —
+    // must NOT fall through to execution.
+    if (perm != PermissionEffect::Allow) {
         ToolResult r;
         r.success = false;
         r.denied  = true;
-        r.error   = "Permission denied for tool: " + name;
+        r.error   = (perm == PermissionEffect::Deny)
+                  ? "Permission denied for tool: " + name
+                  : "Permission not granted for tool: " + name
+                    + " (no applicable Allow rule or user approval)";
         return r;
     }
 

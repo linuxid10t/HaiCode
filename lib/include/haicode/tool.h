@@ -22,6 +22,11 @@ struct ToolContext {
     // execution; tools that need configurable behaviour (e.g. web_search)
     // read from this pointer. May be null in tests.
     const AppConfig* config = nullptr;
+    // Session mode at the time of the call. ToolRegistry::execute_impl
+    // enforces the Plan/Chat allowlists against this, so a tool hidden from
+    // the wire request can never be executed by a provider that returns it
+    // anyway. Defaults to Build so direct-call test sites keep full access.
+    SessionMode mode = SessionMode::Build;
 };
 
 struct ToolResult {
@@ -92,6 +97,12 @@ private:
     std::map<std::string, std::vector<PermissionRule>> session_allows_;
     AskCallback ask_cb_;
 };
+
+// Single source of truth for per-mode tool allowlists. Build mode allows
+// everything; Plan and Chat use fail-closed allowlists. Used both to filter
+// the wire request (engine) and to validate each returned tool call before
+// execution (ToolRegistry::execute_impl) — so the two can never diverge.
+bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode);
 
 class ToolRegistry {
 public:

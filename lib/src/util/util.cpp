@@ -6,6 +6,10 @@
 #include <random>
 #include <curl/curl.h>
 #include <cstring>
+#include <cstdlib>
+#include <vector>
+#include <unistd.h>
+#include <sys/stat.h>
 
 namespace haicode {
 namespace util {
@@ -133,6 +137,77 @@ std::string sanitize_utf8(const std::string& s) {
         i += len;
     }
     return out;
+}
+
+std::string atomic_write_file(const std::string& path, const std::string& content) {
+    // Remember the target's permission bits so replacement preserves them
+    // (an 0755 script keeps its execute bits). 0 = target doesn't exist yet.
+    mode_t mode = 0;
+    struct stat st{};
+    if (stat(path.c_str(), &st) == 0)
+        mode = st.st_mode & 07777;
+
+    // mkstemp demands trailing X's and creates with O_EXCL semantics — a
+    // pre-existing file of a similar name can never be clobbered.
+    std::string tmpl = path + ".tmp_write_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
+    if (fd < 0)
+        return "Cannot create temp file for " + path + ": " + strerror(errno);
+    std::string tmp_path(buf.data());
+
+    if (fchmod(fd, mode != 0 ? mode : (mode_t)0644) != 0) {
+        std::string err = "Cannot set mode on temp file: " + std::string(strerror(errno));
+        close(fd);
+        unlink(tmp_path.c_str());
+        return err;
+    }
+
+    // Write loop: ::write may transfer less than requested.
+    const char* data = content.data();
+    size_t remaining = content.size();
+    while (remaining > 0) {
+        ssize_t n = ::write(fd, data, remaining);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            std::string err = "Write error on " + tmp_path + ": " + strerror(errno);
+            close(fd);
+            unlink(tmp_path.c_str());
+            return err;
+        }
+        data += n;
+        remaining -= static_cast<size_t>(n);
+    }
+
+    if (fsync(fd) != 0) {
+        std::string err = "Flush error on " + tmp_path + ": " + strerror(errno);
+        close(fd);
+        unlink(tmp_path.c_str());
+        return err;
+    }
+    if (close(fd) != 0) {
+        std::string err = "Close error on " + tmp_path + ": " + strerror(errno);
+        unlink(tmp_path.c_str());
+        return err;
+    }
+
+    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
+        std::string err = "Cannot rename to target: " + path + ": " + strerror(errno);
+        unlink(tmp_path.c_str());
+        return err;
+    }
+    return "";
+}
+
+int make_secure_temp(const std::string& tmpl_prefix, std::string& out_path) {
+    std::string tmpl = tmpl_prefix + "XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
+    if (fd >= 0)
+        out_path.assign(buf.data());
+    return fd;
 }
 
 } // namespace util

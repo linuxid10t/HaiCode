@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
+#include <dirent.h>
 
 // ---- Helpers ----
 
@@ -46,6 +47,23 @@ static std::string read_file(const std::string& path) {
 static bool file_exists(const std::string& path) {
     struct stat st{};
     return stat(path.c_str(), &st) == 0;
+}
+
+// Count entries in `dir` whose name starts with `prefix`. Temp names are
+// random now (mkstemp), so leftovers must be detected by scan, not by a
+// fixed filename.
+static int count_files_with_prefix(const std::string& dir, const std::string& prefix) {
+    DIR* d = opendir(dir.c_str());
+    if (!d) return -1;
+    int n = 0;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string name = ent->d_name;
+        if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0)
+            ++n;
+    }
+    closedir(d);
+    return n;
 }
 
 #define CHECK(cond, msg) \
@@ -239,15 +257,45 @@ static bool write_missing_path_param() {
 }
 
 static bool write_no_stray_tmp_file() {
-    const std::string p   = "/tmp/tft_write_notmp.txt";
-    const std::string tmp = p + ".tmp_write";
+    const std::string p = "/tmp/tft_write_notmp.txt";
     std::remove(p.c_str());
-    std::remove(tmp.c_str());
     auto r = tool("write")->execute({{"path", p}, {"content", "clean\n"}}, ctx());
     CHECK(r.success, r.error);
-    CHECK(!file_exists(tmp), ".tmp_write file left behind after successful write");
+    CHECK(count_files_with_prefix("/tmp", "tft_write_notmp.txt.tmp_write_") == 0,
+          "temp file left behind after successful write");
     std::remove(p.c_str());
-    std::cout << "[OK] write leaves no stray .tmp_write file\n";
+    std::cout << "[OK] write leaves no stray temp file\n";
+    return true;
+}
+
+// Regression (review #5): a write call with only `path` used to default
+// content to "" and empty the target file.
+static bool write_missing_content_param_leaves_file_intact() {
+    const std::string p = "/tmp/tft_write_nocontent.txt";
+    write_file(p, "precious data\n");
+    auto r = tool("write")->execute({{"path", p}}, ctx());
+    CHECK(!r.success, "write without content must fail");
+    CHECK(r.error.find("content") != std::string::npos,
+          "error must name the missing field, got: " + r.error);
+    CHECK(read_file(p) == "precious data\n",
+          "file must be intact after rejected write");
+    std::remove(p.c_str());
+    std::cout << "[OK] write without content param leaves file intact\n";
+    return true;
+}
+
+// Regression (review #9): atomic replacement dropped the execute bits.
+static bool write_preserves_mode_0755() {
+    const std::string p = "/tmp/tft_write_mode.sh";
+    write_file(p, "#!/bin/sh\n");
+    chmod(p.c_str(), 0755);
+    auto r = tool("write")->execute({{"path", p}, {"content", "#!/bin/sh\nexit 0\n"}}, ctx());
+    CHECK(r.success, r.error);
+    struct stat st{};
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0755, "write must preserve 0755 mode");
+    std::remove(p.c_str());
+    std::cout << "[OK] write preserves 0755 mode\n";
     return true;
 }
 
@@ -382,17 +430,66 @@ static bool edit_relative_path() {
 }
 
 static bool edit_no_stray_tmp_file() {
-    const std::string p   = "/tmp/tft_edit_notmp.txt";
-    const std::string tmp = p + ".tmp_write";
+    const std::string p = "/tmp/tft_edit_notmp.txt";
     write_file(p, "original\n");
-    std::remove(tmp.c_str());
     auto r = tool("edit")->execute(
         {{"path", p}, {"old_string", "original"}, {"new_string", "replaced"}},
         ctx());
     CHECK(r.success, r.error);
-    CHECK(!file_exists(tmp), ".tmp_write left behind after successful edit");
+    CHECK(count_files_with_prefix("/tmp", "tft_edit_notmp.txt.tmp_write_") == 0,
+          "temp file left behind after successful edit");
     std::remove(p.c_str());
-    std::cout << "[OK] edit leaves no stray .tmp_write file\n";
+    std::cout << "[OK] edit leaves no stray temp file\n";
+    return true;
+}
+
+// Regression (review #5): missing new_string used to default to "" — deletion.
+static bool edit_missing_new_string_param_leaves_file_intact() {
+    const std::string p = "/tmp/tft_edit_nonew.txt";
+    write_file(p, "keep this line\n");
+    auto r = tool("edit")->execute({{"path", p}, {"old_string", "keep"}}, ctx());
+    CHECK(!r.success, "edit without new_string must fail");
+    CHECK(r.error.find("new_string") != std::string::npos,
+          "error must name the missing field, got: " + r.error);
+    CHECK(read_file(p) == "keep this line\n",
+          "file must be unchanged after rejected edit");
+    std::remove(p.c_str());
+    std::cout << "[OK] edit without new_string param leaves file unchanged\n";
+    return true;
+}
+
+static bool edit_preserves_mode_0755() {
+    const std::string p = "/tmp/tft_edit_mode.sh";
+    write_file(p, "#!/bin/sh\necho v1\n");
+    chmod(p.c_str(), 0755);
+    auto r = tool("edit")->execute(
+        {{"path", p}, {"old_string", "v1"}, {"new_string", "v2"}}, ctx());
+    CHECK(r.success, r.error);
+    struct stat st{};
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0755, "edit must preserve 0755 mode");
+    std::remove(p.c_str());
+    std::cout << "[OK] edit preserves 0755 mode\n";
+    return true;
+}
+
+// Regression (review #2): DiffTool used the predictable name <path>.tmp_diff
+// and unlinked it — a read-only preview destroyed a pre-existing sibling.
+static bool diff_preserves_sibling_tmp_diff_file() {
+    const std::string p        = "/tmp/tft_diff_sib.txt";
+    const std::string sentinel = p + ".tmp_diff";
+    write_file(p, "original line\n");
+    write_file(sentinel, "sentinel payload\n");
+    auto r = tool("diff")->execute({{"path", p}, {"content", "changed line\n"}}, ctx());
+    CHECK(r.success, r.error);
+    CHECK(r.output.find("+changed line") != std::string::npos, "diff output expected");
+    CHECK(read_file(sentinel) == "sentinel payload\n",
+          "pre-existing .tmp_diff sibling must survive a diff preview byte-identical");
+    CHECK(count_files_with_prefix("/tmp", "tft_diff_sib.txt.tmp_diff_") == 0,
+          "diff must leave no scratch files behind");
+    std::remove(p.c_str());
+    std::remove(sentinel.c_str());
+    std::cout << "[OK] diff preserves pre-existing .tmp_diff sibling\n";
     return true;
 }
 
@@ -439,6 +536,8 @@ int main() {
     ok &= write_relative_path();
     ok &= write_missing_path_param();
     ok &= write_no_stray_tmp_file();
+    ok &= write_missing_content_param_leaves_file_intact();
+    ok &= write_preserves_mode_0755();
 
     std::cout << "\n-- edit --\n";
     ok &= edit_basic();
@@ -452,6 +551,9 @@ int main() {
     ok &= edit_missing_file();
     ok &= edit_relative_path();
     ok &= edit_no_stray_tmp_file();
+    ok &= edit_missing_new_string_param_leaves_file_intact();
+    ok &= edit_preserves_mode_0755();
+    ok &= diff_preserves_sibling_tmp_diff_file();
     ok &= edit_whitespace_must_match_exactly();
 
     if (ok) {
