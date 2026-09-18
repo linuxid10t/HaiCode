@@ -137,14 +137,48 @@ static void test_discovery() {
     CHECK(block.find("deep duplicate") == std::string::npos);
     CHECK(block.find("missing.md") == std::string::npos);   // skipped id
 
+    // Location line: absolute file path plus the skill directory, so
+    // relative resources resolve against the skill, not the project.
+    CHECK(block.find("Location: " + gdir + "/alpha.md")
+          != std::string::npos);
+    CHECK(block.find("skill directory: " + gdir) != std::string::npos);
+    CHECK(block.find("Location: " + gdir + "/pack/skills/dirskill/SKILL.md")
+          != std::string::npos);
+    CHECK(block.find("skill directory: " + gdir + "/pack/skills/dirskill")
+          != std::string::npos);
+    CHECK(block.find("Location: " + proj + "/.haicode/skills/shadowed.md")
+          != std::string::npos);                     // project wins shadowing
+
+    // Mode capability notes appear only in tool-stripped modes.
+    auto chat_block = haicode::build_skills_block(proj, {"alpha.md"}, "chat");
+    CHECK(chat_block.find("Chat mode") != std::string::npos);
+    auto plan_block = haicode::build_skills_block(proj, {"alpha.md"}, "plan");
+    CHECK(plan_block.find("Plan mode") != std::string::npos);
+    CHECK(block.find("Chat mode") == std::string::npos);  // default = build
+    CHECK(block.find("Plan mode") == std::string::npos);
+
     CHECK(haicode::build_skills_block(proj, {}).empty());
 
-    // Truncation: a skill bigger than the cap gets a marker.
+    // Oversized skill: omitted individually with a marker; a smaller skill
+    // enabled after it still lands (no truncate-all).
     std::string big(80 * 1024, 'x');
     write_file(gdir + "/huge.md", big);
-    auto trunc = haicode::build_skills_block(proj, {"huge.md"});
-    CHECK(trunc.find("[skills truncated]") != std::string::npos);
+    auto trunc = haicode::build_skills_block(proj, {"huge.md", "beta.md"});
+    CHECK(trunc.find("[skill 'huge.md' omitted: exceeds the skills block "
+                     "size cap]") != std::string::npos);
+    CHECK(trunc.find("Beta body; no frontmatter.") != std::string::npos);
     CHECK(trunc.size() < 80 * 1024);
+
+    // Two skills that together exceed the cap: first fits, second is
+    // omitted with the cap-reached marker.
+    std::string half(40 * 1024, 'y');
+    write_file(gdir + "/half1.md", half);
+    write_file(gdir + "/half2.md", half);
+    auto capped = haicode::build_skills_block(proj, {"half1.md", "half2.md"});
+    CHECK(capped.find(std::string(100, 'y')) != std::string::npos);
+    CHECK(capped.find("[skill 'half2.md' omitted: skills block size cap "
+                      "reached]") != std::string::npos);
+    CHECK(capped.find(std::string(40 * 1024 + 100, 'y')) == std::string::npos);
 
     unsetenv("HPCODE_SKILLS_DIR");
     rm_rf(tmp);
@@ -422,6 +456,10 @@ static void test_engine_slash_e2e() {
             provider->last_chat_request.messages);
         CHECK(reqd.find("[skill invoked: /alpha") != std::string::npos);
         CHECK(reqd.find("Alpha body.") != std::string::npos);
+        // One-shot block carries the skill's location (submit_prompt →
+        // ContextBuilder end to end).
+        CHECK(reqd.find("Location: " + proj + "/.haicode/skills/alpha.md")
+              != std::string::npos);
         CHECK(reqd.find("do the thing") != std::string::npos);
         CHECK(reqd.find("/alpha do the thing") == std::string::npos);
 

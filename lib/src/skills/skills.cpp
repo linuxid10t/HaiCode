@@ -33,6 +33,16 @@ static std::string trim(const std::string& s) {
     return s.substr(b, e - b + 1);
 }
 
+// Directory portion of a path ("/a/b/c.md" → "/a/b"; "/c.md" → "/").
+// Companions of both loose skill files and pack SKILL.md files sit in
+// this directory.
+static std::string parent_dir(const std::string& path) {
+    size_t slash = path.rfind('/');
+    if (slash == std::string::npos) return "";
+    if (slash == 0) return "/";
+    return path.substr(0, slash);
+}
+
 std::string global_skills_dir() {
     if (const char* env = std::getenv("HPCODE_SKILLS_DIR"); env && *env)
         return env;
@@ -227,7 +237,8 @@ static std::string resolve_skill_path(const std::string& project_dir,
 }
 
 std::string build_skills_block(const std::string& project_dir,
-                               const std::vector<std::string>& enabled_ids) {
+                               const std::vector<std::string>& enabled_ids,
+                               const std::string& mode) {
     if (enabled_ids.empty()) return "";
 
     std::string block =
@@ -235,7 +246,22 @@ std::string build_skills_block(const std::string& project_dir,
         "The following skills are active operating instructions, not "
         "reference documentation: apply each one whenever it is relevant "
         "to the task at hand, without waiting to be asked.\n";
+    // Modes that strip execution tools need an explicit capability note:
+    // otherwise the model reads instructions it literally cannot follow.
+    if (mode == "plan") {
+        block += "\nThis session is in Plan mode: bash, write, edit and "
+                 "external_terminal are unavailable. Skills that require "
+                 "running commands or changing files cannot be performed "
+                 "right now — use their guidance to shape the plan and "
+                 "state what must wait for Build mode.\n";
+    } else if (mode == "chat") {
+        block += "\nThis session is in Chat mode: there is no local file, "
+                 "shell or code access. Apply each skill's knowledge "
+                 "conversationally, and say so instead of pretending to "
+                 "have run or opened anything.\n";
+    }
     size_t used = 0;
+    bool any_omitted = false;
     for (auto& id : enabled_ids) {
         if (id.empty()) continue;
         std::string path = resolve_skill_path(project_dir, id);
@@ -256,21 +282,45 @@ std::string build_skills_block(const std::string& project_dir,
         if (name.empty()) name = id;
 
         std::string section = "\n\n## " + name + " (" + id + ")\n\n";
+        section += "Location: " + path;
+        std::string dir = parent_dir(path);
+        if (!dir.empty())
+            section += " (skill directory: " + dir
+                     + " — resolve this skill's relative file and script "
+                       "references against the skill directory, not the "
+                       "project directory)";
+        section += "\n\n";
         if (!desc.empty())
             section += "When to use: " + desc + "\n\n";
         section += body;
+        // Omit just this skill rather than truncating everything after it:
+        // a later, smaller skill can still fit the remaining budget.
+        if (section.size() > kSkillsBlockCap) {
+            fprintf(stderr,
+                    "[skills] warning: skill '%s' alone exceeds the %zu KB "
+                    "block cap; omitting it\n",
+                    id.c_str(), kSkillsBlockCap / 1024);
+            block += "\n\n[skill '" + id + "' omitted: exceeds the skills "
+                     "block size cap]";
+            any_omitted = true;
+            continue;
+        }
         if (used + section.size() > kSkillsBlockCap) {
             fprintf(stderr,
-                    "[skills] warning: skills block exceeds %zu KB; truncating at '%s'\n",
+                    "[skills] warning: skills block cap (%zu KB) reached at "
+                    "'%s'; omitting it\n",
                     kSkillsBlockCap / 1024, id.c_str());
-            block += "\n\n[skills truncated]";
-            return block;
+            block += "\n\n[skill '" + id + "' omitted: skills block size cap "
+                     "reached]";
+            any_omitted = true;
+            continue;
         }
         block += section;
         used += section.size();
     }
-    // Nothing resolvable → no block at all.
-    if (used == 0) return "";
+    // Nothing resolvable → no block at all (a markers-only block is kept so
+    // the model learns an enabled skill existed but was dropped for size).
+    if (used == 0 && !any_omitted) return "";
     return block;
 }
 

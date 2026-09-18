@@ -22,14 +22,23 @@ std::vector<SkillInfo> list_skills(const std::string& project_dir);
 // Build the "# Skills" block appended to the system prompt: a directive
 // preamble (skills are active operating instructions, not reference docs)
 // followed by one "## <name> (<id>)" section per enabled skill. Each
-// section leads with "When to use: <description>" when frontmatter carries
-// one; the rest of the frontmatter is stripped. Files are resolved
+// section leads with a "Location: <path> (skill directory: <dir> ...)"
+// line naming the skill's file and base directory, so relative resource
+// references resolve against the skill's own directory rather than the
+// project directory, then "When to use: <description>" when frontmatter
+// carries one; the rest of the frontmatter is stripped. Files are resolved
 // project-first (same shadowing as list_skills). Unknown ids are skipped
-// with a stderr warning. The total block is capped at 64 KB with a
-// "[skills truncated]" marker. Returns "" when nothing is enabled or no
-// enabled file can be read.
+// with a stderr warning. `mode` ("build"/"plan"/"chat") appends a
+// capability note to the preamble when the session mode lacks execution
+// tools ("plan": no bash/write/edit/external_terminal; "chat": no local
+// access at all); "build" (default) adds nothing. A skill that alone
+// exceeds the 64 KB cap, or that no longer fits the remaining budget, is
+// omitted individually with an in-band "[skill '<id>' omitted: ...]"
+// marker — later smaller skills still land. Returns "" when nothing is
+// enabled or no enabled file can be read.
 std::string build_skills_block(const std::string& project_dir,
-                               const std::vector<std::string>& enabled_ids);
+                               const std::vector<std::string>& enabled_ids,
+                               const std::string& mode = "build");
 
 // Absolute path of the global skills directory
 // (<settings>/haicode/skills/, or $HPCODE_SKILLS_DIR when set). Exposed for
