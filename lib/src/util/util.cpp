@@ -8,6 +8,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <vector>
+#include <set>
+#include <mutex>
 #include <unistd.h>
 #include <sys/stat.h>
 
@@ -214,26 +216,36 @@ int make_secure_temp(const std::string& tmpl_prefix, std::string& out_path) {
 
 // ---- HttpClient ----
 
-struct HttpClient::State {
-    // Set from cancel() on the UI thread, read from write_cb on the request
-    // thread — atomic to avoid a torn flag.
+// Per-request SSE state. These fields previously lived on the per-client
+// State below: each provider owns exactly one HttpClient and
+// ProviderRegistry::get() hands that provider to every session thread, so two
+// concurrent sessions on one provider shared a single parse buffer —
+// callbacks crossed streams (A's tokens landed in B's transcript), a new
+// post_sse cleared a just-issued cancel flag, and buffer.append from two
+// libcurl threads was a data race. Parse state now lives on each post_sse()
+// stack frame, like the per-request CURL handles from fresh_handle().
+// The parse logic itself is unchanged and load-bearing: buffer, event_type
+// and event_data MUST persist across write_cb invocations within one request
+// — libcurl invokes the callback once per network chunk and a single SSE
+// event (event:/data:/blank line) can straddle those chunks for large data
+// lines (e.g. propose_plan markdown). Function locals silently dropped
+// in-progress events, truncating tool input JSON.
+struct RequestState {
+    // Set from cancel() (caller's thread), read from write_cb (request
+    // thread) — atomic to avoid a torn flag.
     std::atomic<bool> cancelled{false};
-    // SSE parse state lives per client (not per request): a single SSE event
-    // (event:/data:/blank line) can straddle libcurl chunk boundaries when the
-    // data line is large (e.g. propose_plan markdown). Local vars here
-    // silently dropped in-progress events, truncating tool input JSON.
     std::string buffer;
     std::string event_type;
     std::string event_data;
-    SSECallback callback;
+    HttpClient::SSECallback callback;
     // Set when write_cb returned 0 because the callback returned false —
     // a deliberate early stop (OpenAI [DONE], Anthropic error event, consumer
-    // cancel), which curl reports as CURLE_ABORTED_BY_CALLBACK. Post-sse must
+    // cancel), which curl reports as CURLE_ABORTED_BY_CALLBACK. post_sse must
     // not classify that as a transport failure.
     bool aborted_by_callback = false;
 
     static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
-        auto* s = static_cast<State*>(userdata);
+        auto* s = static_cast<RequestState*>(userdata);
         if (s->cancelled) return 0;
 
         s->buffer.append(ptr, size * nmemb);
@@ -281,6 +293,39 @@ struct HttpClient::State {
     }
 };
 
+// Per-client bookkeeping only: which requests are currently running, so
+// cancel() can reach every in-flight stream on this client. One client can
+// legitimately serve concurrent requests (one thread per session; the
+// settings-save flow fires list_models on a detached thread while the UI
+// thread streams).
+struct HttpClient::State {
+    std::mutex mu;
+    std::set<RequestState*> inflight;
+};
+
+namespace {
+
+// Registers a RequestState for the request's whole lifetime; a
+// throwing/early-returning request must not leave a dangling pointer in the
+// set. Takes the mutex/set by reference (not the client or State) so it can
+// live at namespace scope — HttpClient::State is private.
+struct InflightGuard {
+    std::mutex& mu;
+    std::set<RequestState*>& set_;
+    RequestState* req;
+    InflightGuard(std::mutex& mu_, std::set<RequestState*>& set_, RequestState* req_)
+        : mu(mu_), set_(set_), req(req_) {
+        std::lock_guard<std::mutex> lock(mu);
+        set_.insert(req);
+    }
+    ~InflightGuard() {
+        std::lock_guard<std::mutex> lock(mu);
+        set_.erase(req);
+    }
+};
+
+} // namespace
+
 HttpClient::HttpClient() : state_(std::make_unique<State>()) {
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
@@ -288,7 +333,15 @@ HttpClient::HttpClient() : state_(std::make_unique<State>()) {
 HttpClient::~HttpClient() = default;
 
 void HttpClient::cancel() {
-    state_->cancelled = true;
+    // Fan the cancel out to every in-flight request on this client. Granularity
+    // note: Provider::cancel() (provider.h) takes no session id and the
+    // provider-level cancelled_ atomic has the same sharing problem one layer
+    // up, so interrupting session A still cancels session B's in-flight stream
+    // on the same shared provider. Per-session cancellation needs plumbing
+    // through the Provider ABC — follow-up work, deliberately out of scope.
+    std::lock_guard<std::mutex> lock(state_->mu);
+    for (RequestState* req : state_->inflight)
+        req->cancelled = true;
 }
 
 // Easy handles are not thread-safe, and a single provider client can serve
@@ -308,12 +361,12 @@ void HttpClient::post_sse(const std::string& url,
                            std::string* transport_error) {
     if (response_code) *response_code = 0;
     if (transport_error) transport_error->clear();
-    state_->callback = callback;
-    state_->cancelled = false;
-    state_->aborted_by_callback = false;
-    state_->buffer.clear();
-    state_->event_type.clear();
-    state_->event_data.clear();
+
+    // Request-local state: declared before the guard so the guard's dtor
+    // (set erase) runs while `req` is still alive.
+    RequestState req;
+    req.callback = std::move(callback);
+    InflightGuard guard(state_->mu, state_->inflight, &req);
 
     CURL* curl = fresh_handle();
     if (!curl) {
@@ -325,8 +378,8 @@ void HttpClient::post_sse(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, State::write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, state_.get());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, RequestState::write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &req);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
 
@@ -339,13 +392,13 @@ void HttpClient::post_sse(const std::string& url,
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
 
-    if (response_code) *response_code = (res == CURLE_OK || state_->aborted_by_callback) ? code : -1;
-    if (res != CURLE_OK && !state_->aborted_by_callback && transport_error)
+    if (response_code) *response_code = (res == CURLE_OK || req.aborted_by_callback) ? code : -1;
+    if (res != CURLE_OK && !req.aborted_by_callback && transport_error)
         *transport_error = curl_easy_strerror(res);
     // Non-2xx: the body is a plain error document, not SSE — the callback
     // never fired. Surface a short excerpt so callers can show the cause.
     if (res == CURLE_OK && code >= 400 && transport_error && transport_error->empty()) {
-        std::string excerpt = state_->buffer.substr(0, 500);
+        std::string excerpt = req.buffer.substr(0, 500);
         *transport_error = util::sanitize_utf8(excerpt);
     }
 

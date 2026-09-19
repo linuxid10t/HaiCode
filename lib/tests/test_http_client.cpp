@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 #include <cstring>
+#include <atomic>
+#include <thread>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -170,6 +172,114 @@ static bool test_anthropic_provider_dead_endpoint() {
     return true;
 }
 
+// Two concurrent post_sse calls on ONE HttpClient (each provider owns one
+// client, and ProviderRegistry hands that provider to every session thread):
+// each callback must receive exactly its own server's events, in order. The
+// per-client SSE parse state this guards against made session A's tokens land
+// in session B's callback and raced on the shared buffer. Looped — a single
+// pass can pass by luck.
+static bool test_concurrent_post_sse_streams_isolated() {
+    for (int iter = 0; iter < 10; iter++) {
+        int fd_a = -1, fd_b = -1;
+        int port_a = bind_ephemeral(fd_a);
+        int port_b = bind_ephemeral(fd_b);
+        CHECK(port_a > 0 && port_b > 0, "ephemeral binds failed");
+
+        const std::string hdr =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        const std::string body_a = hdr +
+            "event: a\ndata: a1\n\nevent: a\ndata: a2\n\nevent: a\ndata: a3\n\n";
+        const std::string body_b = hdr +
+            "event: b\ndata: b1\n\nevent: b\ndata: b2\n\nevent: b\ndata: b3\n\n";
+
+        std::thread srv_a([&]() { serve_once(fd_a, body_a); });
+        std::thread srv_b([&]() { serve_once(fd_b, body_b); });
+
+        haicode::HttpClient http;  // deliberately ONE client, two requests
+        std::vector<std::string> got_a, got_b;
+        long code_a = 0, code_b = 0;
+
+        std::thread req_a([&]() {
+            std::string terr;
+            http.post_sse("http://127.0.0.1:" + std::to_string(port_a), {}, "{}",
+                          [&](const haicode::SSEEvent& ev) {
+                              got_a.push_back(ev.event + ":" + ev.data);
+                              return true;
+                          }, &code_a, &terr);
+        });
+        std::thread req_b([&]() {
+            std::string terr;
+            http.post_sse("http://127.0.0.1:" + std::to_string(port_b), {}, "{}",
+                          [&](const haicode::SSEEvent& ev) {
+                              got_b.push_back(ev.event + ":" + ev.data);
+                              return true;
+                          }, &code_b, &terr);
+        });
+        req_a.join();
+        req_b.join();
+        srv_a.join();
+        srv_b.join();
+        close(fd_a);
+        close(fd_b);
+
+        const std::string it = " (iter " + std::to_string(iter) + ")";
+        CHECK(code_a == 200 && code_b == 200,
+              "both concurrent requests should report 200" + it);
+        CHECK(got_a.size() == 3, "A should see exactly 3 events" + it + ", got " +
+              std::to_string(got_a.size()));
+        CHECK(got_b.size() == 3, "B should see exactly 3 events" + it + ", got " +
+              std::to_string(got_b.size()));
+        CHECK(got_a == std::vector<std::string>({"a:a1", "a:a2", "a:a3"}),
+              "A's stream must contain only A's events in order" + it);
+        CHECK(got_b == std::vector<std::string>({"b:b1", "b:b2", "b:b3"}),
+              "B's stream must contain only B's events in order" + it);
+    }
+    std::cout << "[OK] concurrent post_sse on one client: streams isolated (10 iters)\n";
+    return true;
+}
+
+// A callback returning false is a deliberate early stop (consumer cancel,
+// OpenAI [DONE]): not a transport failure — exactly the events before the
+// stop are delivered and the HTTP status is still reported.
+static bool test_callback_false_stops_stream_cleanly() {
+    int fd = -1;
+    int port = bind_ephemeral(fd);
+    CHECK(port > 0, "ephemeral bind failed");
+    std::thread t([&]() {
+        serve_once(fd,
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            "event: one\ndata: first\n\n"
+            "event: two\ndata: second\n\n"
+            "event: three\ndata: third\n\n");
+    });
+
+    haicode::HttpClient http;
+    long code = 0;
+    std::string terr = "unset";
+    std::vector<std::string> datas;
+    http.post_sse("http://127.0.0.1:" + std::to_string(port),
+                  {}, "{}",
+                  [&](const haicode::SSEEvent& ev) {
+                      datas.push_back(ev.data);
+                      return false;  // stop after the first event
+                  },
+                  &code, &terr);
+    t.join();
+    close(fd);
+    CHECK(datas.size() == 1 && datas[0] == "first",
+          "exactly the first event before the stop, got " +
+          std::to_string(datas.size()));
+    CHECK(code == 200,
+          "deliberate stop is not a transport failure — code stays 200, got " +
+          std::to_string(code));
+    CHECK(terr.empty(), "no transport error on deliberate stop, got: " + terr);
+    std::cout << "[OK] callback-false stop: 1 event, code 200, no error\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== HttpClient post_sse failure reporting ===\n\n";
     bool ok = true;
@@ -177,6 +287,8 @@ int main() {
     ok &= test_http_500_reports_code_and_no_events();
     ok &= test_clean_sse_stream_delivers_events();
     ok &= test_anthropic_provider_dead_endpoint();
+    ok &= test_concurrent_post_sse_streams_isolated();
+    ok &= test_callback_false_stops_stream_cleanly();
     std::cout << (ok ? "\nAll http client tests passed!\n"
                      : "\nSome tests FAILED.\n");
     return ok ? 0 : 1;
