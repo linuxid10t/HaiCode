@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -35,7 +36,7 @@ static bool test_gate_boundary() {
     // First emitted step: threshold exactly.
     auto out = haicode::render_dynamic_prompt("test-model", "Haiku", "/tmp", 10, 50);
     CHECK(!out.empty(), "steps_left=10 max=50 should emit the block");
-    CHECK(out.find("per-session step budget") != std::string::npos,
+    CHECK(out.find("renewable per-turn step budget") != std::string::npos,
           "boundary step should contain the base sentence");
     CHECK(out.find("Budget is getting tight (10 steps left)") != std::string::npos,
           "boundary step should contain 'Budget is getting tight (10 steps left)'");
@@ -820,6 +821,302 @@ static bool test_concurrent_sessions_run_in_parallel() {
     return true;
 }
 
+// ============================================================
+// Renewable step budget e2e
+// ============================================================
+
+// Drives the full engine loop from a script: a generator invoked once per
+// stream() call with the call index. Returning an empty vector ends the
+// turn; otherwise the calls are emitted with ToolUse. Generalizes
+// ToolCallProvider to multi-step scenarios (and unbounded ones — a
+// generator that never returns empty keeps the loop going forever, which
+// is exactly what the exhaustion tests need).
+class ScriptedProvider : public haicode::Provider {
+public:
+    using Script = std::function<std::vector<haicode::ToolCall>(int)>;
+    explicit ScriptedProvider(Script s) : script_(std::move(s)) {}
+    std::string id() const override { return "scripted"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"sc-model"};
+    }
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+        int idx = calls++;
+        auto tcs = script_(idx);
+        if (tcs.empty()) {
+            cb.on_text_delta("t", "done");
+            cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+            return;
+        }
+        for (size_t i = 0; i < tcs.size(); ++i)
+            tcs[i].id = "sc" + std::to_string(idx) + "_" + std::to_string(i);
+        cb.on_finish(haicode::FinishReason::ToolUse, {}, tcs);
+    }
+    Script script_;
+    int calls = 0;
+};
+
+static nlohmann::json todo_list_json(
+        const std::vector<std::pair<std::string, std::string>>& items) {
+    // items: (content, status)
+    auto arr = nlohmann::json::array();
+    for (auto& [content, status] : items)
+        arr.push_back({{"content", content},
+                       {"activeForm", "working on " + content},
+                       {"status", status}});
+    return {{"todos", arr}};
+}
+
+static haicode::ToolCall todo_call(const std::vector<std::pair<std::string,
+                                                        std::string>>& items) {
+    haicode::ToolCall tc;
+    tc.name = "todo_write";
+    tc.input = todo_list_json(items);
+    return tc;
+}
+
+static haicode::ToolCall bash_call(const std::string& cmd) {
+    haicode::ToolCall tc;
+    tc.name = "bash";
+    tc.input = {{"command", cmd}};
+    return tc;
+}
+
+// Captures StepFailed error strings (published from worker threads).
+struct ErrorRecorder {
+    std::mutex m;
+    std::vector<std::string> errors;
+    void subscribe(haicode::SessionEventBus& bus) {
+        bus.subscribe(haicode::events::EventType::StepFailed,
+                      [this](const nlohmann::json& d) {
+                          std::lock_guard<std::mutex> g(m);
+                          errors.push_back(d.value("error", ""));
+                      });
+    }
+    bool has_containing(const std::string& needle) {
+        std::lock_guard<std::mutex> g(m);
+        for (auto& e : errors)
+            if (e.find(needle) != std::string::npos) return true;
+        return false;
+    }
+    size_t count() {
+        std::lock_guard<std::mutex> g(m);
+        return errors.size();
+    }
+};
+
+static bool wait_for_errors(ErrorRecorder& rec, size_t want) {
+    for (int i = 0; i < 200; ++i) {
+        if (rec.count() >= want) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return rec.count() >= want;
+}
+
+// Shared rig: temp project, scripted provider, allow-all rules, an agent
+// with the given max_steps.
+struct BudgetRig {
+    std::string tmp;
+    std::string proj;
+    std::unique_ptr<haicode::Database> db;
+    std::unique_ptr<haicode::SessionStore> store;
+    std::shared_ptr<ScriptedProvider> provider;
+    haicode::ProviderRegistry registry;
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    ErrorRecorder errors;
+
+    BudgetRig(ScriptedProvider::Script script, int max_steps) {
+        std::string tmpl = "/tmp/hc_test_budget_XXXXXX";
+        std::vector<char> buf(tmpl.begin(), tmpl.end());
+        buf.push_back('\0');
+        if (!mkdtemp(buf.data())) return;
+        tmp = buf.data();
+        proj = tmp + "/proj";
+        mkdir(proj.c_str(), 0755);
+        db = std::make_unique<haicode::Database>(tmp + "/e2e.db");
+        db->migrate();
+        store = std::make_unique<haicode::SessionStore>(*db);
+        provider = std::make_shared<ScriptedProvider>(std::move(script));
+        registry.register_provider(provider);
+        haicode::register_builtin_tools(tools);
+        perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+        cfg.model = "sc-model";
+        cfg.provider = "scripted";
+        cfg.autoname_sessions = false;
+        cfg.default_mode = "build";
+        cfg.agents["build"].max_steps = max_steps;
+        errors.subscribe(bus);
+    }
+    ~BudgetRig() {
+        store.reset();
+        db.reset();
+        if (!tmp.empty()) {
+            std::string rm = "rm -rf " + tmp;
+            system(rm.c_str());
+        }
+    }
+    bool ok() const { return db != nullptr; }
+};
+
+// 1. Renewal works: max_steps=3, four seeded todos completed one per
+// todo_write with filler bash steps between. Without renewal the turn
+// would die at iteration 3; with it, all 8 scripted iterations run and
+// the turn ends normally.
+static bool test_budget_renews_on_todo_completion_e2e() {
+    BudgetRig rig([](int idx) -> std::vector<haicode::ToolCall> {
+        if (idx >= 7) return {};  // end turn after 4 todo_writes + 3 fillers
+        if (idx % 2 == 0) {
+            int done = idx / 2 + 1;  // progressively complete item 1..4
+            std::vector<std::pair<std::string, std::string>> items;
+            for (int k = 1; k <= 4; ++k)
+                items.emplace_back("item" + std::to_string(k),
+                                   k <= done ? "completed" : "pending");
+            return {todo_call(items)};
+        }
+        return {bash_call("echo filler")};
+    }, 3);
+    CHECK(rig.ok(), "mkdtemp failed");
+
+    {
+        haicode::SessionEngine engine(*rig.store, rig.registry, rig.tools,
+                                      rig.perms, rig.bus, rig.cfg);
+        std::string sid = engine.create_session(rig.proj, "build",
+                                                "sc-model", "scripted");
+        std::vector<haicode::Todo> seed;
+        for (int k = 1; k <= 4; ++k) {
+            haicode::Todo td;
+            td.content = "item" + std::to_string(k);
+            td.active_form = "working on item" + std::to_string(k);
+            seed.push_back(td);
+        }
+        engine.seed_todos(sid, seed);
+
+        engine.submit_prompt(sid, "do the work");
+        // user + 7*(assistant+tool_result) + final assistant text
+        CHECK(wait_for_rows(*rig.store, sid, 16),
+              "turn must run all 8 iterations and end normally");
+    }
+    CHECK(rig.provider->calls == 8,
+          "provider must be called 8 times (got "
+          + std::to_string(rig.provider->calls) + ")");
+    CHECK(!rig.errors.has_containing("budget exhausted")
+              && !rig.errors.has_containing("ceiling reached"),
+          "no exhaustion error may fire when todos keep completing");
+    std::cout << "[OK] e2e budget renews on each new todo completion\n";
+    return true;
+}
+
+// 2. No renewal without new completions: two todos were already completed
+// in a prior turn (seeded), so the loop's high-water starts at 2. The
+// script re-completes the same two forever — the turn must stop at the
+// window budget with the exhausted message.
+static bool test_no_renewal_without_new_completions_e2e() {
+    BudgetRig rig([](int idx) -> std::vector<haicode::ToolCall> {
+        if (idx % 2 == 0)
+            return {todo_call({{"a", "completed"}, {"b", "completed"}})};
+        return {bash_call("echo spin")};
+    }, 3);
+    CHECK(rig.ok(), "mkdtemp failed");
+
+    {
+        haicode::SessionEngine engine(*rig.store, rig.registry, rig.tools,
+                                      rig.perms, rig.bus, rig.cfg);
+        std::string sid = engine.create_session(rig.proj, "build",
+                                                "sc-model", "scripted");
+        std::vector<haicode::Todo> seed;
+        for (const char* name : {"a", "b"}) {
+            haicode::Todo td;
+            td.content = name;
+            td.active_form = std::string("working on ") + name;
+            td.status = "completed";
+            seed.push_back(td);
+        }
+        engine.seed_todos(sid, seed);
+
+        engine.submit_prompt(sid, "loop forever");
+        CHECK(wait_for_rows(*rig.store, sid, 7),
+              "3 iterations must persist user + 3*(assistant+tool_result)");
+    }
+    CHECK(rig.provider->calls == 3,
+          "re-completing already-completed todos must not renew: exactly "
+          "max_steps=3 calls expected (got "
+          + std::to_string(rig.provider->calls) + ")");
+    CHECK(wait_for_errors(rig.errors, 1), "exhaustion StepFailed must fire");
+    CHECK(rig.errors.has_containing("Turn step budget exhausted (3 steps"),
+          "error must be the budget-exhausted message");
+    std::cout << "[OK] e2e re-completing old todos never renews the budget\n";
+    return true;
+}
+
+// 3. Flip-flop guard: completing an item renews once; flipping it
+// completed→pending→completed never exceeds the high-water mark again, so
+// the turn stops at the window budget.
+static bool test_flipflop_does_not_renew_e2e() {
+    BudgetRig rig([](int idx) -> std::vector<haicode::ToolCall> {
+        return {todo_call({{"only", idx % 2 == 0 ? "completed" : "pending"}})};
+    }, 3);
+    CHECK(rig.ok(), "mkdtemp failed");
+
+    {
+        haicode::SessionEngine engine(*rig.store, rig.registry, rig.tools,
+                                      rig.perms, rig.bus, rig.cfg);
+        std::string sid = engine.create_session(rig.proj, "build",
+                                                "sc-model", "scripted");
+        haicode::Todo td;
+        td.content = "only";
+        td.active_form = "working on only";
+        engine.seed_todos(sid, {td});
+
+        engine.submit_prompt(sid, "flip flop");
+        CHECK(wait_for_rows(*rig.store, sid, 7),
+              "3 iterations must persist before the budget runs out");
+    }
+    CHECK(rig.provider->calls == 3,
+          "status flip-flopping must not renew past the first completion "
+          "(got " + std::to_string(rig.provider->calls) + " calls)");
+    CHECK(wait_for_errors(rig.errors, 1), "exhaustion StepFailed must fire");
+    CHECK(rig.errors.has_containing("Turn step budget exhausted (3 steps"),
+          "error must be the budget-exhausted message");
+    std::cout << "[OK] e2e completed→pending→completed flip-flop never renews\n";
+    return true;
+}
+
+// 4. Hard ceiling: the script invents and completes one MORE todo every
+// step (idx+1 completed items), so every iteration legitimately renews
+// the window — yet the turn must still terminate at
+// kStepCeilingMultiplier * max_steps = 8 iterations.
+static bool test_hard_ceiling_terminates_e2e() {
+    BudgetRig rig([](int idx) -> std::vector<haicode::ToolCall> {
+        std::vector<std::pair<std::string, std::string>> items;
+        for (int k = 0; k <= idx; ++k)
+            items.emplace_back("trivial" + std::to_string(k), "completed");
+        return {todo_call(items)};
+    }, 2);
+    CHECK(rig.ok(), "mkdtemp failed");
+
+    {
+        haicode::SessionEngine engine(*rig.store, rig.registry, rig.tools,
+                                      rig.perms, rig.bus, rig.cfg);
+        std::string sid = engine.create_session(rig.proj, "build",
+                                                "sc-model", "scripted");
+        engine.submit_prompt(sid, "farm renewals forever");
+        // user + 8*(assistant+tool_result)
+        CHECK(wait_for_rows(*rig.store, sid, 17),
+              "exactly 8 iterations must run before the ceiling");
+    }
+    CHECK(rig.provider->calls == 8,
+          "ceiling must cap the turn at 4*max_steps=8 calls (got "
+          + std::to_string(rig.provider->calls) + ")");
+    CHECK(wait_for_errors(rig.errors, 1), "ceiling StepFailed must fire");
+    CHECK(rig.errors.has_containing("Hard step ceiling reached (8 steps"),
+          "error must be the hard-ceiling message");
+    std::cout << "[OK] e2e hard ceiling terminates endless renewal farming\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -840,6 +1137,10 @@ int main() {
     ok &= test_interrupt_releases_ask_wait_e2e();
     ok &= test_build_hook_cwd_and_failure_e2e();
     ok &= test_concurrent_sessions_run_in_parallel();
+    ok &= test_budget_renews_on_todo_completion_e2e();
+    ok &= test_no_renewal_without_new_completions_e2e();
+    ok &= test_flipflop_does_not_renew_e2e();
+    ok &= test_hard_ceiling_terminates_e2e();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";

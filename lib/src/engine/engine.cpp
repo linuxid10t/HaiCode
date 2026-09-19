@@ -33,6 +33,12 @@ static std::string shell_quote(const std::string& s) {
     return r;
 }
 
+// Hard per-turn ceiling multiplier for the renewable step budget: even a
+// turn that keeps earning renewals (each newly completed todo refills the
+// window) terminates after this many iterations. Loop-runaway protection
+// that renewal must not be able to lift.
+static constexpr int kStepCeilingMultiplier = 4;
+
 // Return the content of the most recently written *active* plan file under
 // <project_dir>/.haicode/plans/, or empty string if none exist.
 // Plans tagged <!-- haicode-status: active --> are live; any other status
@@ -1136,10 +1142,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                        session.directory,
                                                        max_steps, max_steps);
 
-    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d instructions=%zu\n",
+    fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d (renewable, ceiling=%d) instructions=%zu\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
             mode_label(mode).c_str(),
-            max_steps, config_.instructions.size());
+            max_steps, kStepCeilingMultiplier * max_steps, config_.instructions.size());
     // The full prompt embeds project agents.md content; dump it only when
     // explicitly debugging prompt assembly.
     if (std::getenv("HPCODE_DEBUG_PROMPT") && *std::getenv("HPCODE_DEBUG_PROMPT")) {
@@ -1147,13 +1153,29 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     }
     fflush(stderr);
 
-    // Agentic loop
-    int step = 0;
+    // Agentic loop. The step budget is renewable: each todo completion above
+    // the turn's high-water mark refills steps_left to max_steps, so a large
+    // multi-file turn doesn't die mid-work while the model is still
+    // performing normally. Two guards keep renewal loop-proof: only NEW
+    // completions renew (completed_high_water), and ceiling_left caps the
+    // turn at kStepCeilingMultiplier * max_steps iterations no matter what.
+    // iter is the monotonic counter the compaction hysteresis keys off — it
+    // must never go backwards, or step - last_compaction_step would go
+    // negative and silently suppress auto-compaction for the rest of the
+    // turn.
+    int iter = 0;
+    int steps_left = max_steps;
+    int ceiling_left = kStepCeilingMultiplier * max_steps;
+    // Completed todos at loop start: items finished in earlier turns must
+    // not be "re-completed" for a renewal.
+    int completed_high_water = 0;
+    for (const auto& td : store_.load_todos(session_id))
+        if (td.status == "completed") ++completed_high_water;
     // Input-token count reported by the provider on the previous step. The true
     // prompt size is input + cache_read + cache_write (cache reads/writes still
     // occupy the context window). Used to decide whether to compact.
     int prev_total_input = 0;
-    for (; step < max_steps; ++step) {
+    while (steps_left > 0 && ceiling_left > 0) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
         // Re-read mode each step, before the skills re-read below (the
@@ -1227,15 +1249,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         }
 
         // Re-render the system prompt each step so {{MODEL}} and {{STEPS_LEFT}}
-        // stay current.
+        // stay current. steps_left is renewable: a todo completion mid-turn
+        // refills it to max_steps, so it can move up as well as down.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
-                               max_steps - step) + agents_md_block + skills_block
+                               steps_left) + agents_md_block + skills_block
                               + latest_plan_block
                               + instructions_block + plan_mode_block + chat_mode_block;
-        // {{STEPS_LEFT}} decrements each step → re-render the dynamic block too.
+        // steps_left changes each step (and resets on renewal) → re-render the
+        // dynamic block too.
         system_dynamic = render_dynamic_prompt(model_id, os_info,
-                                                session.directory,
-                                                max_steps - step, max_steps);
+                                               session.directory,
+                                               steps_left, max_steps);
 
         // Re-inject the current todo list (Build and Chat modes) so the model
         // stays anchored to outstanding work. Chat allows todo_write, so it
@@ -1316,13 +1340,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 }
                 if (!already_compacting
                         && should_compact_with_hysteresis(current_tokens, threshold,
-                                                          step, lcs)) {
+                                                          iter, lcs)) {
                     if (compact_history(session_id, *provider, model_id,
                                         provider_id, interrupt_flag,
                                         current_tokens, threshold)) {
                         {
                             std::lock_guard<std::mutex> lock(mu_);
-                            last_compaction_step_[session_id] = step;
+                            last_compaction_step_[session_id] = iter;
                         }
                         messages = load_context_messages(session_id);
                         req = builder.build(messages, system, system_dynamic,
@@ -1839,6 +1863,26 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["todos"] = arr;
                 bus_.publish(events::EventType::TodoUpdated, ev);
 
+                // Renewable step budget: a todo completion above the turn's
+                // high-water mark refills the window to max_steps. Only NEW
+                // completions count — re-completing the same items (or
+                // flip-flopping a status) must never renew. ceiling_left is
+                // deliberately untouched: renewal cannot lift the hard cap.
+                int completed_now = 0;
+                for (const auto& t : todos)
+                    if (t.status == "completed") ++completed_now;
+                if (completed_now > completed_high_water) {
+                    completed_high_water = completed_now;
+                    if (steps_left < max_steps) {
+                        steps_left = max_steps;
+                        fprintf(stderr, "[engine] session=%s todo progress "
+                                        "(%d completed) — step budget renewed "
+                                        "to %d\n",
+                                session_id.c_str(), completed_now, max_steps);
+                        fflush(stderr);
+                    }
+                }
+
                 // Auto-retire the active plan when every todo is completed.
                 if (!todos.empty() &&
                     std::all_of(todos.begin(), todos.end(),
@@ -1890,17 +1934,34 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             bus_.publish(events::EventType::StepFailed, ev);
             break;
         }
+
+        // Budget bookkeeping at the end of each iteration. Every non-depletion
+        // exit breaks mid-body before reaching here, so reaching the loop
+        // condition with steps_left == 0 (or ceiling_left == 0) is unambiguous.
+        --steps_left;
+        --ceiling_left;
+        ++iter;
     }
 
-    // Loop exited because the step budget ran out (no break fired, so step == max_steps).
-    // The last iteration would have left the UI in "tool_use ended, waiting for next step"
-    // state with no follow-up ever coming — surface a clear message so the user isn't
-    // left staring at silence.
-    if (step == max_steps) {
+    // Loop exited by depleting a budget (no break fired — every other exit
+    // breaks mid-body above). The last iteration would have left the UI in
+    // "tool_use ended, waiting for next step" state with no follow-up ever
+    // coming — surface a clear message so the user isn't left staring at
+    // silence.
+    if (ceiling_left <= 0) {
         nlohmann::json ev;
         ev["session_id"] = session_id;
-        ev["error"] = "Step limit reached (" + std::to_string(max_steps)
-                     + "). Send another message to continue.";
+        ev["error"] = "Hard step ceiling reached ("
+                     + std::to_string(kStepCeilingMultiplier * max_steps)
+                     + " steps this turn). Send another message to continue.";
+        bus_.publish(events::EventType::StepFailed, ev);
+    } else if (steps_left <= 0) {
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["error"] = "Turn step budget exhausted ("
+                     + std::to_string(max_steps)
+                     + " steps without completing a todo)."
+                       " Send another message to continue.";
         bus_.publish(events::EventType::StepFailed, ev);
     }
 
