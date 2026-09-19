@@ -428,6 +428,108 @@ static bool test_bash_failure_output_persisted_e2e() {
     return true;
 }
 
+// Review #7 e2e: flipping the session's provider mid-run must re-fetch the
+// provider object (connection, cancel map), not just update the strings.
+// prov-a's first stream() flips the session to prov-b inside the callback —
+// deterministic, it lands before step 2's re-read — and emits a todo_write
+// call so the loop continues. prov-b records what it was sent.
+class SwitchingProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "prov-a"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"model-a"};
+    }
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+        ++calls;
+        if (calls == 1) {
+            store->update_provider_model(sid, "prov-b", "model-b");
+            haicode::ToolCall tc;
+            tc.id = "sw1";
+            tc.name = "todo_write";
+            tc.input = {{"todos", nlohmann::json::array({
+                {{"content", "step"}, {"activeForm", "stepping"},
+                 {"status", "completed"}}})}};
+            cb.on_finish(haicode::FinishReason::ToolUse, {}, {tc});
+            return;
+        }
+        cb.on_text_delta("t", "a-done");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    haicode::SessionStore* store = nullptr;
+    std::string sid;
+    int calls = 0;
+};
+
+class RecordingProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "prov-b"; }
+    void cancel() override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"model-b"};
+    }
+    void stream(const haicode::LLMRequest& req,
+                haicode::StreamCallbacks cb) override {
+        ++calls;
+        last_model = req.model_id;
+        cb.on_text_delta("t", "b-done");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    int calls = 0;
+    std::string last_model;
+};
+
+static bool test_provider_switch_mid_loop_e2e() {
+    std::string tmpl = "/tmp/hc_test_provswitch_e2e_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto a = std::make_shared<SwitchingProvider>();
+    auto b = std::make_shared<RecordingProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(a);
+    registry.register_provider(b);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "model-a";
+    cfg.provider = "prov-a";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";  // todo_write alone wouldn't need Build, but
+                                 // the flip must hold for any tool-bearing turn
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(proj, "build", "model-a",
+                                                "prov-a");
+        a->store = &store;
+        a->sid = sid;
+        engine.submit_prompt(sid, "switch us");
+
+        CHECK(wait_for_rows(store, sid, 4),
+              "turn must complete: user + assistant(tc) + tool_result + "
+              "final assistant text");
+        CHECK(a->calls == 1, "prov-a should have been called exactly once");
+        CHECK(b->calls == 1, "prov-b must take over after the mid-loop switch");
+        CHECK(b->last_model == "model-b",
+              "prov-b must receive the updated model_id, got: " + b->last_model);
+    }
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e mid-loop provider switch re-fetches provider object\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -444,6 +546,7 @@ int main() {
     ok &= test_chat_mode_write_blocked_e2e();
     ok &= test_build_mode_write_executes_e2e();
     ok &= test_bash_failure_output_persisted_e2e();
+    ok &= test_provider_switch_mid_loop_e2e();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";

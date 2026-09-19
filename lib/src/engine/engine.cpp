@@ -955,6 +955,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         bus_.publish(events::EventType::StepFailed, ev);
         return;
     }
+    // The registry key the provider object above was fetched under. The
+    // per-step re-read below compares against this (not just provider_id)
+    // so a mid-loop switch re-fetches the object and refreshes the cancel
+    // map exactly once.
+    std::string fetched_provider_id = provider_id;
 
     // Store active provider so interrupt() can cancel in-flight HTTP requests.
     {
@@ -1125,6 +1130,29 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             if (mj_now.is_object()) {
                 if (auto v = mj_now.value("id", ""); !v.empty())        model_id    = v;
                 if (auto v = mj_now.value("provider_id", ""); !v.empty()) provider_id = v;
+                // Mid-loop provider switch: the strings above are not enough —
+                // the provider OBJECT (connection, auth, base_url) and the
+                // interrupt cancel map must follow. Re-fetch on change;
+                // overwriting the same session_providers_ key drops the stale
+                // entry. Unknown id: keep the old object and warn (review #7).
+                if (provider_id != fetched_provider_id) {
+                    auto next = providers_.get(provider_id);
+                    if (next) {
+                        provider = next;
+                        fetched_provider_id = provider_id;
+                        std::lock_guard<std::mutex> lock(mu_);
+                        session_providers_[session_id] = provider;
+                        fprintf(stderr, "[engine] session=%s switched provider "
+                                        "mid-loop -> %s\n",
+                                session_id.c_str(), provider_id.c_str());
+                    } else {
+                        fprintf(stderr, "[engine] session=%s provider switch to "
+                                        "unknown id '%s'; keeping %s\n",
+                                session_id.c_str(), provider_id.c_str(),
+                                fetched_provider_id.c_str());
+                        provider_id = fetched_provider_id;
+                    }
+                }
                 // Skills can be toggled mid-session from the UI; rebuild the
                 // block so the change lands on the next step.
                 std::vector<std::string> skills_now;
