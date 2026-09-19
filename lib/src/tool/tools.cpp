@@ -12,6 +12,8 @@
 #include <sstream>
 #include <regex>
 #include <set>
+#include <map>
+#include <mutex>
 #include <unistd.h>
 #include <fcntl.h>
 #include <glob.h>
@@ -1534,10 +1536,32 @@ std::string trim(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 
+// Process-wide compiled-pattern cache, keyed by the full pattern string.
+// SymbolsTool helpers previously declared parameter-derived patterns as
+// function-local statics — initialized once, so the first symbols query froze
+// the regex and every later query with a different symbol matched the wrong
+// pattern (test_symbols: Foo-then-Bar regression). Plain locals are correct
+// but recompile per line; this cache keeps the compile cost down without any
+// parameter-dependent statics. Returning shared_ptr by value (not a
+// reference) keeps a returned regex alive even if another thread's insert
+// clears the map mid-search.
+static std::shared_ptr<const std::regex> cached_regex(const std::string& pattern) {
+    static std::mutex mu;
+    static std::map<std::string, std::shared_ptr<const std::regex>> cache;
+    std::lock_guard<std::mutex> lock(mu);
+    constexpr size_t kMaxEntries = 512;
+    if (cache.size() >= kMaxEntries) cache.clear();
+    auto it = cache.find(pattern);
+    if (it != cache.end()) return it->second;
+    auto re = std::make_shared<const std::regex>(pattern);
+    cache.emplace(pattern, re);
+    return re;
+}
+
 // Does a CODE-only line declare/define `name` as a class/struct?
 bool is_class_def(const std::string& code, const std::string& name) {
-    static const std::regex re(R"(^(class|struct)\s+)" + name + R"(\b)");
-    return std::regex_search(code, re);
+    auto re = cached_regex(R"(^(class|struct)\s+)" + name + R"(\b)");
+    return std::regex_search(code, *re);
 }
 
 // Does a CODE-only line define `name` as a method on `cls`?
@@ -1549,8 +1573,8 @@ bool is_method_def(const std::string& code, const std::string& name, const std::
     static const std::regex id_re(R"([\w:&*<>,\s]+)");
     std::string pat = R"(^\w[\w:&*<>,\s]*\s+)" + cls + "::" + name + R"(\s*\()" ;
     try {
-        std::regex re(pat);
-        return std::regex_search(code, re);
+        auto re = cached_regex(pat);
+        return std::regex_search(code, *re);
     } catch (...) { return false; }
 }
 
@@ -1561,15 +1585,15 @@ bool is_free_func_def(const std::string& code, const std::string& name) {
     // Must start with an identifier char (return type), not whitespace/punct.
     std::string pat = R"(^\w[\w:&*<>,\s]*\s+)" + name + R"(\s*\()" ;
     try {
-        std::regex re(pat);
-        if (!std::regex_search(code, re)) return false;
+        auto re = cached_regex(pat);
+        if (!std::regex_search(code, *re)) return false;
     } catch (...) { return false; }
     // Reject if the name is qualified (Class::name) — that's a call/def handled
     // by is_method_def, not a free function.
     std::string qual = "::" + name + R"(\s*\()" ;
     try {
-        std::regex qre(qual);
-        if (std::regex_search(code, qre)) return false;
+        auto qre = cached_regex(qual);
+        if (std::regex_search(code, *qre)) return false;
     } catch (...) {}
     return true;
 }
@@ -1578,15 +1602,15 @@ bool is_free_func_def(const std::string& code, const std::string& name) {
 bool is_member_field(const std::string& code, const std::string& name) {
     std::string pat = R"(^\s+[\w:&*<>\[\]]+\s+)" + name + R"(\s*[;=])" ;
     try {
-        std::regex re(pat);
-        return std::regex_search(code, re);
+        auto re = cached_regex(pat);
+        return std::regex_search(code, *re);
     } catch (...) { return false; }
 }
 
 // Does a CODE-only line declare `name` as a typedef/using?
 bool is_typedef_def(const std::string& code, const std::string& name) {
-    static const std::regex re(R"(^\s*(typedef|using)\s+)" + name + R"(\b)");
-    return std::regex_search(code, re);
+    auto re = cached_regex(R"(^\s*(typedef|using)\s+)" + name + R"(\b)");
+    return std::regex_search(code, *re);
 }
 
 // Does a CODE-only line define `name` as a method (ClassName::name) at any
@@ -1596,14 +1620,14 @@ bool is_qualified_method_def(const std::string& code, const std::string& name) {
     // must start with a word char (not pure whitespace, which would be a call).
     std::string pat = std::string(R"(^\w[\w:&*<>,\s]*\s+)") + R"(\w+::)" + name + R"(\s*\()" ;
     try {
-        std::regex re(pat);
-        if (std::regex_search(code, re)) return true;
+        auto re = cached_regex(pat);
+        if (std::regex_search(code, *re)) return true;
     } catch (...) {}
     // also: ClassName::name( with no return type (ctor/dtor/operator) at col 0
     pat = R"(^\w+::)" + name + R"(\s*\()" ;
     try {
-        std::regex re(pat);
-        return std::regex_search(code, re);
+        auto re = cached_regex(pat);
+        return std::regex_search(code, *re);
     } catch (...) { return false; }
 }
 
@@ -1612,8 +1636,8 @@ bool is_qualified_method_def(const std::string& code, const std::string& name) {
 bool is_method_decl(const std::string& code, const std::string& name) {
     std::string pat = R"(^\s+\w[\w:&*<>,\s]*\s+)" + name + R"(\s*\()" ;
     try {
-        std::regex re(pat);
-        if (!std::regex_search(code, re)) return false;
+        auto re = cached_regex(pat);
+        if (!std::regex_search(code, *re)) return false;
     } catch (...) { return false; }
     // Must end with ';' (prototype), not '{' (inline def, which is a def).
     std::string trimmed = code;
@@ -1621,8 +1645,8 @@ bool is_method_decl(const std::string& code, const std::string& name) {
     if (trimmed.empty() || trimmed.back() != ';') return false;
     // Reject qualified names — those are out-of-class definitions.
     try {
-        std::regex qre("::" + name + R"(\s*\()");
-        if (std::regex_search(code, qre)) return false;
+        auto qre = cached_regex("::" + name + R"(\s*\()");
+        if (std::regex_search(code, *qre)) return false;
     } catch (...) {}
     return true;
 }
@@ -1644,15 +1668,18 @@ std::pair<SymbolHit::Kind, const char*> classify(const std::string& code,
                                              return {SymbolHit::Kind::Declaration, "method_decl"};
     // usage detection
     // call: name( possibly preceded by :: . -> or start/space
-    static const std::regex call_re(R"((::|\.|->|^|[\s(,.]))" + name + R"(\s*\()");
-    if (std::regex_search(code, call_re))    return {SymbolHit::Kind::Call, "call_re"};
+    auto call_re = cached_regex(R"((::|\.|->|^|[\s(,.]))" + name + R"(\s*\()");
+    if (std::regex_search(code, *call_re))
+                                             return {SymbolHit::Kind::Call, "call_re"};
     // member access via explicit operator: .name ->name ::name
-    static const std::regex mem_re(R"((\.|->|::))" + name + R"(\b)");
-    if (std::regex_search(code, mem_re))     return {SymbolHit::Kind::MemberAccess, "mem_re"};
+    auto mem_re = cached_regex(R"((\.|->|::))" + name + R"(\b)");
+    if (std::regex_search(code, *mem_re))
+                                             return {SymbolHit::Kind::MemberAccess, "mem_re"};
     // name used as an object: name. or name-> (accessing a sub-member)
     try {
-        std::regex obj_re("\\b" + name + R"(\s*(\.|->))");
-        if (std::regex_search(code, obj_re)) return {SymbolHit::Kind::MemberAccess, "obj_re"};
+        auto obj_re = cached_regex("\\b" + name + R"(\s*(\.|->))");
+        if (std::regex_search(code, *obj_re))
+                                         return {SymbolHit::Kind::MemberAccess, "obj_re"};
     } catch (...) {}
     return {SymbolHit::Kind::Mention, "mention_fallthrough"};
 }

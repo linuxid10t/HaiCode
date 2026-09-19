@@ -78,3 +78,6 @@ add_executable(test_http_client tests/test_http_client.cpp)
 # Socket APIs (bind/accept/recv) live in libnetwork on Haiku, and nothing in
 # libhaicode itself uses them, so the test links it directly.
 target_link_libraries(test_http_client haicode network)
+
+add_executable(test_symbols tests/test_symbols.cpp)
+target_link_libraries(test_symbols haicode)
