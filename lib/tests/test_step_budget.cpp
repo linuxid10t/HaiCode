@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include <sys/stat.h>
+#include <sqlite3.h>
 #include <nlohmann/json.hpp>
 
 #define CHECK(cond, msg) \
@@ -733,6 +734,92 @@ static bool test_build_hook_cwd_and_failure_e2e() {
     return true;
 }
 
+// Inspection item: concurrent sessions must run their loops in parallel.
+// Two sessions, two independent blocking providers — both workers must be
+// parked inside stream() AT THE SAME TIME. With the old whole-body
+// shutdown_mu_ the second runner serialized behind the first and this test
+// timed out. Also pins the SQLite serialized-mode assumption the parallel
+// loops rely on (they share one connection).
+class IdBlockingProvider : public BlockingProvider {
+public:
+    explicit IdBlockingProvider(std::string pid) : pid_(std::move(pid)) {}
+    std::string id() const override { return pid_; }
+private:
+    std::string pid_;
+};
+
+static bool test_concurrent_sessions_run_in_parallel() {
+    CHECK(sqlite3_threadsafe() == 1,
+          "SQLite must be built serialized (threadsafe==1) for concurrent "
+          "sessions sharing one connection");
+
+    static const char* kDb = "/tmp/haicode_test_parallel.db";
+    remove(kDb);
+    haicode::Database db(kDb);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto pa = std::make_shared<IdBlockingProvider>("par-a");
+    auto pb = std::make_shared<IdBlockingProvider>("par-b");
+    haicode::ProviderRegistry registry;
+    registry.register_provider(pa);
+    registry.register_provider(pb);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "blocking-model";
+    cfg.provider = "par-a";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid_a = engine.create_session("/tmp/projA", "build",
+                                                  "blocking-model", "par-a");
+        std::string sid_b = engine.create_session("/tmp/projB", "build",
+                                                  "blocking-model", "par-b");
+        engine.submit_prompt(sid_a, "a");
+        engine.submit_prompt(sid_b, "b");
+
+        // Wait for BOTH workers to be parked in stream() simultaneously.
+        // Sequential waits suffice: under the old global mutex session B's
+        // runner could not even enter stream() while A was parked, so the
+        // second wait times out.
+        bool a_in = false, b_in = false;
+        {
+            std::unique_lock<std::mutex> lk(pa->m);
+            a_in = pa->entered_cv.wait_for(lk, std::chrono::seconds(5),
+                                           [&] { return pa->entered > 0; });
+        }
+        {
+            std::unique_lock<std::mutex> lk(pb->m);
+            b_in = pb->entered_cv.wait_for(lk, std::chrono::seconds(5),
+                                           [&] { return pb->entered > 0; });
+        }
+        CHECK(a_in && b_in, "both sessions must run their loops in parallel");
+
+        // Release both; scope exit runs ~SessionEngine, which joins both.
+        {
+            std::lock_guard<std::mutex> g(pa->m);
+            pa->release_flag = true;
+            pa->release_cv.notify_all();
+        }
+        {
+            std::lock_guard<std::mutex> g(pb->m);
+            pb->release_flag = true;
+            pb->release_cv.notify_all();
+        }
+    }
+    CHECK(pa->entered == 1 && pb->entered == 1,
+          "each provider entered stream() exactly once");
+    CHECK(pa->exited == 1 && pb->exited == 1,
+          "each provider exited stream() before the dtor returned");
+
+    std::remove(kDb);
+    std::cout << "[OK] concurrent sessions run their loops in parallel\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -752,6 +839,7 @@ int main() {
     ok &= test_provider_switch_mid_loop_e2e();
     ok &= test_interrupt_releases_ask_wait_e2e();
     ok &= test_build_hook_cwd_and_failure_e2e();
+    ok &= test_concurrent_sessions_run_in_parallel();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";

@@ -220,11 +220,13 @@ private:
     std::mutex ask_mu_;
     std::condition_variable asking_cv_;
 
-    // Held for the whole body of agentic_loop and acquired (uncontended in
-    // the loop) by ~SessionEngine() before joining runner threads, so a
-    // worker can never still be executing loop code once the destructor's
-    // join returns. Outermost lock: never taken while holding mu_/ask_mu_.
-    std::mutex shutdown_mu_;
+    // Shutdown state, guarded by mu_. Set by ~SessionEngine() before it
+    // starts joining; submit_prompt/continue_session/compact_now refuse to
+    // spawn new runners once it is true, so no worker can appear after the
+    // destructor has snapshotted and joined the thread set. Concurrent
+    // sessions no longer serialize on a global mutex — each runner is
+    // independently tracked in runner_threads_ and joined by the dtor.
+    bool shutting_down_ = false;
 };
 
 // Parse a "## Tasks" checklist from plan markdown into seed-ready Todo items.

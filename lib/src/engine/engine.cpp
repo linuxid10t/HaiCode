@@ -551,31 +551,44 @@ SessionEngine::SessionEngine(SessionStore& store,
 {}
 
 SessionEngine::~SessionEngine() {
-    // 1. Signal every runner to stop and cancel in-flight HTTP requests.
-    cancel_pending_asks();
+    // 1. Snapshot everything the join needs, under mu_, and flip
+    // shutting_down_ so submit_prompt/continue_session/compact_now refuse
+    // to spawn new runners from this point on.
+    std::vector<std::shared_ptr<Provider>> providers;
+    std::vector<std::thread> threads;
+    std::vector<std::atomic<bool>*> flags;
     {
-        std::unique_lock<std::mutex> lock(mu_);
+        std::lock_guard<std::mutex> lock(mu_);
+        shutting_down_ = true;
         for (auto& [id, flag] : interrupt_flags_)
             if (flag) flag->store(true);
-        auto providers = session_providers_;
-        lock.unlock();
-        for (auto& [id, provider] : providers)
-            provider->cancel();
+        for (auto& [id, provider] : session_providers_)
+            providers.push_back(provider);
+        for (auto& [id, t] : runner_threads_)
+            if (t.joinable()) threads.push_back(std::move(t));
+        for (auto& [id, flag] : interrupt_flags_)
+            flags.push_back(flag);
+        // The moved-from thread handles are gone; drop the map entries so
+        // nothing can join them twice.
+        runner_threads_.clear();
     }
 
-    // 2. Wait for the runners to drain. shutdown_mu_ is held by agentic_loop
-    // for its whole body, so once we hold it no worker is executing loop
-    // code and the joins below only wait for thread teardown. A worker
-    // blocked on a permission future cannot be waited out here; callers must
-    // not destroy a running engine while a permission dialog is pending
-    // (the GUI routes through _RecreateEngine(); the app-quit path calls
-    // exit() before destruction ever runs).
-    std::lock_guard<std::mutex> shutdown_guard(shutdown_mu_);
-    for (auto& [id, t] : runner_threads_)
-        if (t.joinable()) t.join();
+    // 2. Release the ask waits and cancel in-flight HTTP requests (no locks
+    // held — cancel can block on network teardown).
+    cancel_pending_asks();
+    for (auto& provider : providers)
+        provider->cancel();
 
-    // 3. Free per-session interrupt flags (workers are gone by now).
-    for (auto& [id, flag] : interrupt_flags_)
+    // 3. Join the snapshotted runners. A worker blocked on a permission
+    // future cannot be waited out here; callers must not destroy a running
+    // engine while a permission dialog is pending (the GUI routes through
+    // _RecreateEngine(); the app-quit path calls exit() before destruction
+    // ever runs).
+    for (auto& t : threads)
+        t.join();
+
+    // 4. Free per-session interrupt flags (workers are gone by now).
+    for (auto* flag : flags)
         delete flag;
 }
 
@@ -776,8 +789,12 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     }
     bus_.publish(events::EventType::Prompted, ev);
 
-    // Start runner thread if not already running for this session
+    // Start runner thread if not already running for this session. Refuse
+    // to spawn once the destructor has begun: it snapshotted the thread set
+    // under mu_, so a new runner would outlive the engine. The persisted
+    // prompt stays in the DB for the next engine instance.
     std::lock_guard<std::mutex> lock(mu_);
+    if (shutting_down_) return;
     bool running = session_running_.count(session_id) && session_running_[session_id];
     if (!running) {
         // Join the previous thread (safe — it has already exited since running==false)
@@ -819,6 +836,8 @@ void SessionEngine::inject_message(const std::string& session_id,
 
 void SessionEngine::continue_session(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mu_);
+    // No new runners during destruction (see submit_prompt).
+    if (shutting_down_) return;
     bool running = session_running_.count(session_id) && session_running_[session_id];
     if (!running) {
         auto th_it = runner_threads_.find(session_id);
@@ -942,11 +961,11 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
 }
 
 void SessionEngine::agentic_loop(const std::string& session_id) {
-    // Held for the whole loop body so ~SessionEngine() can join runner
-    // threads the moment it acquires shutdown_mu_ — no worker is ever
-    // executing loop code against a freed engine. See engine.h.
-    std::lock_guard<std::mutex> shutdown_guard(shutdown_mu_);
-
+    // No global lock anymore: concurrent sessions run their loops in
+    // parallel. Lifetime is guaranteed by ~SessionEngine()'s snapshot-join —
+    // it flips shutting_down_ (closing the spawn paths), sets interrupt
+    // flags, then joins exactly the threads it snapshotted under mu_ before
+    // any engine state is freed. See engine.h.
     auto session_opt = store_.get(session_id);
     if (!session_opt) return;
 
@@ -2437,6 +2456,8 @@ void SessionEngine::compact_now(const std::string& session_id) {
     // a detached worker, letting a subsequent submit_prompt also start the
     // agentic_loop and trample the same SQLite rows.
     std::lock_guard<std::mutex> lock(mu_);
+    // No new runners during destruction (see submit_prompt).
+    if (shutting_down_) return;
     if (session_running_.count(session_id) && session_running_[session_id]) {
         nlohmann::json ev;
         ev["session_id"] = session_id;
