@@ -530,6 +530,90 @@ static bool test_provider_switch_mid_loop_e2e() {
     return true;
 }
 
+// Inspection item e2e: interrupt() must release a worker blocked in the
+// ask_user wait. The provider emits an ask_user call; once the question is
+// pending, the test interrupts the session. Without the fix the worker
+// deadlocks in asking_cv_.wait until engine destruction.
+static bool test_interrupt_releases_ask_wait_e2e() {
+    std::string tmpl = "/tmp/hc_test_askint_e2e_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<ToolCallProvider>();
+    provider->pending.id = "ask1";
+    provider->pending.name = "ask_user";
+    provider->pending.input = {{"question", "Continue?"},
+                               {"options", nlohmann::json::array({"yes", "no"})}};
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "tc-model";
+    cfg.provider = "toolcall";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(proj, "build", "tc-model",
+                                                "toolcall");
+
+        std::atomic<bool> asked{false};
+        bus.subscribe(haicode::events::EventType::AskUserRequested,
+                      [&](const nlohmann::json&) { asked = true; });
+
+        engine.submit_prompt(sid, "ask me something");
+
+        // Wait for the question to be pending, then interrupt from the main
+        // thread (mirrors the GUI's Stop button).
+        bool saw_ask = false;
+        for (int i = 0; i < 100 && !saw_ask; ++i) {
+            if (asked.load()) saw_ask = true;
+            else std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        CHECK(saw_ask, "AskUserRequested must arrive");
+
+        engine.interrupt(sid);
+
+        bool ended = false;
+        for (int i = 0; i < 100 && !ended; ++i) {
+            if (!engine.is_running(sid)) ended = true;
+            else std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        CHECK(ended, "interrupt() must release the ask_user wait and end the loop");
+        CHECK(provider->calls == 1,
+              "provider must not be called again after the interrupt");
+
+        // The placeholder row was overwritten with the interrupted answer.
+        bool saw_interrupted_row = false;
+        for (const auto& m : store.load_messages(sid)) {
+            if (m.type != "tool_result") continue;
+            auto j = nlohmann::json::parse(m.data_json, nullptr, false);
+            if (j.is_object() && j.value("call_id", "") == "ask1"
+                    && j.value("output", "").find("(interrupted)")
+                           != std::string::npos)
+                saw_interrupted_row = true;
+        }
+        CHECK(saw_interrupted_row,
+              "tool_result row for the ask must carry the (interrupted) answer");
+    }
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e interrupt() releases the ask_user wait\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -547,6 +631,7 @@ int main() {
     ok &= test_build_mode_write_executes_e2e();
     ok &= test_bash_failure_output_persisted_e2e();
     ok &= test_provider_switch_mid_loop_e2e();
+    ok &= test_interrupt_releases_ask_wait_e2e();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";

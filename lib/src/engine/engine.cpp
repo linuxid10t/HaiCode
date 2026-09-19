@@ -567,8 +567,13 @@ SessionEngine::~SessionEngine() {
 }
 
 void SessionEngine::cancel_pending_asks() {
+    cancel_pending_asks("");
+}
+
+void SessionEngine::cancel_pending_asks(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(ask_mu_);
     for (auto& [call_id, pa] : pending_ask_) {
+        if (!session_id.empty() && pa.session_id != session_id) continue;
         if (!pa.replied) {
             pa.answer = "(interrupted)";
             pa.replied = true;
@@ -847,7 +852,15 @@ void SessionEngine::interrupt(const std::string& session_id) {
         active_provider->cancel();
     }
 
-    // 3. Publish Interrupted event so UIs know the interrupt was processed.
+    // 3. Release any ask_user wait for THIS session: mark it replied with
+    // "(interrupted)" and wake asking_cv_. The worker overwrites the
+    // placeholder row and the post-wait interrupt_flag check breaks the
+    // loop — without this, a session parked on a question would hang until
+    // engine destruction. Scoped so stopping one session never answers
+    // another session's open question.
+    cancel_pending_asks(session_id);
+
+    // 4. Publish Interrupted event so UIs know the interrupt was processed.
     nlohmann::json ev;
     ev["session_id"] = session_id;
     bus_.publish(events::EventType::Interrupted, ev);

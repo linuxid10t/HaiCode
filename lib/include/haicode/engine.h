@@ -109,11 +109,15 @@ public:
                       const std::string& call_id,
                       const std::string& answer);
 
-    // Cancel all pending ask_user questions: mark each one replied with an
+    // Cancel pending ask_user questions: mark each one replied with an
     // "(interrupted)" placeholder and wake the agentic-loop threads blocked
     // in asking_cv_.wait. Called by the GUI before swapping the engine
     // mid-run and by ~SessionEngine() before joining runner threads.
+    // The no-arg form cancels every session; the session_id form cancels
+    // only that session's asks (used by interrupt() so stopping one session
+    // doesn't answer another session's open question).
     void cancel_pending_asks();
+    void cancel_pending_asks(const std::string& session_id);
 
     const AppConfig& config() const { return config_; }
 
