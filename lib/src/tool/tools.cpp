@@ -1317,6 +1317,11 @@ public:
 // ---- GitTool ----
 
 class GitTool : public Tool {
+    // Which subcommands may run AT ALL (gated). This is a separate concern
+    // from read-only classification: git_invocation_is_readonly()
+    // (lib/src/permission/permission.cpp) decides which invocations bypass
+    // the gate; everything here can still be reached through an explicit
+    // Allow rule.
     static constexpr const char* kAllowed[] = {
         "status", "diff", "log", "show", "branch", "blame",
         "stash", "add", "commit", "checkout", "reset", "remote",

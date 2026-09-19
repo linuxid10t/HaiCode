@@ -5,6 +5,7 @@
 #include <fstream>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <sys/stat.h>
@@ -589,6 +590,135 @@ static bool registry_read_everywhere_allows_glob_and_grep_outside_workdir() {
 }
 
 // ============================================================
+// Git invocation classifier
+// ============================================================
+
+static bool git_classifier_unit() {
+    using haicode::git_invocation_is_readonly;
+    auto ro = [](const char* sub, std::initializer_list<const char*> args) {
+        std::vector<std::string> v;
+        for (const char* a : args) v.emplace_back(a);
+        return git_invocation_is_readonly(sub, v);
+    };
+
+    // Unconditionally read-only subcommands, bare and with flags.
+    CHECK(ro("status", {}),           "bare git status is read-only");
+    CHECK(ro("diff", {"--stat"}),     "git diff --stat is read-only");
+    CHECK(ro("log", {"--oneline", "-3"}), "git log --oneline -3 is read-only");
+    CHECK(ro("show", {"HEAD"}),       "git show HEAD is read-only");
+    CHECK(ro("blame", {"file.cpp"}),  "git blame is read-only");
+    CHECK(ro("ls-files", {}),         "git ls-files is read-only");
+    CHECK(ro("shortlog", {}),         "git shortlog is read-only");
+    CHECK(ro("describe", {"--tags"}), "git describe is read-only");
+    CHECK(ro("rev-parse", {"--abbrev-ref", "HEAD"}), "git rev-parse is read-only");
+
+    // --output makes even read-only subcommands write a file.
+    CHECK(!ro("diff", {"--output", "/tmp/x"}),
+          "git diff --output writes a file — must be gated");
+    CHECK(!ro("log", {"--output=/tmp/x"}),
+          "git log --output= writes a file — must be gated");
+
+    // branch: listing forms only.
+    CHECK(ro("branch", {}),           "bare git branch lists — read-only");
+    CHECK(ro("branch", {"-l"}),       "git branch -l lists — read-only");
+    CHECK(ro("branch", {"-a", "-v"}), "git branch -a -v lists — read-only");
+    CHECK(ro("branch", {"--show-current"}), "git branch --show-current is read-only");
+    CHECK(ro("branch", {"--contains=HEAD"}),
+          "git branch --contains=HEAD is read-only");
+    CHECK(!ro("branch", {"--contains", "HEAD"}),
+          "space-separated flag value is indistinguishable from a positional "
+          "(git branch foo creates) — fails closed");
+    CHECK(!ro("branch", {"feature"}), "git branch <name> creates — gated");
+    CHECK(!ro("branch", {"-D", "feature"}), "git branch -D deletes — gated");
+    CHECK(!ro("branch", {"-d", "feature"}), "git branch -d deletes — gated");
+    CHECK(!ro("branch", {"-m", "new"}), "git branch -m renames — gated");
+    CHECK(!ro("branch", {"--frobnicate"}), "unknown branch flag fails closed");
+
+    // stash: only list and show.
+    CHECK(ro("stash", {"list"}),      "git stash list is read-only");
+    CHECK(ro("stash", {"show"}),      "git stash show is read-only");
+    CHECK(ro("stash", {"show", "-p"}), "git stash show -p is read-only");
+    CHECK(!ro("stash", {}),           "bare git stash pushes — gated");
+    CHECK(!ro("stash", {"pop"}),      "git stash pop mutates — gated");
+    CHECK(!ro("stash", {"drop"}),     "git stash drop mutates — gated");
+    CHECK(!ro("stash", {"clear"}),    "git stash clear wipes — gated");
+    CHECK(!ro("stash", {"push"}),     "git stash push mutates — gated");
+
+    // tag: listing forms only.
+    CHECK(ro("tag", {}),              "bare git tag lists — read-only");
+    CHECK(ro("tag", {"-l", "v*"}),    "git tag -l lists — read-only");
+    CHECK(ro("tag", {"-n"}),          "git tag -n lists — read-only");
+    CHECK(!ro("tag", {"v1.0"}),       "git tag <name> creates — gated");
+    CHECK(!ro("tag", {"-d", "v1.0"}), "git tag -d deletes — gated");
+    CHECK(!ro("tag", {"-a", "v1", "-m", "msg"}), "git tag -a creates — gated");
+
+    // Everything else fails closed.
+    CHECK(!ro("reset", {"--hard"}),   "git reset mutates — gated");
+    CHECK(!ro("checkout", {"main"}),  "git checkout mutates — gated");
+    CHECK(!ro("commit", {}),          "git commit mutates — gated");
+    CHECK(!ro("push", {}),            "git push mutates — gated");
+    CHECK(!ro("clean", {}),           "git clean mutates — gated");
+    CHECK(!ro("", {}),                "empty subcommand fails closed");
+
+    std::cout << "[OK] git_invocation_is_readonly unit cases\n";
+    return true;
+}
+
+// Small self-contained git repo (pattern from test_git_find.cpp) with a
+// feature branch that a wrongly-executed `git branch -D` would delete.
+static std::string setup_git_repo_fixture() {
+    const std::string root = "/tmp/tfc_git_gate_repo";
+    system(("rm -rf " + root).c_str());
+    ::mkdir(root.c_str(), 0755);
+    std::ofstream(root + "/README.md") << "gate fixture\n";
+    system(("cd " + root + " && "
+            "git init -q -b main && "
+            "git -c user.name=t -c user.email=t@t add . && "
+            "git -c user.name=t -c user.email=t@t commit -q -m init && "
+            "git branch feature").c_str());
+    return root;
+}
+
+static bool registry_git_mutating_invocations_denied() {
+    const std::string repo = setup_git_repo_fixture();
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = repo;
+
+    // Bare `git branch` (listing) bypasses the deny-all gate.
+    auto list = reg.execute("git", {{"subcommand", "branch"}}, ctx, gate);
+    CHECK(list.success, "git branch listing should bypass deny-all gate");
+    CHECK(!list.denied,  "git branch listing must not set denied flag");
+    CHECK(list.output.find("feature") != std::string::npos,
+          "branch listing should show the feature branch");
+
+    // `git branch -D feature` is gated: denied, never executed.
+    auto del = reg.execute("git", {{"subcommand", "branch"},
+                                   {"args", {"-D", "feature"}}}, ctx, gate);
+    CHECK(!del.success, "git branch -D must be denied under deny-all rules");
+    CHECK(del.denied,   "git branch -D must set denied flag");
+
+    // `git stash clear` is gated too.
+    auto stash = reg.execute("git", {{"subcommand", "stash"},
+                                     {"args", {"clear"}}}, ctx, gate);
+    CHECK(!stash.success, "git stash clear must be denied under deny-all rules");
+    CHECK(stash.denied,   "git stash clear must set denied flag");
+
+    // The branch survived both denied calls — nothing executed.
+    auto after = reg.execute("git", {{"subcommand", "branch"}}, ctx, gate);
+    CHECK(after.output.find("feature") != std::string::npos,
+          "feature branch must survive denied git branch -D");
+
+    system(("rm -rf " + repo).c_str());
+    std::cout << "[OK] registry denies mutating git invocations, allows listing\n";
+    return true;
+}
+
+// ============================================================
 // Per-session scoping
 // ============================================================
 
@@ -723,6 +853,10 @@ int main() {
     ok &= registry_read_everywhere_allows_glob_and_grep_outside_workdir();
     ok &= registry_write_denied_sets_flag();
     ok &= registry_unknown_tool();
+
+    std::cout << "\n-- git invocation classifier --\n";
+    ok &= git_classifier_unit();
+    ok &= registry_git_mutating_invocations_denied();
 
     if (ok) {
         std::cout << "\nAll config + permission tests passed!\n";

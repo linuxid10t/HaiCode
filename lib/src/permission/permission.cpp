@@ -199,6 +199,69 @@ bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode) {
     return true;
 }
 
+// ---- git_invocation_is_readonly ----
+//
+// True only for invocations that provably cannot mutate the repo or write
+// files. The whole invocation is classified — the subcommand alone is not
+// enough (`git branch -D foo` deletes, `git stash clear` wipes). Anything
+// unrecognized fails closed and goes through the gate.
+bool git_invocation_is_readonly(const std::string& subcommand,
+                                const std::vector<std::string>& args) {
+    // Any of these can redirect git's output to a file, which is a write.
+    for (const auto& a : args) {
+        if (a == "--output" || a.rfind("--output=", 0) == 0)
+            return false;
+    }
+
+    // Unconditionally read-only subcommands (protected from `--output` above).
+    static const std::set<std::string> always = {
+        "status", "diff", "log", "show", "blame",
+        "ls-files", "shortlog", "describe", "rev-parse",
+    };
+    if (always.count(subcommand)) return true;
+
+    auto is_listing_flag = [](const std::string& a) -> bool {
+        static const std::set<std::string> flags = {
+            "-l", "--list", "-a", "--all", "-r", "--remotes",
+            "-v", "-vv", "--verbose", "-q", "--quiet",
+            "-n", "--show-current",
+        };
+        if (flags.count(a)) return true;
+        static const char* prefixes[] = {
+            "--format=", "--contains", "--merged", "--no-merged",
+            "--points-at", "--sort=",
+        };
+        for (const char* p : prefixes)
+            if (a.rfind(p, 0) == 0) return true;
+        return false;
+    };
+
+    // branch/tag: listing forms only. A positional argument creates
+    // (`git branch foo`, `git tag v1`) and unknown flags fail closed —
+    // EXCEPT after an explicit list flag, where positionals are patterns
+    // (`git tag -l 'v*'`, `git branch --list feat*`). For branch only the
+    // long form triggers pattern mode: `-l` wobbled historically between
+    // --list and reflog-create, so it alone never unlocks positionals.
+    if (subcommand == "branch" || subcommand == "tag") {
+        if (args.empty()) return true;
+        bool list_mode = (args[0] == "--list")
+                      || (subcommand == "tag" && args[0] == "-l");
+        for (const auto& a : args) {
+            if (is_listing_flag(a)) continue;
+            if (list_mode && !a.empty() && a[0] != '-') continue;  // pattern
+            return false;
+        }
+        return true;
+    }
+
+    // stash: only `list` and `show` read. Bare `git stash` pushes.
+    if (subcommand == "stash") {
+        return !args.empty() && (args[0] == "list" || args[0] == "show");
+    }
+
+    return false;
+}
+
 // ---- ToolRegistry ----
 
 void ToolRegistry::register_tool(std::shared_ptr<Tool> tool) {
@@ -303,13 +366,18 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
                 is_within_always_readable_root(base))
                 return tool->execute(input, ctx);
         }
-        // git read-only subcommands never modify the repo — always allow.
+        // git: only provably read-only invocations (classified by
+        // git_invocation_is_readonly — subcommand AND args) never modify the
+        // repo — always allow. `git branch -D x` / `git stash clear` fall
+        // through to the gate.
         if (name == "git") {
-            static const std::set<std::string> git_readonly = {
-                "status", "diff", "log", "show", "branch", "blame",
-                "ls-files", "shortlog", "describe", "rev-parse",
-            };
-            if (git_readonly.count(input.value("subcommand", "")))
+            std::vector<std::string> git_args;
+            if (input.contains("args") && input["args"].is_array()) {
+                for (const auto& a : input["args"])
+                    if (a.is_string()) git_args.push_back(a.get<std::string>());
+            }
+            if (git_invocation_is_readonly(input.value("subcommand", ""),
+                                           git_args))
                 return tool->execute(input, ctx);
         }
     }

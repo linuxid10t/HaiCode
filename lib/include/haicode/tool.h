@@ -104,6 +104,14 @@ private:
 // execution (ToolRegistry::execute_impl) — so the two can never diverge.
 bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode);
 
+// Classify a complete git invocation (subcommand + args) as read-only or not.
+// Fail-closed: anything that could mutate the repo or write a file (branch
+// with a positional arg, `stash pop/clear`, `git tag v1`, `--output=...`)
+// returns false and must go through the permission gate. Used by the
+// read-only always-allow path in ToolRegistry::execute_impl.
+bool git_invocation_is_readonly(const std::string& subcommand,
+                                const std::vector<std::string>& args);
+
 class ToolRegistry {
 public:
     void register_tool(std::shared_ptr<Tool> tool);
