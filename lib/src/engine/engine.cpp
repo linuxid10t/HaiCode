@@ -20,6 +20,19 @@
 
 namespace haicode {
 
+// Single-quote a string for safe shell embedding: 'value' with ' → '\''.
+// Same contract as the static sq() in tools.cpp, duplicated here for the
+// build hook's timeout/cd wrapping (tools.cpp's copy is file-local).
+static std::string shell_quote(const std::string& s) {
+    std::string r = "'";
+    for (char c : s) {
+        if (c == '\'') r += "'\\''";
+        else r += c;
+    }
+    r += "'";
+    return r;
+}
+
 // Return the content of the most recently written *active* plan file under
 // <project_dir>/.haicode/plans/, or empty string if none exist.
 // Plans tagged <!-- haicode-status: active --> are live; any other status
@@ -1600,16 +1613,31 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             auto result = tools_.execute(call.name, call.input, ctx, permissions_);
 
             // After a successful write or edit, run the configured build command
-            // so the model sees compile errors immediately rather than discovering
-            // them several steps later.
+            // so the model sees compile errors immediately rather than
+            // discovering them several steps later. Wrapped like BashTool:
+            // cwd = the session's project directory, 300s timeout via the
+            // `timeout` binary, output capped at 100 KB — the bare popen
+            // used to inherit the app cwd with no bound on either.
             if (result.success && !config_.build_command.empty()
                     && (call.name == "write" || call.name == "edit")) {
-                FILE* bp = popen(config_.build_command.c_str(), "r");
+                constexpr int kBuildHookTimeoutSec = 300;
+                std::string inner = "cd " + shell_quote(session.directory)
+                                  + " && { " + config_.build_command + "; }";
+                std::string full_cmd = "timeout "
+                                     + std::to_string(kBuildHookTimeoutSec)
+                                     + " sh -c " + shell_quote(inner) + " 2>&1";
+                FILE* bp = popen(full_cmd.c_str(), "r");
                 if (bp) {
                     std::string build_out;
                     std::array<char, 4096> buf;
-                    while (fgets(buf.data(), buf.size(), bp))
+                    while (fgets(buf.data(), buf.size(), bp)) {
                         build_out += buf.data();
+                        if (build_out.size() >= 100 * 1024) {
+                            build_out.resize(100 * 1024);
+                            build_out += "\n[output truncated]";
+                            break;
+                        }
+                    }
                     int brc = pclose(bp);
                     int bec = WIFEXITED(brc) ? WEXITSTATUS(brc) : -1;
 
@@ -1621,7 +1649,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                         bus_.publish(events::EventType::BuildHookResult, bev);
                     }
 
-                    if (bec != 0) {
+                    if (bec == 124) {
+                        result.output += "\n\n[build_hook] Build timed out after "
+                                       + std::to_string(kBuildHookTimeoutSec)
+                                       + "s\n" + build_out;
+                        result.success = false;
+                        result.error   = result.output;
+                    } else if (bec != 0) {
                         result.output += "\n\n[build_hook] Build failed (exit "
                                        + std::to_string(bec) + "):\n" + build_out;
                         result.success = false;

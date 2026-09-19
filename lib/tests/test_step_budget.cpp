@@ -614,6 +614,125 @@ static bool test_interrupt_releases_ask_wait_e2e() {
     return true;
 }
 
+// Inspection item e2e: the build hook must run with cwd = the session's
+// project directory (not the app cwd), under a timeout, with capped output.
+// The failing case (`pwd; echo marker; exit 3`) proves all three visible
+// properties at once: the pwd output names the session dir, the marker and
+// exit status land in the tool result, and success flips to false with the
+// [build_hook] prefix. The success case proves the hook stays silent on
+// green builds (output not appended, BuildHookResult success=true).
+static bool test_build_hook_cwd_and_failure_e2e() {
+    std::string tmpl = "/tmp/hc_test_buildhook_e2e_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    // -- failing hook: cwd + exit status + marker propagation --
+    {
+        haicode::Database db(tmp + "/fail.db");
+        db.migrate();
+        haicode::SessionStore store(db);
+        auto provider = std::make_shared<ToolCallProvider>();
+        provider->pending.id = "w1";
+        provider->pending.name = "write";
+        provider->pending.input = {{"path", proj + "/out.txt"},
+                                   {"content", "x"}};
+        haicode::ProviderRegistry registry;
+        registry.register_provider(provider);
+        haicode::ToolRegistry tools;
+        haicode::register_builtin_tools(tools);
+        haicode::PermissionGate perms;
+        perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+        haicode::SessionEventBus bus;
+        haicode::AppConfig cfg;
+        cfg.model = "tc-model";
+        cfg.provider = "toolcall";
+        cfg.autoname_sessions = false;
+        cfg.default_mode = "build";
+        cfg.build_command = "pwd; echo HOOKMARK; exit 3";
+
+        std::atomic<bool> hook_event{false};
+        std::atomic<int> hook_exit{0};
+        bus.subscribe(haicode::events::EventType::BuildHookResult,
+                      [&](const nlohmann::json& d) {
+                          hook_event = true;
+                          hook_exit = d.value("exit_code", -1);
+                      });
+
+        std::string sid;
+        {
+            haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+            sid = engine.create_session(proj, "build", "tc-model",
+                                        "toolcall");
+            engine.submit_prompt(sid, "write it");
+            CHECK(wait_for_rows(store, sid, 4), "turn must complete");
+        }
+        CHECK(hook_event.load(), "BuildHookResult must be published");
+        CHECK(hook_exit.load() == 3, "hook exit code must be 3");
+
+        std::string out = first_tool_result_output(store, sid);
+        CHECK(out.find(proj) != std::string::npos,
+              "hook output must contain pwd of the session dir, got: " + out);
+        CHECK(out.find("HOOKMARK") != std::string::npos,
+              "hook output must be captured, got: " + out);
+        CHECK(out.find("[build_hook]") != std::string::npos,
+              "failure must carry the [build_hook] marker, got: " + out);
+        CHECK(out.find("exit 3") != std::string::npos,
+              "failure must name the exit status, got: " + out);
+    }
+
+    // -- succeeding hook: silent on green builds --
+    {
+        haicode::Database db(tmp + "/ok.db");
+        db.migrate();
+        haicode::SessionStore store(db);
+        auto provider = std::make_shared<ToolCallProvider>();
+        provider->pending.id = "w2";
+        provider->pending.name = "write";
+        provider->pending.input = {{"path", proj + "/ok.txt"},
+                                   {"content", "y"}};
+        haicode::ProviderRegistry registry;
+        registry.register_provider(provider);
+        haicode::ToolRegistry tools;
+        haicode::register_builtin_tools(tools);
+        haicode::PermissionGate perms;
+        perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+        haicode::SessionEventBus bus;
+        haicode::AppConfig cfg;
+        cfg.model = "tc-model";
+        cfg.provider = "toolcall";
+        cfg.autoname_sessions = false;
+        cfg.default_mode = "build";
+        cfg.build_command = "pwd";
+
+        std::atomic<bool> hook_ok{false};
+        bus.subscribe(haicode::events::EventType::BuildHookResult,
+                      [&](const nlohmann::json& d) {
+                          hook_ok = d.value("success", false);
+                      });
+
+        std::string sid;
+        {
+            haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+            sid = engine.create_session(proj, "build", "tc-model", "toolcall");
+            engine.submit_prompt(sid, "write it");
+            CHECK(wait_for_rows(store, sid, 4), "turn must complete");
+        }
+        CHECK(hook_ok.load(), "successful hook must publish success=true");
+        std::string out = first_tool_result_output(store, sid);
+        CHECK(out.find("[build_hook]") == std::string::npos,
+              "green build must not pollute the tool result, got: " + out);
+    }
+
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e build hook runs in session dir, reports failure\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -632,6 +751,7 @@ int main() {
     ok &= test_bash_failure_output_persisted_e2e();
     ok &= test_provider_switch_mid_loop_e2e();
     ok &= test_interrupt_releases_ask_wait_e2e();
+    ok &= test_build_hook_cwd_and_failure_e2e();
 
     if (ok) {
         std::cout << "\nAll step budget gate tests passed!\n";
