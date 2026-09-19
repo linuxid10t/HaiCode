@@ -56,11 +56,18 @@ public:
     HttpClient();
     ~HttpClient();
 
-    // POST with streaming SSE response
+    // POST with streaming SSE response. Out-params follow the get()/
+    // post_json() convention: response_code is the HTTP status, or -1 on
+    // transport failure; transport_error then carries the curl error text
+    // (transport failures only). A stream stopped early because the callback
+    // returned false (OpenAI [DONE], consumer cancel) is NOT a transport
+    // failure — the response code is still reported.
     void post_sse(const std::string& url,
                   const std::map<std::string, std::string>& headers,
                   const std::string& body,
-                  SSECallback callback);
+                  SSECallback callback,
+                  long* response_code = nullptr,
+                  std::string* transport_error = nullptr);
 
     // Simple GET. timeout_seconds caps the whole transfer (default 60s).
     // response_code (out, optional): HTTP status, or -1 on transport failure.

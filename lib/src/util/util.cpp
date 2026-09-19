@@ -226,6 +226,11 @@ struct HttpClient::State {
     std::string event_type;
     std::string event_data;
     SSECallback callback;
+    // Set when write_cb returned 0 because the callback returned false —
+    // a deliberate early stop (OpenAI [DONE], Anthropic error event, consumer
+    // cancel), which curl reports as CURLE_ABORTED_BY_CALLBACK. Post-sse must
+    // not classify that as a transport failure.
+    bool aborted_by_callback = false;
 
     static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
         auto* s = static_cast<State*>(userdata);
@@ -253,6 +258,7 @@ struct HttpClient::State {
                     ev.data  = s->event_data;
                     if (!s->callback(ev)) {
                         s->cancelled = true;
+                        s->aborted_by_callback = true;
                         s->buffer.erase(0, pos);
                         return 0;
                     }
@@ -297,15 +303,24 @@ static CURL* fresh_handle() {
 void HttpClient::post_sse(const std::string& url,
                            const std::map<std::string, std::string>& headers,
                            const std::string& body,
-                           SSECallback callback) {
+                           SSECallback callback,
+                           long* response_code,
+                           std::string* transport_error) {
+    if (response_code) *response_code = 0;
+    if (transport_error) transport_error->clear();
     state_->callback = callback;
     state_->cancelled = false;
+    state_->aborted_by_callback = false;
     state_->buffer.clear();
     state_->event_type.clear();
     state_->event_data.clear();
 
     CURL* curl = fresh_handle();
-    if (!curl) return;
+    if (!curl) {
+        if (response_code) *response_code = -1;
+        if (transport_error) *transport_error = "curl handle init failed";
+        return;
+    }
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
@@ -320,7 +335,20 @@ void HttpClient::post_sse(const std::string& url,
         hlist = curl_slist_append(hlist, (k + ": " + v).c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
 
-    curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(curl);
+    long code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+
+    if (response_code) *response_code = (res == CURLE_OK || state_->aborted_by_callback) ? code : -1;
+    if (res != CURLE_OK && !state_->aborted_by_callback && transport_error)
+        *transport_error = curl_easy_strerror(res);
+    // Non-2xx: the body is a plain error document, not SSE — the callback
+    // never fired. Surface a short excerpt so callers can show the cause.
+    if (res == CURLE_OK && code >= 400 && transport_error && transport_error->empty()) {
+        std::string excerpt = state_->buffer.substr(0, 500);
+        *transport_error = util::sanitize_utf8(excerpt);
+    }
+
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 }

@@ -127,6 +127,8 @@ public:
         std::string body_str = body.dump();
         bool error_occurred = false;
 
+        long code = 0;
+        std::string transport_err;
         http_.post_sse(base_url_ + "/messages", headers, body_str,
             [&](const SSEEvent& ev) -> bool {
                 if (cancelled_.load()) return false;
@@ -234,7 +236,26 @@ public:
                     }
                 } catch (...) {}
                 return true;
-            });
+            }, &code, &transport_err);
+
+        // Interrupt: the consumer cancelled — stay quiet, no error event.
+        if (cancelled_.load()) return;
+
+        // Transport failure / HTTP error: report the real cause instead of
+        // finishing with an empty assistant turn (review #8).
+        if (code == -1) {
+            if (callbacks.on_error)
+                callbacks.on_error(util::sanitize_utf8(
+                    "connection failed: " + transport_err +
+                    " (check base_url / network)"));
+            return;
+        }
+        if (code >= 400) {
+            if (callbacks.on_error)
+                callbacks.on_error(util::sanitize_utf8(
+                    "HTTP " + std::to_string(code) + ": " + transport_err));
+            return;
+        }
 
         if (!error_occurred && callbacks.on_finish)
             callbacks.on_finish(state.finish_reason, state.usage, state.tool_calls);
