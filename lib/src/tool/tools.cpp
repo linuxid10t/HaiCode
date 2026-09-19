@@ -13,6 +13,7 @@
 #include <regex>
 #include <set>
 #include <unistd.h>
+#include <fcntl.h>
 #include <glob.h>
 #include <fnmatch.h>
 #include <dirent.h>
@@ -288,15 +289,13 @@ public:
 
 // ---- ReadTool ----
 
-static bool is_binary(std::ifstream& f) {
+static bool is_binary(FILE* f) {
     char buf[8192];
-    f.read(buf, sizeof(buf));
-    std::streamsize n = f.gcount();
-    for (std::streamsize i = 0; i < n; i++) {
+    size_t n = fread(buf, 1, sizeof(buf), f);
+    for (size_t i = 0; i < n; i++) {
         if (buf[i] == '\0') return true;
     }
-    f.clear();   // read() past EOF sets eofbit; clear it before seeking back
-    f.seekg(0);
+    rewind(f);
     return false;
 }
 
@@ -339,29 +338,73 @@ public:
         int limit  = input.value("limit", 0);
         if (offset < 1) offset = 1;
 
-        std::ifstream f(path, std::ios::binary);
-        if (!f.is_open())
+        // O_NOFOLLOW closes the gate→open TOCTOU race for the final path
+        // component: a symlink swapped in after the gate check fails the
+        // open instead of leaking the target. On ELOOP (the caller pointed
+        // at a symlink), re-verify the resolved target against the same
+        // always-readable policy and open that; otherwise the read stays
+        // gated.
+        int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0 && errno == ELOOP) {
+            char resolved[8192];
+            if (realpath(path.c_str(), resolved)
+                    && path_is_always_readable(resolved, ctx.working_dir)) {
+                fd = ::open(resolved, O_RDONLY | O_CLOEXEC);
+            } else {
+                return {false, "",
+                        "Cannot read through symlink: " + path};
+            }
+        }
+        if (fd < 0)
             return {false, "", "Cannot open file: " + path + ": " + strerror(errno)};
 
-        if (is_binary(f))
+        // fdopen takes ownership of fd; fclose closes both.
+        FILE* f = fdopen(fd, "rb");
+        if (!f) {
+            ::close(fd);
+            return {false, "", "Cannot open file: " + path};
+        }
+
+        if (is_binary(f)) {
+            fclose(f);
             return {false, "", "Binary file, cannot display: " + path};
+        }
 
         std::string output;
         std::string line;
         int lineno = 0;
         int printed = 0;
-        while (std::getline(f, line)) {
-            lineno++;
-            if (lineno < offset) continue;
-            output += std::to_string(lineno) + "\t" + line + "\n";
-            printed++;
-            if (output.size() >= MAX_OUTPUT) {
-                output.resize(MAX_OUTPUT);
-                output += "\n[output truncated]";
-                break;
+        while (true) {
+            int c = fgetc(f);
+            if (c == EOF) break;
+            if (c == '\n') {
+                lineno++;
+                if (lineno >= offset) {
+                    output += std::to_string(lineno) + "\t" + line + "\n";
+                    printed++;
+                    line.clear();
+                    if (output.size() >= MAX_OUTPUT) {
+                        output.resize(MAX_OUTPUT);
+                        output += "\n[output truncated]";
+                        break;
+                    }
+                    if (limit > 0 && printed >= limit) break;
+                } else {
+                    line.clear();
+                }
+            } else {
+                line += (char)c;
             }
-            if (limit > 0 && printed >= limit) break;
         }
+        // Final line without trailing newline — std::getline used to emit
+        // it, so preserve that.
+        if (!line.empty()) {
+            lineno++;
+            if (lineno >= offset) {
+                output += std::to_string(lineno) + "\t" + line + "\n";
+            }
+        }
+        fclose(f);
         return {true, output, ""};
     }
 };

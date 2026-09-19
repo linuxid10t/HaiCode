@@ -112,6 +112,13 @@ bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode);
 bool git_invocation_is_readonly(const std::string& subcommand,
                                 const std::vector<std::string>& args);
 
+// Symlink-aware readability check shared by the gate's read-only always-allow
+// path and ReadTool's O_NOFOLLOW fallback: true when `path` resolves (realpath
+// on both sides) inside `working_dir` or one of the always-readable system
+// roots. A missing/broken target falls back to the lexical verdict.
+bool path_is_always_readable(const std::string& path,
+                             const std::string& working_dir);
+
 class ToolRegistry {
 public:
     void register_tool(std::shared_ptr<Tool> tool);

@@ -719,6 +719,172 @@ static bool registry_git_mutating_invocations_denied() {
 }
 
 // ============================================================
+// Symlink-aware containment
+// ============================================================
+
+// Deny-all gate + in-project symlink pointing outside the tree: the read
+// must be gated (review #4 repro). An in-project symlink to an in-project
+// file still bypasses (the trusted-tree contract is about the resolved
+// target, not the link's location).
+static bool registry_symlink_escape_denied() {
+    const std::string wd = "/tmp/tfc_sym_wd";
+    const std::string outside = "/tmp/tfc_sym_secret.txt";
+    const std::string inside = wd + "/inside.txt";
+    system(("rm -rf " + wd).c_str());
+    ::mkdir(wd.c_str(), 0755);
+    write_file(outside, "secret\n");
+    write_file(inside, "public\n");
+
+    // in-project symlink → outside file; in-project symlink → in-project file
+    ::symlink(outside.c_str(), (wd + "/innocent.txt").c_str());
+    ::symlink(inside.c_str(), (wd + "/alias.txt").c_str());
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = wd;
+
+    auto esc = reg.execute("read", {{"path", wd + "/innocent.txt"}}, ctx, gate);
+    CHECK(!esc.success, "read through symlink to outside file must be denied");
+    CHECK(esc.denied,   "denied flag must be set for symlink escape read");
+
+    auto okr = reg.execute("read", {{"path", wd + "/alias.txt"}}, ctx, gate);
+    CHECK(okr.success, "read through in-project symlink to in-project file bypasses");
+    CHECK(!okr.denied, "in-project symlink read must not set denied flag");
+    CHECK(okr.output.find("public") != std::string::npos,
+          "in-project symlink read should return the file contents");
+
+    system(("rm -rf " + wd).c_str());
+    std::remove(outside.c_str());
+    std::cout << "[OK] symlink escape denied, in-project symlink still bypasses\n";
+    return true;
+}
+
+// Symlinked directory inside the tree pointing outside: grep (path under the
+// symlinked dir), absolute glob, and relative glob must all be gated; a
+// read-everywhere session rule still allows them (positive control).
+static bool registry_symlinked_dir_gates_glob_grep() {
+    const std::string wd = "/tmp/tfc_symdir_wd";
+    const std::string outside_dir = "/tmp/tfc_symdir_out";
+    system(("rm -rf " + wd).c_str());
+    system(("rm -rf " + outside_dir).c_str());
+    ::mkdir(wd.c_str(), 0755);
+    ::mkdir(outside_dir.c_str(), 0755);
+    write_file(outside_dir + "/x.txt", "needle\n");
+    ::symlink(outside_dir.c_str(), (wd + "/sub").c_str());
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = wd;
+
+    {
+        auto gate = make_deny_all_gate();
+
+        auto g = reg.execute("grep", {{"pattern", "needle"},
+                                      {"path", wd + "/sub/x.txt"}}, ctx, gate);
+        CHECK(!g.success, "grep through symlinked dir to outside must be denied");
+        CHECK(g.denied,   "denied flag must be set for symlinked-dir grep");
+
+        auto ab = reg.execute("glob", {{"pattern", wd + "/sub/*.txt"}}, ctx, gate);
+        CHECK(!ab.success, "absolute glob through symlinked dir must be denied");
+        CHECK(ab.denied,   "denied flag must be set for symlinked-dir absolute glob");
+
+        auto rel = reg.execute("glob", {{"pattern", "sub/*.txt"}}, ctx, gate);
+        CHECK(!rel.success, "relative glob through symlinked dir must be denied");
+        CHECK(rel.denied,   "denied flag must be set for symlinked-dir relative glob");
+    }
+
+    {
+        // Positive control: read-everywhere rule keeps them working.
+        haicode::PermissionGate gate;
+        gate.set_session_rules({{"read", "*", haicode::PermissionEffect::Allow}});
+        gate.set_ask_callback([](const std::string&, const std::string&,
+                                  const std::string&, const nlohmann::json&) {
+            return haicode::PermissionEffect::Deny;
+        });
+
+        auto g = reg.execute("grep", {{"pattern", "needle"},
+                                      {"path", wd + "/sub/x.txt"}}, ctx, gate);
+        CHECK(g.success, "read-everywhere rule should allow symlinked-dir grep");
+
+        auto rel = reg.execute("glob", {{"pattern", "sub/*.txt"}}, ctx, gate);
+        CHECK(rel.success, "read-everywhere rule should allow symlinked-dir glob");
+    }
+
+    system(("rm -rf " + wd).c_str());
+    system(("rm -rf " + outside_dir).c_str());
+    std::cout << "[OK] symlinked dir gates grep/glob (absolute + relative)\n";
+    return true;
+}
+
+// Broken symlink: nothing to leak — the read executes (not denied) and fails
+// with a cannot-open error, keeping the not-gated vs failed distinction.
+static bool registry_broken_symlink_not_denied() {
+    const std::string wd = "/tmp/tfc_broken_wd";
+    system(("rm -rf " + wd).c_str());
+    ::mkdir(wd.c_str(), 0755);
+    ::symlink("/tmp/tfc_broken_missing_target", (wd + "/dangling").c_str());
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = wd;
+
+    auto r = reg.execute("read", {{"path", wd + "/dangling"}}, ctx, gate);
+    CHECK(!r.success, "broken symlink read must fail");
+    CHECK(!r.denied,  "broken symlink read executes (nothing to leak), not denied");
+    CHECK(r.error.find("Cannot") != std::string::npos
+            || r.error.find("open") != std::string::npos
+            || r.error.find("symlink") != std::string::npos,
+          "broken symlink error should mention the open failure: " + r.error);
+
+    system(("rm -rf " + wd).c_str());
+    std::cout << "[OK] broken symlink executes and fails without denied flag\n";
+    return true;
+}
+
+// A symlink in the tree pointing INTO the always-readable system roots stays
+// allowed (skip when the system files are absent).
+static bool registry_symlink_into_system_roots_allowed() {
+    std::string header = first_existing({
+        "/boot/system/develop/headers/os/App.h",
+        "/boot/system/develop/headers/curl/curl.h",
+        "/boot/system/documentation/BeBook/BWindow.html",
+    });
+    if (header.empty()) {
+        std::cout << "[SKIP] symlink into system roots (no haiku_devel)\n";
+        return true;
+    }
+
+    const std::string wd = "/tmp/tfc_syslink_wd";
+    system(("rm -rf " + wd).c_str());
+    ::mkdir(wd.c_str(), 0755);
+    ::symlink(header.c_str(), (wd + "/api_ref").c_str());
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_deny_all_gate();
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = wd;
+
+    auto r = reg.execute("read", {{"path", wd + "/api_ref"},
+                                  {"limit", 3}}, ctx, gate);
+    CHECK(r.success, "read through symlink into system roots should bypass");
+    CHECK(!r.denied,  "symlink into system roots must not set denied flag");
+
+    system(("rm -rf " + wd).c_str());
+    std::cout << "[OK] symlink into system roots stays allowed\n";
+    return true;
+}
+
+// ============================================================
 // Per-session scoping
 // ============================================================
 
@@ -857,6 +1023,12 @@ int main() {
     std::cout << "\n-- git invocation classifier --\n";
     ok &= git_classifier_unit();
     ok &= registry_git_mutating_invocations_denied();
+
+    std::cout << "\n-- symlink containment --\n";
+    ok &= registry_symlink_escape_denied();
+    ok &= registry_symlinked_dir_gates_glob_grep();
+    ok &= registry_broken_symlink_not_denied();
+    ok &= registry_symlink_into_system_roots_allowed();
 
     if (ok) {
         std::cout << "\nAll config + permission tests passed!\n";

@@ -1,6 +1,8 @@
 #include <haicode/tool.h>
 #include <haicode/util.h>
+#include <climits>
 #include <fnmatch.h>
+#include <cstdlib>
 #include <set>
 #include <string>
 #include <vector>
@@ -61,6 +63,20 @@ static bool is_path_within(const std::string& path, const std::string& base) {
         && npath.compare(0, nbase.size(), nbase) == 0;
 }
 
+// Symlink-aware containment. Both sides are resolved with realpath and
+// containment is checked on the resolved paths, so a symlink inside `base`
+// pointing outside the tree no longer passes — and conversely, a path that
+// is inside only after resolution (e.g. under Haiku's /tmp symlink) passes
+// even when the two inputs are asymmetrically resolved. If either realpath
+// fails (missing or broken target — nothing to leak), the lexical verdict
+// stands (it still catches `..` escapes of nonexistent paths).
+static bool path_resolves_within(const std::string& path, const std::string& base) {
+    char rp[PATH_MAX], rb[PATH_MAX];
+    if (realpath(path.c_str(), rp) && realpath(base.c_str(), rb))
+        return is_path_within(rp, rb);
+    return is_path_within(path, base);
+}
+
 // Roots that read-only tools may always access regardless of config/session
 // rules: Haiku's system headers and documentation are ground truth for BeAPI
 // work and live outside every project directory.
@@ -71,7 +87,7 @@ static bool is_within_always_readable_root(const std::string& path) {
         "/boot/system/documentation",
     };
     for (const auto& root : roots) {
-        if (is_path_within(path, root)) return true;
+        if (path_resolves_within(path, root)) return true;
     }
     return false;
 }
@@ -168,6 +184,16 @@ PermissionEffect PermissionGate::check(const std::string& session_id,
         return ask(session_id, action, resource, input);
 
     return PermissionEffect::Ask;
+}
+
+// Symlink-aware readability check shared by the gate's read-only bypass and
+// ReadTool's O_NOFOLLOW fallback (see tool.h). Defined here next to the
+// containment helpers it builds on.
+bool path_is_always_readable(const std::string& path,
+                             const std::string& working_dir) {
+    if (!working_dir.empty() && path_resolves_within(path, working_dir))
+        return true;
+    return is_within_always_readable_root(path);
 }
 
 // ---- tool_allowed_in_mode ----
@@ -338,31 +364,37 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
     // Read-only tools inside the working directory are always allowed — no
     // prompt, no rule lookup. The user has implicitly trusted the project
     // tree by opening it. Operations outside the working dir still go
-    // through the gate.
+    // through the gate. Containment is symlink-aware (path_resolves_within)
+    // so an in-project symlink pointing outside the tree stays gated.
     if (!ctx.working_dir.empty()) {
         // read, ls, grep, diff, find: resource() returns a resolved absolute path.
         if (name == "read" || name == "ls" || name == "grep" ||
             name == "diff" || name == "find" || name == "symbols") {
             std::string path = tool->resource(input, ctx);
-            if (is_path_within(path, ctx.working_dir) ||
-                is_within_always_readable_root(path))
+            if (path_is_always_readable(path, ctx.working_dir))
                 return tool->execute(input, ctx);
         }
-        // glob: resource() returns the raw pattern. Relative patterns always
-        // expand under working_dir. For absolute patterns, extract the
-        // literal prefix before any wildcard and verify it's inside the tree
-        // (or an always-readable root).
+        // glob: resource() returns the raw pattern. Extract the literal
+        // prefix before any wildcard; relative patterns are joined with
+        // working_dir first (they expand under it). The joined prefix must
+        // resolve inside the tree (or an always-readable root) — this also
+        // catches a relative pattern leading through a symlinked directory
+        // out of the project.
         if (name == "glob") {
             std::string pattern = input.value("pattern", "");
-            if (pattern.empty() || pattern[0] != '/') {
-                return tool->execute(input, ctx);
-            }
+            std::string prefix;
             size_t wild = pattern.find_first_of("*?[");
-            std::string prefix = (wild == std::string::npos)
-                                    ? pattern
-                                    : pattern.substr(0, wild);
+            prefix = (wild == std::string::npos)
+                        ? pattern
+                        : pattern.substr(0, wild);
+            if (!prefix.empty() && prefix[0] != '/') {
+                std::string base = ctx.working_dir;
+                while (!base.empty() && base.back() == '/') base.pop_back();
+                prefix = base + "/" + prefix;
+            }
+            if (prefix.empty()) prefix = ctx.working_dir;
             std::string base = normalize_path(prefix);
-            if (is_path_within(base, ctx.working_dir) ||
+            if (path_resolves_within(base, ctx.working_dir) ||
                 is_within_always_readable_root(base))
                 return tool->execute(input, ctx);
         }
