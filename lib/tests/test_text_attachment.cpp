@@ -153,12 +153,12 @@ static const char* kDbPath = "/tmp/haicode_test_text_att.db";
 class FakeProvider : public haicode::Provider {
 public:
     std::string id() const override { return "fake"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"fake-model"};
     }
     int get_model_context(const std::string&) const override { return 0; }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
     }
 };

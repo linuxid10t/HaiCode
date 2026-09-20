@@ -136,11 +136,11 @@ static bool test_placeholder_substitution() {
 class BlockingProvider : public haicode::Provider {
 public:
     std::string id() const override { return "blocking"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"blocking-model"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         {
             std::lock_guard<std::mutex> g(m);
             ++entered;
@@ -234,11 +234,11 @@ static bool test_destructor_joins_running_loop() {
 class ToolCallProvider : public haicode::Provider {
 public:
     std::string id() const override { return "toolcall"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"tc-model"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         ++calls;
         if (calls == 1) {
             std::vector<haicode::ToolCall> tcs{pending};
@@ -438,11 +438,11 @@ static bool test_bash_failure_output_persisted_e2e() {
 class SwitchingProvider : public haicode::Provider {
 public:
     std::string id() const override { return "prov-a"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"model-a"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         ++calls;
         if (calls == 1) {
             store->update_provider_model(sid, "prov-b", "model-b");
@@ -466,12 +466,12 @@ public:
 class RecordingProvider : public haicode::Provider {
 public:
     std::string id() const override { return "prov-b"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"model-b"};
     }
     void stream(const haicode::LLMRequest& req,
-                haicode::StreamCallbacks cb) override {
+                haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         ++calls;
         last_model = req.model_id;
         cb.on_text_delta("t", "b-done");
@@ -735,6 +735,160 @@ static bool test_build_hook_cwd_and_failure_e2e() {
     return true;
 }
 
+// ============================================================
+// Per-session cancel scoping (stream token)
+// ============================================================
+
+// Two sessions share ONE provider object (ProviderRegistry hands the same
+// shared_ptr to every session). interrupt() must cancel only the interrupted
+// session's in-flight stream: Provider::stream/cancel carry a per-run token
+// and the engine cancels exactly that token. Regression: the old unscoped
+// Provider::cancel() aborted BOTH sessions' transfers.
+class SharedTokenProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "shared"; }
+    std::vector<std::string> list_models(std::string&) override {
+        return {"shared-model"};
+    }
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb,
+                const std::string& stream_token = "") override {
+        {
+            std::lock_guard<std::mutex> g(m);
+            ++entered[stream_token];
+        }
+        entered_cv.notify_all();
+        {
+            std::unique_lock<std::mutex> lk(m);
+            release_cv.wait_for(lk, std::chrono::seconds(10),
+                                [&] { return released.count(stream_token) != 0; });
+        }
+        bool was_cancelled;
+        {
+            std::lock_guard<std::mutex> g(m);
+            was_cancelled = cancelled_tokens.count(stream_token) != 0;
+            exited.push_back(stream_token);
+            if (!was_cancelled) finished.push_back(stream_token);
+        }
+        // Mirror the real providers: an interrupted stream returns silently
+        // — no on_error, no on_finish — so the loop breaks on its own flag.
+        if (!was_cancelled && cb.on_finish)
+            cb.on_finish(haicode::FinishReason::Stopped, {}, {});
+    }
+    void cancel(const std::string& stream_token = "") override {
+        std::lock_guard<std::mutex> g(m);
+        for (auto& [tok, _] : entered) {
+            if (stream_token.empty() || tok == stream_token) {
+                cancelled_tokens.insert(tok);
+                released.insert(tok);
+            }
+        }
+        release_cv.notify_all();
+    }
+    std::mutex m;
+    std::condition_variable entered_cv;
+    std::condition_variable release_cv;
+    std::map<std::string, int> entered;
+    std::set<std::string> released;
+    std::set<std::string> cancelled_tokens;
+    std::vector<std::string> exited;       // every stream() exit, cancelled or not
+    std::vector<std::string> finished;     // streams that reached on_finish
+};
+
+static bool test_interrupt_scoped_to_session_token() {
+    static const char* kDb = "/tmp/haicode_test_cancel_scope.db";
+    remove(kDb);
+    haicode::Database db(kDb);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<SharedTokenProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "shared-model";
+    cfg.provider = "shared";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid_a = engine.create_session("/tmp/projA", "build",
+                                              "shared-model", "shared");
+    std::string sid_b = engine.create_session("/tmp/projB", "build",
+                                              "shared-model", "shared");
+    engine.submit_prompt(sid_a, "a");
+    engine.submit_prompt(sid_b, "b");
+
+    bool both_in = false;
+    {
+        std::unique_lock<std::mutex> lk(provider->m);
+        both_in = provider->entered_cv.wait_for(
+            lk, std::chrono::seconds(5),
+            [&] { return provider->entered.size() >= 2; });
+    }
+    CHECK(both_in, "both sessions must be parked in stream() on the SHARED provider");
+
+    // Recover the two run tokens ("s:<session_id>:r<seq>", seq is an
+    // engine-wide counter) by the session id embedded in each.
+    std::string tok_a, tok_b;
+    {
+        std::lock_guard<std::mutex> g(provider->m);
+        for (auto& [tok, n] : provider->entered) {
+            if (tok.find(sid_a) != std::string::npos) tok_a = tok;
+            if (tok.find(sid_b) != std::string::npos) tok_b = tok;
+        }
+    }
+    CHECK(!tok_a.empty() && !tok_b.empty() && tok_a != tok_b,
+          "each session must stream under its own distinct run token: " +
+          tok_a + " / " + tok_b);
+
+    engine.interrupt(sid_a);
+
+    bool a_cancelled = false, b_untouched = false;
+    {
+        std::unique_lock<std::mutex> lk(provider->m);
+        a_cancelled = provider->release_cv.wait_for(
+            lk, std::chrono::seconds(2),
+            [&] { return provider->cancelled_tokens.count(tok_a) != 0; });
+        b_untouched = provider->cancelled_tokens.count(tok_b) == 0;
+    }
+    CHECK(a_cancelled, "interrupt() cancelled the interrupted session's token");
+    CHECK(b_untouched, "interrupt() must not cancel the concurrent session's token");
+
+    {
+        std::lock_guard<std::mutex> g(provider->m);
+        CHECK(provider->exited.size() <= 1 && provider->finished.empty(),
+              "the other session's stream must still be running");
+    }
+
+    {
+        std::lock_guard<std::mutex> g(provider->m);
+        provider->released.insert(tok_b);
+    }
+    provider->release_cv.notify_all();
+    bool b_finished = false;
+    {
+        std::unique_lock<std::mutex> lk(provider->m);
+        b_finished = provider->release_cv.wait_for(
+            lk, std::chrono::seconds(5),
+            [&] { return !provider->finished.empty(); });
+    }
+    CHECK(b_finished, "the concurrent session completed after the interrupt");
+    {
+        std::lock_guard<std::mutex> g(provider->m);
+        CHECK(provider->exited.size() == 2,
+              "both streams eventually exit: " +
+              std::to_string(provider->exited.size()));
+        CHECK(provider->finished.size() == 1 && provider->finished[0] == tok_b,
+              "only the non-interrupted session's stream reaches on_finish");
+    }
+
+    std::remove(kDb);
+    std::cout << "[OK] interrupt() is scoped to the session's stream token\n";
+    return true;
+}
+
 // Inspection item: concurrent sessions must run their loops in parallel.
 // Two sessions, two independent blocking providers — both workers must be
 // parked inside stream() AT THE SAME TIME. With the old whole-body
@@ -836,11 +990,11 @@ public:
     using Script = std::function<std::vector<haicode::ToolCall>(int)>;
     explicit ScriptedProvider(Script s) : script_(std::move(s)) {}
     std::string id() const override { return "scripted"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"sc-model"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb) override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         int idx = calls++;
         auto tcs = script_(idx);
         if (tcs.empty()) {
@@ -1136,6 +1290,7 @@ int main() {
     ok &= test_provider_switch_mid_loop_e2e();
     ok &= test_interrupt_releases_ask_wait_e2e();
     ok &= test_build_hook_cwd_and_failure_e2e();
+    ok &= test_interrupt_scoped_to_session_token();
     ok &= test_concurrent_sessions_run_in_parallel();
     ok &= test_budget_renews_on_todo_completion_e2e();
     ok &= test_no_renewal_without_new_completions_e2e();

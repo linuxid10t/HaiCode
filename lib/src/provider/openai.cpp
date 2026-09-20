@@ -3,9 +3,11 @@
 #include <haicode/model_context_parse.h>
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <set>
+#include <mutex>
 #include <cstdio>
 #include <map>
-#include <mutex>
+#include <memory>
 #include <string>
 
 namespace haicode {
@@ -391,8 +393,30 @@ public:
 
     std::string id() const override { return id_; }
 
-    void stream(const LLMRequest& request, StreamCallbacks callbacks) override {
-        cancelled_.store(false);
+    void stream(const LLMRequest& request, StreamCallbacks callbacks,
+                const std::string& stream_token = "") override {
+        // Per-request cancel flag registered under stream_token (see
+        // AnthropicProvider::stream — same scheme).
+        std::shared_ptr<std::atomic<bool>> flag =
+            std::make_shared<std::atomic<bool>>(false);
+        {
+            std::lock_guard<std::mutex> lock(cancel_mu_);
+            cancel_flags_[stream_token].push_back(flag);
+        }
+        struct FlagPop {
+            OpenAIProvider* p;
+            std::string token;
+            std::shared_ptr<std::atomic<bool>> flag;
+            ~FlagPop() {
+                std::lock_guard<std::mutex> lock(p->cancel_mu_);
+                auto it = p->cancel_flags_.find(token);
+                if (it == p->cancel_flags_.end()) return;
+                auto& v = it->second;
+                for (auto vit = v.begin(); vit != v.end(); ++vit)
+                    if (vit->get() == flag.get()) { v.erase(vit); break; }
+                if (v.empty()) p->cancel_flags_.erase(it);
+            }
+        } pop{this, stream_token, flag};
 
         // ---- Build request body ----
         nlohmann::json body;
@@ -480,7 +504,7 @@ public:
         std::string transport_err;
         http_.post_sse(base_url_ + "/chat/completions", headers, body_str,
             [&](const SSEEvent& ev) -> bool {
-                if (cancelled_.load()) return false;
+                if (flag->load()) return false;
                 if (ev.data == "[DONE]") return false;  // clean stop
                 if (ev.data.empty()) return true;
 
@@ -569,7 +593,7 @@ public:
             }, &code, &transport_err);
 
         // Interrupt: the consumer cancelled — stay quiet, no error event.
-        if (cancelled_.load()) return;
+        if (flag->load()) return;
 
         // Transport failure / HTTP error: report the real cause instead of
         // finishing with an empty assistant turn (review #8).
@@ -625,9 +649,26 @@ public:
             callbacks.on_finish(finish_reason, usage, tool_calls);
     }
 
-    void cancel() override {
-        cancelled_.store(true);
-        http_.cancel();
+    void cancel(const std::string& stream_token = "") override {
+        // Token-scoped, mirroring AnthropicProvider::cancel: only the
+        // matching streams' flags fire; http_.cancel() only when no other
+        // stream is in flight (see comment there for the cross-session why).
+        std::lock_guard<std::mutex> lock(cancel_mu_);
+        size_t total = 0, matching = 0;
+        for (auto& [token, flags] : cancel_flags_) {
+            total += flags.size();
+            if (token == stream_token) matching += flags.size();
+        }
+        if (stream_token.empty()) {
+            for (auto& [token, flags] : cancel_flags_)
+                for (auto& f : flags) f->store(true);
+        } else {
+            auto it = cancel_flags_.find(stream_token);
+            if (it == cancel_flags_.end()) return;
+            for (auto& f : it->second) f->store(true);
+        }
+        if (total == matching)
+            http_.cancel();
     }
 
     // Lazily discover the context window for a model. For list-carries-context
@@ -787,7 +828,9 @@ private:
     std::string id_;
     ServerFlavor flavor_ = ServerFlavor::Generic;
     mutable HttpClient  http_;
-    std::atomic<bool> cancelled_{false};
+    // Per-stream cancel flags keyed by stream_token (see AnthropicProvider).
+    std::mutex cancel_mu_;
+    std::map<std::string, std::vector<std::shared_ptr<std::atomic<bool>>>> cancel_flags_;
     // Discovered context windows, keyed by model_id. Populated during
     // list_models() (for vLLM/OpenRouter/LM Studio) or lazily during
     // get_model_context() (for Ollama/llama.cpp) — both may run on

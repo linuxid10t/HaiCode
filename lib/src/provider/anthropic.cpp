@@ -5,6 +5,9 @@
 #include <sstream>
 #include <atomic>
 #include <map>
+#include <set>
+#include <mutex>
+#include <memory>
 
 namespace haicode {
 
@@ -17,8 +20,34 @@ public:
 
     std::string id() const override { return id_; }
 
-    void stream(const LLMRequest& request, StreamCallbacks callbacks) override {
-        cancelled_.store(false);
+    void stream(const LLMRequest& request, StreamCallbacks callbacks,
+                const std::string& stream_token = "") override {
+        // Per-request cancel flag registered under stream_token. An empty
+        // token can't be cancelled individually (shutdown uses cancel("")
+        // which sweeps everything, including this entry).
+        std::shared_ptr<std::atomic<bool>> flag =
+            std::make_shared<std::atomic<bool>>(false);
+        {
+            std::lock_guard<std::mutex> lock(cancel_mu_);
+            cancel_flags_[stream_token].push_back(flag);
+        }
+        // Pop this request's entry before returning — including the early
+        // `return`s below — so tokens don't leak entries across runs and a
+        // finished run can't be cancelled by a later token match.
+        struct FlagPop {
+            AnthropicProvider* p;
+            std::string token;
+            std::shared_ptr<std::atomic<bool>> flag;
+            ~FlagPop() {
+                std::lock_guard<std::mutex> lock(p->cancel_mu_);
+                auto it = p->cancel_flags_.find(token);
+                if (it == p->cancel_flags_.end()) return;
+                auto& v = it->second;
+                for (auto vit = v.begin(); vit != v.end(); ++vit)
+                    if (vit->get() == flag.get()) { v.erase(vit); break; }
+                if (v.empty()) p->cancel_flags_.erase(it);
+            }
+        } pop{this, stream_token, flag};
 
         nlohmann::json body;
         body["model"] = request.model_id;
@@ -131,7 +160,7 @@ public:
         std::string transport_err;
         http_.post_sse(base_url_ + "/messages", headers, body_str,
             [&](const SSEEvent& ev) -> bool {
-                if (cancelled_.load()) return false;
+                if (flag->load()) return false;
                 if (ev.data == "[DONE]") return true;
                 if (ev.data.empty()) return true;
 
@@ -239,7 +268,7 @@ public:
             }, &code, &transport_err);
 
         // Interrupt: the consumer cancelled — stay quiet, no error event.
-        if (cancelled_.load()) return;
+        if (flag->load()) return;
 
         // Transport failure / HTTP error: report the real cause instead of
         // finishing with an empty assistant turn (review #8).
@@ -261,9 +290,29 @@ public:
             callbacks.on_finish(state.finish_reason, state.usage, state.tool_calls);
     }
 
-    void cancel() override {
-        cancelled_.store(true);
-        http_.cancel();
+    void cancel(const std::string& stream_token = "") override {
+        // Token-scoped: only the matching streams' flags are set — their
+        // write_cb returns 0 at the next chunk and curl aborts that transfer.
+        // http_.cancel() would abort every transfer on the shared client
+        // (crossing sessions), so it fires only when this provider has no
+        // other stream in flight; otherwise the abort rides the next SSE
+        // chunk (providers emit keepalives/pings during generation).
+        std::lock_guard<std::mutex> lock(cancel_mu_);
+        size_t total = 0, matching = 0;
+        for (auto& [token, flags] : cancel_flags_) {
+            total += flags.size();
+            if (token == stream_token) matching += flags.size();
+        }
+        if (stream_token.empty()) {
+            for (auto& [token, flags] : cancel_flags_)
+                for (auto& f : flags) f->store(true);
+        } else {
+            auto it = cancel_flags_.find(stream_token);
+            if (it == cancel_flags_.end()) return;
+            for (auto& f : it->second) f->store(true);
+        }
+        if (total == matching)
+            http_.cancel();
     }
 
     std::vector<std::string> list_models(std::string& error) override {
@@ -321,7 +370,11 @@ private:
     std::string base_url_;
     std::string id_;
     HttpClient http_;
-    std::atomic<bool> cancelled_{false};
+    // Per-stream cancel flags keyed by stream_token ("" included). Guarded
+    // by cancel_mu_; stream() registers its flag on entry and pops it before
+    // returning, so entries are always in-flight streams.
+    std::mutex cancel_mu_;
+    std::map<std::string, std::vector<std::shared_ptr<std::atomic<bool>>>> cancel_flags_;
 };
 
 // Factory function

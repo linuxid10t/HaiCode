@@ -388,13 +388,13 @@ static void test_assemble_skill_rows() {
 class FakeProvider : public haicode::Provider {
 public:
     std::string id() const override { return "fake"; }
-    void cancel() override {}
+    void cancel(const std::string& stream_token = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"fake-model"};
     }
     int get_model_context(const std::string&) const override { return 0; }
     void stream(const haicode::LLMRequest& req,
-                haicode::StreamCallbacks cb) override {
+                haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
         ++calls;
         last_chat_request = req;
         cb.on_text_delta("t", "ok");

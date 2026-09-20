@@ -65,12 +65,21 @@ struct StreamCallbacks {
     std::function<void(const std::string& error)> on_error;
 };
 
+// Per-stream cancellation token. The engine mints one per agentic-loop run
+// ("s:<session_id>:r<seq>") and passes it to stream() and cancel(), so
+// interrupting session A cannot abort session B's in-flight stream when both
+// run through the same shared Provider object. Implementations must scope
+// cancellation to the matching stream; an empty token means "cancel every
+// stream on this provider" (engine shutdown uses this). A token the provider
+// doesn't know (never passed to stream(), or its stream already ended) is a
+// no-op.
 class Provider {
 public:
     virtual ~Provider() = default;
     virtual std::string id() const = 0;
-    virtual void stream(const LLMRequest& request, StreamCallbacks callbacks) = 0;
-    virtual void cancel() = 0;
+    virtual void stream(const LLMRequest& request, StreamCallbacks callbacks,
+                        const std::string& stream_token = "") = 0;
+    virtual void cancel(const std::string& stream_token = "") = 0;
     virtual std::vector<std::string> list_models(std::string& error) = 0;
     // Discovered context window for a model, or 0 if unknown. Used as a
     // fallback when get_context_window()'s config/prefix table returns 0,

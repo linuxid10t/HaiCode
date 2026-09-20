@@ -333,12 +333,11 @@ HttpClient::HttpClient() : state_(std::make_unique<State>()) {
 HttpClient::~HttpClient() = default;
 
 void HttpClient::cancel() {
-    // Fan the cancel out to every in-flight request on this client. Granularity
-    // note: Provider::cancel() (provider.h) takes no session id and the
-    // provider-level cancelled_ atomic has the same sharing problem one layer
-    // up, so interrupting session A still cancels session B's in-flight stream
-    // on the same shared provider. Per-session cancellation needs plumbing
-    // through the Provider ABC — follow-up work, deliberately out of scope.
+    // Fans the cancel out to every in-flight request on this client. Per-stream
+    // granularity lives one layer up: Provider::stream/cancel take a stream
+    // token, and implementations only route a token-scoped cancel here when no
+    // other stream is in flight on the client — a blanket call would abort a
+    // concurrent session's transfer too.
     std::lock_guard<std::mutex> lock(state_->mu);
     for (RequestState* req : state_->inflight)
         req->cancelled = true;

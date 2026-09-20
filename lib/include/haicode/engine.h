@@ -145,7 +145,8 @@ private:
                          const std::string& provider_id,
                          std::atomic<bool>* interrupt_flag,
                          int prev_input_tokens,
-                         int threshold_tokens);
+                         int threshold_tokens,
+                         const std::string& stream_token = "");
 
     // One-shot LLM call that produces a concise (≤6-word) session title from
     // the conversation's user prompts. On the first call (turn 1) it generates
@@ -156,7 +157,8 @@ private:
     // and the existing title is left in place.
     void refine_title_llm(const std::string& session_id,
                           Provider& provider,
-                          const std::string& model_id);
+                          const std::string& model_id,
+                          const std::string& stream_token = "");
 
     // Vision fallback: true when a usable fallback (provider registered +
     // model vision-capable per model_supports_vision) is configured. Warns
@@ -170,7 +172,8 @@ private:
     // worker thread only.
     std::string describe_image(Provider& provider,
                                const std::string& model_id,
-                               const nlohmann::json& att);
+                               const nlohmann::json& att,
+                               const std::string& stream_token = "");
 
     // Describe-once backfill: when the session's primary model is text-only
     // and a vision fallback is configured, find every persisted attachment
@@ -193,6 +196,14 @@ private:
     std::map<std::string, bool> session_running_;  // true while agentic_loop is executing
     std::map<std::string, SessionMode> session_modes_;
     std::map<std::string, std::shared_ptr<Provider>> session_providers_;
+    // Per-run stream token currently registered for a session (see
+    // Provider::stream/cancel). A token is present only while that session's
+    // agentic_loop or compact_now worker is between run_token mint/erase;
+    // interrupt() cancels exactly this token, so two sessions sharing one
+    // Provider object no longer cancel each other's in-flight streams.
+    // Guarded by mu_.
+    std::map<std::string, std::string> session_stream_tokens_;
+    uint64_t next_run_seq_ = 0;  // token uniqueness; guarded by mu_
     // Single-flight guard: ids with a compaction attempt in flight.
     std::set<std::string> compaction_in_progress_;
     // Step number at which the most recent successful compaction fired, per

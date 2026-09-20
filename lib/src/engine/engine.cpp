@@ -862,8 +862,12 @@ void SessionEngine::continue_session(const std::string& session_id) {
 }
 
 void SessionEngine::interrupt(const std::string& session_id) {
-    // 1. Set interrupt flag and get provider pointer (under lock).
-    Provider* active_provider = nullptr;
+    // 1. Set interrupt flag and fetch this session's provider + stream token
+    // (under lock). The token scopes the cancel to THIS session's in-flight
+    // stream: two sessions can share one Provider object, and an unscoped
+    // cancel() aborted the other session's transfer too.
+    std::shared_ptr<Provider> active_provider;
+    std::string stream_token;
     {
         std::lock_guard<std::mutex> lock(mu_);
 
@@ -871,23 +875,24 @@ void SessionEngine::interrupt(const std::string& session_id) {
         if (it != interrupt_flags_.end() && it->second)
             it->second->store(true);
 
-        // Get the active provider so we can cancel its HTTP request.
+        auto tok_it = session_stream_tokens_.find(session_id);
+        if (tok_it != session_stream_tokens_.end())
+            stream_token = tok_it->second;
+
         auto prov_it = session_providers_.find(session_id);
-        if (prov_it != session_providers_.end()) {
-            active_provider = prov_it->second.get();
-        }
+        if (prov_it != session_providers_.end())
+            active_provider = prov_it->second;
     }
 
-    // 2. Cancel in-flight HTTP request — this sets cancelled_ on both the
-    // provider and HttpClient, causing libcurl to abort the transfer
-    // immediately so the agentic loop can break out.
+    // 2. Cancel THIS session's in-flight stream — the provider aborts the
+    // matching transfer immediately so the agentic loop can break out.
     // We do NOT join the runner thread here: interrupt() is called from the
     // UI thread, and the runner may be blocked on a permission future (which
     // would deadlock the join). The thread will be joined lazily on the next
     // submit_prompt()/continue_session() call, and the Interrupted event
     // below gives the UI immediate feedback.
     if (active_provider) {
-        active_provider->cancel();
+        active_provider->cancel(stream_token);
     }
 
     // 3. Release any ask_user wait for THIS session: mark it replied with
@@ -1012,10 +1017,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // map exactly once.
     std::string fetched_provider_id = provider_id;
 
-    // Store active provider so interrupt() can cancel in-flight HTTP requests.
+    // Store active provider so interrupt() can cancel in-flight HTTP requests,
+    // scoped to this run's stream token (Provider::stream/cancel): interrupting
+    // this session must not abort another session streaming through the same
+    // shared provider object. The token lives until the loop exits; the
+    // mid-loop provider re-fetch keeps it (only the object changes).
+    std::string run_token;
     {
         std::lock_guard<std::mutex> lock(mu_);
         session_providers_[session_id] = provider;
+        run_token = "s:" + session_id + ":r" + std::to_string(next_run_seq_++);
+        session_stream_tokens_[session_id] = run_token;
     }
 
     auto* interrupt_flag = interrupt_flags_[session_id];
@@ -1343,7 +1355,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                           iter, lcs)) {
                     if (compact_history(session_id, *provider, model_id,
                                         provider_id, interrupt_flag,
-                                        current_tokens, threshold)) {
+                                        current_tokens, threshold, run_token)) {
                         {
                             std::lock_guard<std::mutex> lock(mu_);
                             last_compaction_step_[session_id] = iter;
@@ -1431,7 +1443,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             step_error = error;
         };
 
-        provider->stream(req, cbs);
+        provider->stream(req, cbs, run_token);
 
         // One retry on transient errors (provider overload, gateway timeout,
         // dropped connection), but only when nothing has streamed yet — if the
@@ -1467,7 +1479,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["model_id"] = model_id;
                 bus_.publish(events::EventType::StepStarted, ev);
             }
-            provider->stream(req, cbs);
+            provider->stream(req, cbs, run_token);
         }
 
         // Context-overflow recovery: if the provider rejected the request as
@@ -1494,7 +1506,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             fprintf(stderr, "[engine] context overflow: %s — compacting and "
                     "retrying once\n", step_error.c_str());
             if (compact_history(session_id, *provider, model_id, provider_id,
-                                interrupt_flag, prev_total_input, 0)) {
+                                interrupt_flag, prev_total_input, 0, run_token)) {
                 messages = load_context_messages(session_id);
                 req = builder.build(messages, system, system_dynamic,
                                     tool_defs, model_id, provider_id);
@@ -1507,7 +1519,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     ev["model_id"] = model_id;
                     bus_.publish(events::EventType::StepStarted, ev);
                 }
-                provider->stream(req, cbs);
+                provider->stream(req, cbs, run_token);
             }
         }
 
@@ -1976,7 +1988,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             if (m.type == "user_prompted") ++user_count;
         }
         if (user_count >= 1 && user_count % 5 == 1) {
-            refine_title_llm(session_id, *provider, model_id);
+            refine_title_llm(session_id, *provider, model_id, run_token);
         }
     }
 
@@ -1984,6 +1996,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     {
         std::lock_guard<std::mutex> lock(mu_);
         session_providers_.erase(session_id);
+        session_stream_tokens_.erase(session_id);
     }
 }
 
@@ -2028,7 +2041,8 @@ bool SessionEngine::compact_history(const std::string& session_id,
                                      const std::string& provider_id,
                                      std::atomic<bool>* interrupt_flag,
                                      int prev_input_tokens,
-                                     int threshold_tokens)
+                                     int threshold_tokens,
+                                     const std::string& stream_token)
 {
     // Single-flight: the auto path (agentic loop thread) and compact_now
     // (background worker) both check/set this under mu_.
@@ -2139,7 +2153,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         // an empty std::function call (std::bad_function_call → abort).
         cbs.on_finish = [](FinishReason, TokenUsage, std::vector<ToolCall>) {};
         cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
-        provider.stream(r, cbs);
+        provider.stream(r, cbs, stream_token);
         return !failed;
     };
 
@@ -2259,7 +2273,8 @@ bool SessionEngine::compact_history(const std::string& session_id,
 
 void SessionEngine::refine_title_llm(const std::string& session_id,
                                       Provider& provider,
-                                      const std::string& model_id)
+                                      const std::string& model_id,
+                                      const std::string& stream_token)
 {
     // Load the full message history so we can summarize the conversation's
     // actual subject, not just the first prompt. We take the latest user
@@ -2326,7 +2341,7 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
         err = error;
     };
 
-    provider.stream(req, cbs);
+    provider.stream(req, cbs, stream_token);
 
     if (failed) {
         fprintf(stderr, "[engine] title refinement failed: %s\n", err.c_str());
@@ -2383,7 +2398,8 @@ bool SessionEngine::vision_fallback_ready()
 
 std::string SessionEngine::describe_image(Provider& provider,
                                           const std::string& model_id,
-                                          const nlohmann::json& att)
+                                          const nlohmann::json& att,
+                                          const std::string& stream_token)
 {
     nlohmann::json content = nlohmann::json::array();
     content.push_back({{"type", "text"}, {"text",
@@ -2423,7 +2439,7 @@ std::string SessionEngine::describe_image(Provider& provider,
         err = error;
     };
 
-    provider.stream(req, cbs);
+    provider.stream(req, cbs, stream_token);
 
     if (failed) {
         fprintf(stderr, "[engine] vision fallback describe failed: %s\n",
@@ -2536,10 +2552,20 @@ void SessionEngine::compact_now(const std::string& session_id) {
     session_running_[session_id] = true;
     runner_threads_[session_id] = std::thread(
         [this, session_id, provider, model_id, provider_id]() {
+            // Mint and register this worker's own stream token so interrupt()
+            // resolves this session (and only this session) — the empty
+            // default would instead sweep every session's stream on the
+            // shared provider. Same contract as agentic_loop.
+            std::string run_token;
+            {
+                std::lock_guard<std::mutex> g(mu_);
+                run_token = "s:" + session_id + ":r" + std::to_string(next_run_seq_++);
+                session_stream_tokens_[session_id] = run_token;
+            }
             // Sentinel threshold of 0 — compact_history only echoes it in the
             // CompactionStarted payload, not in the decision logic.
             bool committed = compact_history(session_id, *provider, model_id,
-                                             provider_id, nullptr, 0, 0);
+                                             provider_id, nullptr, 0, 0, run_token);
             if (!committed) {
                 // Manual compactions must not fail silently: the user pressed
                 // a button. Explain why nothing changed.
@@ -2551,7 +2577,8 @@ void SessionEngine::compact_now(const std::string& session_id) {
                 ev["messages_after"]  = ev["messages_before"];
                 bus_.publish(events::EventType::CompactionEnded, ev);
             }
-            std::lock_guard<std::mutex> g(mu_);
+            std::unique_lock<std::mutex> g(mu_);
+            session_stream_tokens_.erase(session_id);
             session_running_[session_id] = false;
         });
 }
