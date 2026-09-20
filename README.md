@@ -7,6 +7,7 @@ A native coding-agent app for **Haiku R1** — a native GUI (BeAPI) frontend bac
 ## Features
 
 - **Agentic loop** — up to 20 tool-use steps per turn, with atomic interruption between steps.
+- **`/retry` command** — typing `/retry` in the input deletes the last turn's assistant output and re-runs it on the stored prompt (attachments and skill invocations included); refused while a turn is streaming.
 - **Native GUI** — `haicode-gui`, a Haiku BeAPI frontend.
 - **Nineteen built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `ls`, `find`, `symbols`, `diff`, `git`, `process`, `external_terminal`, `todo_write`, `propose_plan`, `discard_plan`, `write_agents_md`, plus `web_search` and `web_extract` — each with safe argument handling and a 100 KB output cap. The `symbols` tool does heuristic C/C++ symbol search (definitions + classified references), skipping comments and string literals for less noise than `grep`.
 - **Multi-provider** — any number of Anthropic and OpenAI-compatible endpoints (proxies, Ollama, LM Studio, …) in `config.json`, with message-format translation between them.

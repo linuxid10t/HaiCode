@@ -74,6 +74,9 @@ target_link_libraries(test_tool_safety haicode)
 add_executable(test_skills tests/test_skills.cpp)
 target_link_libraries(test_skills haicode)
 
+add_executable(test_retry tests/test_retry.cpp)
+target_link_libraries(test_retry haicode)
+
 add_executable(test_http_client tests/test_http_client.cpp)
 # Socket APIs (bind/accept/recv) live in libnetwork on Haiku, and nothing in
 # libhaicode itself uses them, so the test links it directly.

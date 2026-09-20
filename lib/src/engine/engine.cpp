@@ -861,6 +861,43 @@ void SessionEngine::continue_session(const std::string& session_id) {
     }
 }
 
+void SessionEngine::retry_last_turn(const std::string& session_id) {
+    // Read the stored history before taking mu_ (same discipline as
+    // compact_now) — SQLite work does not belong inside the engine lock.
+    int last_prompt_seq = -1;
+    for (const auto& m : store_.load_messages(session_id))
+        if (m.type == "user_prompted")
+            last_prompt_seq = m.seq;
+    if (last_prompt_seq < 0) return;
+
+    std::lock_guard<std::mutex> lock(mu_);
+    // No new runners during destruction (see submit_prompt).
+    if (shutting_down_) return;
+    // Refuse while the agentic loop is mid-run: deleting rows under a live
+    // runner would corrupt the turn it is still writing.
+    if (session_running_.count(session_id) && session_running_[session_id])
+        return;
+
+    auto th_it = runner_threads_.find(session_id);
+    if (th_it != runner_threads_.end() && th_it->second.joinable())
+        th_it->second.join();
+
+    store_.delete_messages_after(session_id, last_prompt_seq);
+    // Rearm the compaction hysteresis so the retried turn's first step is
+    // allowed to compact if needed (same as submit_prompt).
+    last_compaction_step_[session_id] = -1;
+
+    if (interrupt_flags_.count(session_id))
+        delete interrupt_flags_[session_id];
+    interrupt_flags_[session_id] = new std::atomic<bool>(false);
+    session_running_[session_id] = true;
+    runner_threads_[session_id] = std::thread([this, session_id]() {
+        agentic_loop(session_id);
+        std::lock_guard<std::mutex> g(mu_);
+        session_running_[session_id] = false;
+    });
+}
+
 void SessionEngine::interrupt(const std::string& session_id) {
     // 1. Set interrupt flag and fetch this session's provider + stream token
     // (under lock). The token scopes the cancel to THIS session's in-flight

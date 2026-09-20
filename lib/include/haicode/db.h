@@ -124,6 +124,13 @@ public:
     void update_message_data(const std::string& session_id,
                              int seq,
                              const std::string& data_json);
+    // Delete every message row with seq > `seq` (used by retry to drop the
+    // last turn's assistant output while keeping its user_prompted row).
+    // Checkpoints and todos are untouched: checkpoints only reference
+    // boundaries (a through_seq above the deleted tail is impossible since
+    // compaction never covers the current turn), and the retried turn's
+    // todo_write calls replace the todo list anyway.
+    void delete_messages_after(const std::string& session_id, int seq);
     std::vector<SessionMessage> load_messages(const std::string& session_id);
 
     // ---- Compaction checkpoints (non-destructive compaction) ----

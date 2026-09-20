@@ -576,6 +576,24 @@ void SessionStore::update_message_data(const std::string& session_id,
     sqlite3_finalize(stmt);
 }
 
+void SessionStore::delete_messages_after(const std::string& session_id, int seq) {
+    sqlite3_stmt* stmt = nullptr;
+    sqlite3_prepare_v2(db_.handle(),
+        "DELETE FROM session_message WHERE session_id=? AND seq>?", -1,
+        &stmt, nullptr);
+    sqlite3_bind_text(stmt, 1, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 2, seq);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    const char* upd = "UPDATE session SET time_updated=? WHERE id=?";
+    sqlite3_prepare_v2(db_.handle(), upd, -1, &stmt, nullptr);
+    sqlite3_bind_int64(stmt, 1, util::now_ms());
+    sqlite3_bind_text(stmt, 2, session_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
 std::vector<SessionMessage> SessionStore::load_messages(const std::string& session_id) {
     const char* sql =
         "SELECT id, session_id, type, seq, data_json, time_created, time_updated"

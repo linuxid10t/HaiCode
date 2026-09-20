@@ -1423,6 +1423,14 @@ MainWindow::_SubmitPrompt()
     if (input_text.Length() == 0 && pending_attachments_.empty()) return;
 
     std::string text(input_text.String());
+
+    // Control command: re-run the last turn. Intercepted before submission so
+    // the raw text is never stored and never reaches skill matching.
+    if (text == "/retry") {
+        _HandleRetryCommand();
+        return;
+    }
+
     input_view_->SetText("");
     input_view_->MakeFocus(true);
 
@@ -1467,6 +1475,51 @@ MainWindow::_SubmitPrompt()
 
     // Submit to engine (runs on engine thread)
     engine_->submit_prompt(active_session_id_, text, attachments);
+}
+
+void
+MainWindow::_HandleRetryCommand()
+{
+    // A control command, not a submit: clear the input but leave any staged
+    // attachments staged (retry re-sends the stored prompt, not the composer).
+    input_view_->SetText("");
+    input_view_->MakeFocus(true);
+    _SaveActiveDraft();
+
+    if (active_session_id_.empty()) {
+        chat_view_->AppendSystem("Nothing to retry yet.");
+        return;
+    }
+
+    bool has_prompt = false;
+    for (const auto& m : store_.load_messages(active_session_id_)) {
+        if (m.type == "user_prompted") { has_prompt = true; break; }
+    }
+    if (!has_prompt) {
+        chat_view_->AppendSystem("Nothing to retry yet.");
+        return;
+    }
+
+    if (engine_ && engine_->is_running(active_session_id_)) {
+        chat_view_->AppendSystem("Cannot retry while the session is running.");
+        return;
+    }
+
+    engine_->retry_last_turn(active_session_id_);
+
+    // Reload the scrollback without the deleted tail. Streaming BMessages the
+    // old run already queued are dropped by the looper turn ordering — they
+    // arrive before the retried run's StepStarted flips streaming back on.
+    chat_view_->Clear();
+    _LoadHistory(active_session_id_);
+
+    last_prompt_input_ = 0;
+    last_prompt_output_ = 0;
+    engine_running_ = true;
+    streaming_state_ = "thinking";
+    current_tool_name_.clear();
+    interrupt_btn_->SetEnabled(true);
+    _UpdateStatusStrip();
 }
 
 void

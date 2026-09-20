@@ -60,6 +60,14 @@ public:
                        const std::vector<Attachment>& attachments);
     // Resume the agentic loop without adding a new user message (used after plan approval).
     void continue_session(const std::string& session_id);
+    // Re-run the last turn: delete every message after the most recent
+    // user_prompted row (assistant output, tool calls, tool results) and
+    // restart the agentic loop on that stored prompt. Attachments, skill
+    // blocks, and mode notices ride the user_prompted row, so context
+    // assembly re-applies them automatically. No-op when the session has no
+    // user_prompted row or the agentic loop is already running (same contract
+    // as compact_now). Cost/token totals are not rolled back.
+    void retry_last_turn(const std::string& session_id);
     // Append a user_prompted message + publish Prompted event without starting
     // the agentic loop. Used by approval handlers between set_mode and
     // continue_session to inject the plan-approved directive. An explicitly
