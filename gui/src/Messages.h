@@ -51,6 +51,7 @@ static const uint32 MSG_FB_MODEL_CHANGED = 'VBmc'; // fallback model dropdown it
 static const uint32 MSG_FETCH_MODELS    = 'FTmd';  // MainWindow → be_app; "provider_id" string
 static const uint32 MSG_MODELS_LOADED   = 'MLld';  // be_app → MainWindow; repeated "model" strings
 static const uint32 MSG_MODEL_SELECTED  = 'MDsl';  // model menu item → MainWindow (no args; read marked item)
+static const uint32 MSG_MODEL_REFRESH   = 'Mdfr';  // MainWindow internal; model dropdown clicked
 
 // Working directory
 static const uint32 MSG_CHOOSE_DIR      = 'CHdr';  // dir button pressed → open BFilePanel

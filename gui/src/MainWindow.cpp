@@ -124,6 +124,33 @@ public:
 };
 
 // ---------------------------------------------------------------------------
+// ModelMenuField — BMenuField that posts MSG_MODEL_REFRESH to its window when
+// clicked, so a previously failed model list can be re-fetched on demand.
+// BMenuField tracks its menu on a separate menu-task thread, so the window
+// looper stays free to process the refresh while the menu is open.
+// ---------------------------------------------------------------------------
+
+class ModelMenuField : public BMenuField {
+public:
+    ModelMenuField(const char* name, const char* label, BMenu* menu)
+        : BMenuField(name, label, menu)
+    {
+    }
+
+    void MouseDown(BPoint where) override
+    {
+        int32 buttons = 0;
+        if (Window() && Window()->CurrentMessage()
+            && Window()->CurrentMessage()->FindInt32("buttons", &buttons) == B_OK
+            && (buttons & B_PRIMARY_MOUSE_BUTTON)) {
+            BMessage refresh(MSG_MODEL_REFRESH);
+            Window()->PostMessage(&refresh);
+        }
+        BMenuField::MouseDown(where);
+    }
+};
+
+// ---------------------------------------------------------------------------
 // InputTextView — BTextView subclass that sends MSG_SUBMIT_PROMPT on Enter
 // ---------------------------------------------------------------------------
 
@@ -299,7 +326,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     loading_item->SetEnabled(false);
     loading_item->SetMarked(true);
     model_menu_->AddItem(loading_item);
-    model_field_ = new BMenuField("model_field", "Model:", model_menu_);
+    model_field_ = new ModelMenuField("model_field", "Model:", model_menu_);
 
     // Mode selector — Build (full access), Plan (read-only + propose_plan),
     // Chat (conversation + web research only, zero local computer access).
@@ -865,22 +892,7 @@ MainWindow::MessageReceived(BMessage* msg)
             SelectProvider(pid);
             _ApplyProviderModelToActiveSession();
             _PersistProviderModel();
-
-            // Immediately reset the model dropdown so the user isn't shown the
-            // previous provider's models with a stale mark while the fetch is
-            // in flight. default_model_ is preserved so that if the fetch fails
-            // or returns no matches, the next session still uses a sensible
-            // value.
-            while (model_menu_->CountItems() > 0)
-                delete model_menu_->RemoveItem((int32)0);
-            auto* loading_item = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
-            loading_item->SetEnabled(false);
-            loading_item->SetMarked(true);
-            model_menu_->AddItem(loading_item);
-
-            BMessage fwd(MSG_FETCH_MODELS);
-            fwd.AddString("provider_id", default_provider_.c_str());
-            be_app->PostMessage(&fwd);
+            _FetchModels();
             break;
         }
         case MSG_MODEL_SELECTED: {
@@ -894,6 +906,13 @@ MainWindow::MessageReceived(BMessage* msg)
                 _UpdateMaxContext();
                 _PersistProviderModel();
             }
+            break;
+        }
+        case MSG_MODEL_REFRESH: {
+            // Model dropdown clicked while the last load failed — re-fetch.
+            // The flag gate lives here so ModelMenuField stays stateless.
+            if (models_load_failed_)
+                _FetchModels();
             break;
         }
         case MSG_MODELS_LOADED: {
@@ -914,6 +933,9 @@ MainWindow::MessageReceived(BMessage* msg)
             // freshly fetched list still contains it, we re-mark it; otherwise
             // we fall back to the first available model and update
             // default_model_ to match.
+            // A completed load (even an empty one) is not a failure — only the
+            // explicit error branch below re-arms the click-to-retry flag.
+            models_load_failed_ = false;
             std::string preserved = default_model_;
 
             while (model_menu_->CountItems() > 0)
@@ -938,8 +960,13 @@ MainWindow::MessageReceived(BMessage* msg)
                 // debuggable instead of silent.
                 std::string label = "(none available)";
                 const char* err = nullptr;
-                if (msg->FindString("error", &err) == B_OK && err && *err)
+                if (msg->FindString("error", &err) == B_OK && err && *err) {
                     label = std::string("(fetch failed: ") + err + ")";
+                    // Remember the failure so clicking the dropdown re-fetches.
+                    // A no-key "(none available)" is not an error — retrying
+                    // it cannot succeed, so the flag stays false there.
+                    models_load_failed_ = true;
+                }
                 auto* none_item = new BMenuItem(label.c_str(), nullptr);
                 none_item->SetEnabled(false);
                 model_menu_->AddItem(none_item);
@@ -2459,6 +2486,29 @@ MainWindow::_UpdateMaxContext()
                                                engine_->config().model_contexts,
                                                provider.get());
     _UpdateStatusStrip();
+}
+
+void
+MainWindow::_FetchModels()
+{
+    // A load is now in flight; a dropdown click won't re-trigger it.
+    models_load_failed_ = false;
+
+    // Immediately reset the model dropdown so the user isn't shown the
+    // previous provider's models with a stale mark while the fetch is
+    // in flight. default_model_ is preserved so that if the fetch fails
+    // or returns no matches, the next session still uses a sensible
+    // value.
+    while (model_menu_->CountItems() > 0)
+        delete model_menu_->RemoveItem((int32)0);
+    auto* loading_item = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
+    loading_item->SetEnabled(false);
+    loading_item->SetMarked(true);
+    model_menu_->AddItem(loading_item);
+
+    BMessage fwd(MSG_FETCH_MODELS);
+    fwd.AddString("provider_id", default_provider_.c_str());
+    be_app->PostMessage(&fwd);
 }
 
 void

@@ -101,6 +101,7 @@ private:
     void _UpdateStatusStrip();
     void _UpdateMaxContext();
     void _RefreshModeButton();
+    void _FetchModels();                  // reset model dropdown to (loading…) and forward to be_app
     void _ApplyProviderModelToActiveSession();
     void _PersistProviderModel();
     void _ApplyInference();       // Inference tab Apply button
@@ -213,6 +214,7 @@ private:
 
     // Engine state mirror for UI
     bool           engine_running_        = false;
+    bool           models_load_failed_    = false;  // last model fetch errored; dropdown click re-fetches
     bool           compacting_            = false;
     int            compaction_progress_   = -1;  // 0-99 while compacting; -1 = unknown
     std::string    streaming_state_ = "idle";  // idle|thinking|streaming|tool|compacting
