@@ -24,6 +24,12 @@ std::shared_ptr<Provider> make_openai_compat_provider(const std::string& api_key
                                                        const std::string& base_url,
                                                        const std::string& id,
                                                        const std::string& flavor);
+// Factory for the ChatGPT "Sign in with ChatGPT" (Codex OAuth) provider.
+// Credentials come from the codex_auth token store, not an api_key; the
+// provider speaks the Responses API at {base}/codex/responses (default
+// base: https://chatgpt.com/backend-api).
+std::shared_ptr<Provider> make_codex_provider(const std::string& id = "chatgpt",
+                                              const std::string& base_url = "");
 // Register all built-in tools into a registry
 void register_builtin_tools(ToolRegistry& registry);
 // Register web_search and web_extract tools. Called by register_builtin_tools.

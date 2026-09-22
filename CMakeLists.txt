@@ -72,6 +72,7 @@ include_directories(
 # Find required libraries
 find_library(SQLITE3_LIB sqlite3 HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(CURL_LIB curl HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
+find_library(CRYPTO_LIB crypto HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(BE_LIB be HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(ROOT_LIB root HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 
@@ -80,6 +81,9 @@ if(NOT SQLITE3_LIB)
 endif()
 if(NOT CURL_LIB)
     message(WARNING "curl not found — run: pkgman install curl_devel")
+endif()
+if(NOT CRYPTO_LIB)
+    message(WARNING "libcrypto not found — run: pkgman install openssl32_devel")
 endif()
 
 add_subdirectory(lib)

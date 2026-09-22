@@ -42,14 +42,29 @@ Rules:
 
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of
-  `"anthropic"`, `"openai"`, or one of the flavored OpenAI-compatible servers
-  (`"ollama"`, `"vllm"`, `"openrouter"`, `"lmstudio"`, `"llamacpp"`; inferred
-  from the id when empty — `"anthropic"` → anthropic, else openai). Both
+  `"anthropic"`, `"openai"`, `"chatgpt"`, or one of the flavored
+  OpenAI-compatible servers (`"ollama"`, `"vllm"`, `"openrouter"`,
+  `"lmstudio"`, `"llamacpp"`; inferred from the id when empty —
+  `"anthropic"` → anthropic, `"chatgpt"` → chatgpt, else openai). Both
   frontends iterate this map to register providers. Env-var fallback
   (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) applies only to ids literally
   `"anthropic"`/`"openai"`. Flavored types use
   `make_openai_compat_provider()` with a flavor-specific default `base_url`
   (e.g. `lmstudio` → `http://localhost:1234/v1`).
+- **The `chatgpt` provider type is OAuth-based, not key-based.** It uses
+  `make_codex_provider()` (`lib/src/provider/codex.cpp`), registered only
+  when `codex_auth_signed_in()`; credentials live in the codex_auth token
+  store at `$(B_USER_SETTINGS_DIRECTORY)/haicode/openai-auth.json`, never
+  in `ProviderConfig` (key/base_url stay empty). The OAuth access token is
+  audience-locked to the ChatGPT Codex backend, so the provider speaks the
+  **Responses API** (`{base}/codex/responses`, default base
+  `https://chatgpt.com/backend-api`) — NOT chat/completions — with
+  `Authorization`, `chatgpt-account-id`, `originator: codex_cli_rs`, and
+  `OpenAI-Beta: responses=experimental` headers. Auth flow lives in
+  `lib/src/auth/codex_auth.cpp` (PKCE + loopback:1455 callback server +
+  refresh-on-skew + one forced 401-retry). Usage is subscription-billed,
+  so there are no built-in pricing entries; the cost column stays empty
+  unless the user adds a `pricing` override (lookup miss is handled).
 - **Provider menu items carry their id.** Each `BMenuItem` in MainWindow's
   provider dropdown attaches `provider_id` to its `BMessage`; the
   `MSG_FETCH_MODELS` handler reads it from the message, never from the label.

@@ -13,6 +13,7 @@
 #include <Entry.h>
 
 #include <haicode/haicode.h>
+#include <haicode/codex_auth.h>
 #include <haicode/db.h>
 #include <haicode/engine.h>
 #include <haicode/events.h>
@@ -117,7 +118,8 @@ HaiCodeApp::ReadyToRun()
     for (auto& [id, pcfg] : config_.providers) {
         std::string key = pcfg.api_key;
         std::string type = pcfg.type.empty()
-            ? (id == "anthropic" ? "anthropic" : "openai") : pcfg.type;
+            ? (id == "anthropic" ? "anthropic"
+              : id == "chatgpt"  ? "chatgpt" : "openai") : pcfg.type;
         if (key.empty() && id == "anthropic") {
             if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
         }
@@ -125,9 +127,14 @@ HaiCodeApp::ReadyToRun()
             if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
         }
         // Skip Anthropic with neither key nor base_url; OpenAI-compatible can
-        // run keyless against a local endpoint (Ollama, LM Studio).
+        // run keyless against a local endpoint (Ollama, LM Studio). ChatGPT
+        // needs a completed OAuth sign-in (token store), not a key.
         if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-        if (type == "anthropic") {
+        if (type == "chatgpt") {
+            if (!haicode::codex_auth_signed_in()) continue;
+            providers_->register_provider(
+                haicode::make_codex_provider(id, pcfg.base_url));
+        } else if (type == "anthropic") {
             providers_->register_provider(
                 haicode::make_anthropic_provider(key, pcfg.base_url, id));
         } else if (type == "ollama" || type == "vllm" || type == "openrouter"
@@ -585,7 +592,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             for (auto& [id, pcfg] : config_.providers) {
                 std::string key = pcfg.api_key;
                 std::string type = pcfg.type.empty()
-                    ? (id == "anthropic" ? "anthropic" : "openai") : pcfg.type;
+                    ? (id == "anthropic" ? "anthropic"
+                      : id == "chatgpt"  ? "chatgpt" : "openai") : pcfg.type;
                 if (key.empty() && id == "anthropic") {
                     if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
                 }
@@ -593,7 +601,11 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
                 }
                 if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-                if (type == "anthropic") {
+                if (type == "chatgpt") {
+                    if (!haicode::codex_auth_signed_in()) continue;
+                    providers_->register_provider(
+                        haicode::make_codex_provider(id, pcfg.base_url));
+                } else if (type == "anthropic") {
                     providers_->register_provider(
                         haicode::make_anthropic_provider(key, pcfg.base_url, id));
                 } else if (type == "ollama" || type == "vllm" || type == "openrouter"

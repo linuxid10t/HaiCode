@@ -36,10 +36,19 @@ public:
 
 private:
     void _Done();
+    // Toggle chatgpt-type controls (sign-in button/status) vs key/url fields.
+    void _UpdateTypeSpecificUI();
 
     BMessenger  target_;
     bool        editing_;
     std::string existing_key_;  // real key (when editing); posted back if field left blank
+    BButton*      oauth_btn_    = nullptr;
+    BStringView*  oauth_status_ = nullptr;
+    // Last visibility applied to the oauth / key-url row groups. Hide() and
+    // Show() nest (hide count) and IsHidden() lies before the window is
+    // shown, so toggling is edge-triggered off these instead.
+    bool oauth_rows_visible_ = true;
+    bool key_rows_visible_   = true;
 };
 
 class SettingsWindow : public BWindow {

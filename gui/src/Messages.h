@@ -42,6 +42,10 @@ static const uint32 MSG_LIST_SEL        = 'PVls';  // list selection changed
 static const uint32 MSG_SET_PROVIDER    = 'PVsp';  // provider dropdown changed (carries "provider_id")
 static const uint32 MSG_WS_ENGINE_SELECTED = 'WSes'; // web-search engine menu item (carries "engine")
 
+// ProviderEditWindow internal — Sign in with ChatGPT (Codex OAuth)
+static const uint32 MSG_OAUTH_LOGIN     = 'OAlg';  // sign-in button pressed
+static const uint32 MSG_OAUTH_RESULT    = 'OArs';  // worker thread → window; "ok" bool, "error"/"account_id" strings
+
 // Vision fallback provider/model pair (SettingsWindow internal + app fetch)
 static const uint32 MSG_FB_PROVIDER_SET = 'VBps';  // fallback provider dropdown changed (carries "provider_id")
 static const uint32 MSG_FB_MODELS_LOADED = 'VBlm'; // be_app → SettingsWindow; repeated "model" strings

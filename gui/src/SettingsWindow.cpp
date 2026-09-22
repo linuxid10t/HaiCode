@@ -22,14 +22,19 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 #include <haicode/model_info.h>
 #include <haicode/skills.h>
+#include <haicode/codex_auth.h>
 
 // ---------------------------------------------------------------------------
 // ProviderEditWindow
 // ---------------------------------------------------------------------------
+
+// Type dropdown selection changed (ProviderEditWindow-internal).
+static const uint32 MSG_PROVIDER_TYPE_CHANGED = 'PTch';
 
 ProviderEditWindow::ProviderEditWindow(BMessenger target,
                                        const std::string& editing_id,
@@ -58,22 +63,26 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
     // Provider type selector: a dropdown covering all supported server kinds.
     // Unknown/legacy types fall back to "openai" (the generic OpenAI-compatible
     // path); the recognized new types map to flavored providers with context
-    // discovery.
+    // discovery. Items carry their type value so MessageReceived can toggle
+    // type-specific controls (chatgpt sign-in vs key/url fields).
     auto* type_menu = new BPopUpMenu("type_menu");
     struct TypeEntry { const char* label; const char* value; };
     static const TypeEntry kTypes[] = {
-        {"Anthropic",          "anthropic"},
-        {"OpenAI-compatible",  "openai"},
-        {"Ollama",             "ollama"},
-        {"vLLM",               "vllm"},
-        {"OpenRouter",         "openrouter"},
-        {"LM Studio",          "lmstudio"},
-        {"llama.cpp",          "llamacpp"},
+        {"Anthropic",              "anthropic"},
+        {"OpenAI-compatible",      "openai"},
+        {"OpenAI (ChatGPT sign-in)", "chatgpt"},
+        {"Ollama",                 "ollama"},
+        {"vLLM",                   "vllm"},
+        {"OpenRouter",             "openrouter"},
+        {"LM Studio",              "lmstudio"},
+        {"llama.cpp",              "llamacpp"},
     };
     std::string current_type = type.empty() ? "openai" : type;
     BMenuItem* mark_item = nullptr;
     for (auto& t : kTypes) {
-        auto* item = new BMenuItem(t.label, nullptr);
+        auto* msg = new BMessage(MSG_PROVIDER_TYPE_CHANGED);
+        msg->AddString("type", t.value);
+        auto* item = new BMenuItem(t.label, msg);
         type_menu->AddItem(item);
         if (current_type == t.value)
             mark_item = item;
@@ -95,6 +104,22 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
             "(key already set — leave blank to keep, or enter a new one)");
     }
 
+    // ChatGPT (chatgpt type) controls: sign-in button + status line, shown
+    // instead of the key/url fields (OAuth credentials live in the codex_auth
+    // token store, not the provider config). Max width must be unlimited:
+    // BButton/BStringView max out at their preferred width (~200px here),
+    // which would cap the whole vertical group and collapse the window.
+    oauth_btn_ = new BButton("oauth", "Sign in with ChatGPT…",
+                             new BMessage(MSG_OAUTH_LOGIN));
+    oauth_btn_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    oauth_status_ = new BStringView("oauth_status", "");
+    oauth_status_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    if (haicode::codex_auth_signed_in()) {
+        oauth_status_->SetText("Already signed in — click to sign in again");
+    } else {
+        oauth_status_->SetText("Not signed in");
+    }
+
     auto* ok_btn = new BButton("ok", "OK", new BMessage(MSG_PROVIDER_DIALOG_DONE));
     ok_btn->MakeDefault(true);
     auto* cancel_btn = new BButton("cancel", "Cancel",
@@ -108,6 +133,8 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
         layout.Add(key_hint);
     layout.Add(url_field)
         .Add(type_field)
+        .Add(oauth_btn_)
+        .Add(oauth_status_)
         .AddGlue()
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
@@ -116,7 +143,46 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
         .End()
     .End();
 
+    _UpdateTypeSpecificUI();
     CenterOnScreen();
+}
+
+void
+ProviderEditWindow::_UpdateTypeSpecificUI()
+{
+    BMenuField* type_field = dynamic_cast<BMenuField*>(FindView("type_field"));
+    const char* type_s = "openai";
+    if (type_field && type_field->Menu()) {
+        BMenuItem* marked = type_field->Menu()->FindMarked();
+        if (marked && marked->Message())
+            marked->Message()->FindString("type", &type_s);
+    }
+    bool chatgpt = (std::string(type_s) == "chatgpt");
+
+    // Edge-triggered on last-applied state: Hide()/Show() nest (hide count)
+    // and IsHidden() reports true for every child before the window is
+    // shown, so it cannot be used as the "currently visible" test here.
+    bool want_oauth = chatgpt;
+    bool want_key   = !chatgpt;
+    if (want_oauth != oauth_rows_visible_) {
+        if (want_oauth) {
+            oauth_btn_->Show();
+            oauth_status_->Show();
+        } else {
+            oauth_btn_->Hide();
+            oauth_status_->Hide();
+        }
+        oauth_rows_visible_ = want_oauth;
+    }
+    if (want_key != key_rows_visible_) {
+        if (BView* v = FindView("api_key"))
+            want_key ? v->Show() : v->Hide();
+        if (BView* v = FindView("base_url"))
+            want_key ? v->Show() : v->Hide();
+        if (BView* v = FindView("key_hint"))
+            want_key ? v->Show() : v->Hide();
+        key_rows_visible_ = want_key;
+    }
 }
 
 void
@@ -126,6 +192,53 @@ ProviderEditWindow::MessageReceived(BMessage* msg)
         case MSG_PROVIDER_DIALOG_DONE:
             _Done();
             break;
+        case MSG_PROVIDER_TYPE_CHANGED:
+            _UpdateTypeSpecificUI();
+            break;
+        case MSG_OAUTH_LOGIN: {
+            if (!oauth_btn_ || !oauth_btn_->IsEnabled())
+                break;
+            oauth_btn_->SetEnabled(false);
+            oauth_status_->SetText(
+                "Waiting for sign-in in your browser\xe2\x80\xa6");
+            // codex_run_browser_login blocks for up to ~5 min; run it on a
+            // detached thread and post the result back via BMessenger (safe
+            // even if this window is closed before it completes — delivery
+            // simply fails silently).
+            BMessenger me(this);
+            std::thread([me]() {
+                haicode::CodexAuth auth;
+                std::string err;
+                bool ok = haicode::codex_run_browser_login(auth, err);
+                BMessage reply(MSG_OAUTH_RESULT);
+                reply.AddBool("ok", ok);
+                if (ok)
+                    reply.AddString("account_id", auth.account_id.c_str());
+                else
+                    reply.AddString("error", err.c_str());
+                me.SendMessage(&reply);
+            }).detach();
+            break;
+        }
+        case MSG_OAUTH_RESULT: {
+            oauth_btn_->SetEnabled(true);
+            bool ok = false;
+            msg->FindBool("ok", &ok);
+            if (ok) {
+                const char* acct = nullptr;
+                msg->FindString("account_id", &acct);
+                std::string status = "Signed in";
+                if (acct && *acct) status += " — account " + std::string(acct);
+                oauth_status_->SetText(status.c_str());
+            } else {
+                const char* err = nullptr;
+                msg->FindString("error", &err);
+                std::string status = "Sign-in failed";
+                if (err && *err) status += std::string(": ") + err;
+                oauth_status_->SetText(status.c_str());
+            }
+            break;
+        }
         case B_QUIT_REQUESTED:
             Quit();
             break;
@@ -154,24 +267,15 @@ ProviderEditWindow::_Done()
     if (editing_ && key.empty())
         key = existing_key_;
 
-    // Read the selected type value from the menu's marked item label→value map.
+    // Read the selected type from the marked item's message (each item
+    // carries its type value — see the kTypes table in the constructor).
     std::string selected_type = "openai";
     if (type_field && type_field->Menu()) {
         BMenuItem* marked = type_field->Menu()->FindMarked();
-        if (marked) {
-            std::string label = marked->Label();
-            static const std::map<std::string, std::string> kLabelToType = {
-                {"Anthropic",          "anthropic"},
-                {"OpenAI-compatible",  "openai"},
-                {"Ollama",             "ollama"},
-                {"vLLM",               "vllm"},
-                {"OpenRouter",         "openrouter"},
-                {"LM Studio",          "lmstudio"},
-                {"llama.cpp",          "llamacpp"},
-            };
-            auto it = kLabelToType.find(label);
-            if (it != kLabelToType.end())
-                selected_type = it->second;
+        if (marked && marked->Message()) {
+            const char* t = nullptr;
+            if (marked->Message()->FindString("type", &t) == B_OK && t && *t)
+                selected_type = t;
         }
     }
 

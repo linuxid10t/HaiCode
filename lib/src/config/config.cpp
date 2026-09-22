@@ -102,9 +102,12 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 p.id = k;
                 if (v.contains("type") && v["type"].is_string())
                     p.type = v["type"].get<std::string>();
-                // Default type: "anthropic" id → anthropic, else openai.
+                // Default type: "anthropic" id → anthropic, "chatgpt" id →
+                // chatgpt (Codex OAuth), else openai.
                 if (p.type.empty())
-                    p.type = (k == "anthropic") ? "anthropic" : "openai";
+                    p.type = (k == "anthropic") ? "anthropic"
+                          : (k == "chatgpt")   ? "chatgpt"
+                                               : "openai";
                 if (v.contains("api_key") && v["api_key"].is_string())
                     p.api_key = v["api_key"].get<std::string>();
                 if (v.contains("base_url") && v["base_url"].is_string())

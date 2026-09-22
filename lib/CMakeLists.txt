@@ -8,6 +8,7 @@ file(GLOB_RECURSE HAICODE_SOURCES
     "src/engine/*.cpp"
     "src/compaction/*.cpp"
     "src/provider/*.cpp"
+    "src/auth/*.cpp"
     "src/tool/*.cpp"
     "src/permission/*.cpp"
     "src/pricing/*.cpp"
@@ -24,8 +25,10 @@ target_include_directories(haicode PUBLIC
 target_link_libraries(haicode PUBLIC
     ${SQLITE3_LIB}
     ${CURL_LIB}
+    ${CRYPTO_LIB}
     ${ROOT_LIB}
     ${BE_LIB}
+    network
 )
 
 # Test executable for Phase 1 verification
@@ -84,3 +87,6 @@ target_link_libraries(test_http_client haicode network)
 
 add_executable(test_symbols tests/test_symbols.cpp)
 target_link_libraries(test_symbols haicode)
+
+add_executable(test_codex_auth tests/test_codex_auth.cpp)
+target_link_libraries(test_codex_auth haicode)
