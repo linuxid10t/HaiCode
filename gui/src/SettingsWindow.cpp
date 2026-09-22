@@ -362,8 +362,13 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     fb_model_menu_->SetLabelFromMarked(true);
     if (!config_.vision_fallback_model.empty()) {
         // Pre-mark the configured model; the fetch replaces placeholder items
-        // but preserves the marked label (same as the primary model menu).
-        auto* item = new BMenuItem(config_.vision_fallback_model.c_str(), nullptr);
+        // but preserves the marked model (re-marked by id, same as the
+        // primary model menu). Label is the shortened display form; the real
+        // full id rides on the item's message.
+        auto* msg = new BMessage();
+        msg->AddString("model_id", config_.vision_fallback_model.c_str());
+        auto* item = new BMenuItem(
+            short_model_label(config_.vision_fallback_model).c_str(), msg);
         item->SetMarked(true);
         fb_model_menu_->AddItem(item);
     } else {
@@ -786,13 +791,16 @@ SettingsWindow::MessageReceived(BMessage* msg)
             BMenuItem* to_mark = nullptr;
             while (msg->FindString("model", idx++, &m) == B_OK) {
                 if (m && *m) {
-                    fb_model_menu_->AddItem(new BMenuItem(m, nullptr));
+                    auto* msg = new BMessage();
+                    msg->AddString("model_id", m);
+                    fb_model_menu_->AddItem(
+                        new BMenuItem(short_model_label(m).c_str(), msg));
                     any = true;
                 }
             }
             if (any) {
                 if (!preserved.empty())
-                    to_mark = fb_model_menu_->FindItem(preserved.c_str());
+                    to_mark = find_model_item(fb_model_menu_, preserved);
                 if (!to_mark) to_mark = fb_model_menu_->ItemAt(0);
             } else {
                 std::string label = "(none available)";
@@ -840,12 +848,17 @@ SettingsWindow::MessageReceived(BMessage* msg)
             while (model_menu_->CountItems() > 0)
                 delete model_menu_->RemoveItem((int32)0);
             const char* m = nullptr;
-            for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i)
-                model_menu_->AddItem(
-                    new BMenuItem(m, new BMessage(MSG_MODEL_CHANGED)));
+            for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i) {
+                // Label is the shortened display form; the real (full-path) id
+                // rides on the item's message so _Save/_RefreshContextField/
+                // _RefreshVisionMenu keep keying config by the real id.
+                auto* msg = new BMessage(MSG_MODEL_CHANGED);
+                msg->AddString("model_id", m);
+                model_menu_->AddItem(new BMenuItem(short_model_label(m).c_str(), msg));
+            }
             BMenuItem* to_mark = nullptr;
             if (model_menu_->CountItems() > 0) {
-                if (auto* existing = model_menu_->FindItem(preserved.c_str()))
+                if (auto* existing = find_model_item(model_menu_, preserved))
                     to_mark = existing;
                 else
                     to_mark = model_menu_->ItemAt(0);
@@ -927,12 +940,11 @@ SettingsWindow::_Save()
     std::string provider_sel, model_sel;
     if (auto* m = provider_menu_->FindMarked()) provider_sel = m->Label();
     if (auto* m = model_menu_->FindMarked()) {
-        std::string lbl = m->Label();
-        // Skip placeholder labels ("(loading…)", "(fetch failed: …)",
-        // "(none available)"). Omitting the model string entirely makes
+        // model_item_id() returns "" for placeholder items (no message),
+        // which doubles as the skip test: omitting the model string makes
         // HaiCodeApp keep the previously persisted value — a failed fetch
         // must not poison config.json or the context/vision overrides below.
-        if (!lbl.empty() && lbl[0] != '(') model_sel = lbl;
+        model_sel = model_item_id(m);
     }
     if (!model_sel.empty())
         saved.AddString("model", model_sel.c_str());
@@ -986,10 +998,8 @@ SettingsWindow::_Save()
     // label means the feature is off (sent as empty strings).
     std::string fb_provider = _MarkedFBProviderId();
     std::string fb_model;
-    if (auto* mk = fb_model_menu_->FindMarked()) {
-        std::string lbl = mk->Label();
-        if (!lbl.empty() && lbl[0] != '(') fb_model = lbl;
-    }
+    if (auto* mk = fb_model_menu_->FindMarked())
+        fb_model = model_item_id(mk);
     saved.AddString("vision_fallback_provider", fb_provider.c_str());
     saved.AddString("vision_fallback_model", fb_model.c_str());
 
@@ -1015,11 +1025,8 @@ SettingsWindow::_RefreshContextField()
 {
     if (!context_field_) return;
     std::string model;
-    if (auto* marked = model_menu_->FindMarked()) {
-        std::string label = marked->Label();
-        // Skip placeholder labels like "(loading…)" / "(none available)".
-        if (!label.empty() && label[0] != '(') model = label;
-    }
+    if (auto* marked = model_menu_->FindMarked())
+        model = model_item_id(marked);  // "" for placeholder items
 
     auto mcit = config_.model_contexts.find(model);
     if (mcit != config_.model_contexts.end() && mcit->second > 0) {
@@ -1038,11 +1045,8 @@ SettingsWindow::_RefreshVisionMenu()
 {
     if (!vision_menu_) return;
     std::string model;
-    if (auto* marked = model_menu_->FindMarked()) {
-        std::string label = marked->Label();
-        // Skip placeholder labels like "(loading…)" / "(none available)".
-        if (!label.empty() && label[0] != '(') model = label;
-    }
+    if (auto* marked = model_menu_->FindMarked())
+        model = model_item_id(marked);  // "" for placeholder items
 
     std::string want = "auto";
     auto vit = config_.model_vision.find(model);

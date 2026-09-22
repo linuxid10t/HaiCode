@@ -876,7 +876,7 @@ MainWindow::MessageReceived(BMessage* msg)
             // of querying the menu, so we just sync it here.
             BMenuItem* marked = model_menu_->FindMarked();
             if (marked) {
-                default_model_ = marked->Label();
+                default_model_ = model_item_id(marked);
                 _ApplyProviderModelToActiveSession();
                 _UpdateMaxContext();
                 _PersistProviderModel();
@@ -918,14 +918,18 @@ MainWindow::MessageReceived(BMessage* msg)
 
             const char* m = nullptr;
             for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i) {
-                model_menu_->AddItem(new BMenuItem(m, new BMessage(MSG_MODEL_SELECTED)));
+                // Label is the shortened display form; the real (full-path) id
+                // rides on the item's message so downstream consumers keep it.
+                BMessage* sel = new BMessage(MSG_MODEL_SELECTED);
+                sel->AddString("model_id", m);
+                model_menu_->AddItem(new BMenuItem(short_model_label(m).c_str(), sel));
             }
 
             BMenuItem* to_mark = nullptr;
             bool placeholder = false;
             if (model_menu_->CountItems() > 0) {
-                // Prefer re-marking the previously selected model.
-                if (auto* existing = model_menu_->FindItem(preserved.c_str()))
+                // Prefer re-marking the previously selected model (match by id).
+                if (auto* existing = find_model_item(model_menu_, preserved))
                     to_mark = existing;
                 else
                     to_mark = model_menu_->ItemAt(0);
@@ -954,7 +958,7 @@ MainWindow::MessageReceived(BMessage* msg)
             }
             to_mark->SetMarked(true);
             if (!placeholder)
-                default_model_ = to_mark->Label();
+                default_model_ = model_item_id(to_mark);
             _UpdateMaxContext();
             // Sync the engine: without this, switching provider leaves the
             // active session's stored model stale (the auto-marked default
@@ -1163,7 +1167,8 @@ MainWindow::_SelectSession(int idx)
             for (int32 i = 0; i < model_menu_->CountItems(); i++) {
                 BMenuItem* item = model_menu_->ItemAt(i);
                 if (!item) continue;
-                if (model_id == item->Label()) {
+                // Match on the carried full id, not the (shortened) label.
+                if (model_item_id(item) == model_id) {
                     item->SetMarked(true);
                     found = true;
                 }
