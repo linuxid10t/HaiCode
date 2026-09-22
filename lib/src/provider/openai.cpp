@@ -697,6 +697,12 @@ public:
         return ctx;
     }
 
+    int peek_model_context(const std::string& model_id) const override {
+        std::lock_guard<std::mutex> lock(context_cache_mu_);
+        auto cached = context_cache_.find(model_id);
+        return cached != context_cache_.end() ? cached->second : 0;
+    }
+
     std::vector<std::string> list_models(std::string& error) override {
         error.clear();
         std::map<std::string, std::string> headers = {

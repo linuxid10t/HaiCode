@@ -86,6 +86,10 @@ public:
     // so local servers (Ollama, vLLM, etc.) can populate the context meter
     // and enable auto-compaction without manual config.
     virtual int get_model_context(const std::string& model_id) const { return 0; }
+    // Cache-only variant of get_model_context(): returns a previously
+    // discovered window without any network I/O, so UI threads can render a
+    // provisional value immediately while discovery runs asynchronously.
+    virtual int peek_model_context(const std::string& model_id) const { return 0; }
 };
 
 class ProviderRegistry {

@@ -50,6 +50,7 @@
 #include <vector>
 #include <future>
 #include <memory>
+#include <thread>
 #include <ctime>
 #include <cstdint>
 #include <climits>
@@ -865,6 +866,10 @@ MainWindow::MessageReceived(BMessage* msg)
             // save, startup) don't go through the menu's radio selection, so
             // without this the label would keep showing the old provider.
             SelectProvider(pid);
+            // Refresh the context meter now rather than waiting for
+            // MSG_MODELS_LOADED — the provider changed, so the old model's
+            // window is already wrong for the next prompt.
+            _UpdateMaxContext();
             _ApplyProviderModelToActiveSession();
             _PersistProviderModel();
             _FetchModels();
@@ -875,11 +880,39 @@ MainWindow::MessageReceived(BMessage* msg)
             // source of truth — _NewSession/_UpdateMaxContext read it instead
             // of querying the menu, so we just sync it here.
             BMenuItem* marked = model_menu_->FindMarked();
-            if (marked) {
+            // Placeholder items ((loading…), (fetch failed: …)) carry no
+            // model id; absorbing the empty id would blank the context meter
+            // and poison the session/config with "".
+            if (marked && !model_item_id(marked).empty()) {
                 default_model_ = model_item_id(marked);
                 _ApplyProviderModelToActiveSession();
                 _UpdateMaxContext();
                 _PersistProviderModel();
+            }
+            break;
+        }
+        case MSG_MODEL_CONTEXT: {
+            // Async context-discovery reply (from _UpdateMaxContext's
+            // detached thread). Drop stale replies — the user may have
+            // switched model or provider while the fetch was in flight.
+            const char* pid = nullptr;
+            const char* mid = nullptr;
+            int32 ctx = 0;
+            if (msg->FindString("provider_id", &pid) != B_OK
+                    || msg->FindString("model_id", &mid) != B_OK
+                    || msg->FindInt32("context", &ctx) != B_OK)
+                break;
+            if (!pid || !mid || std::string(pid) != default_provider_
+                         || std::string(mid) != default_model_
+                         || !engine_)
+                break;
+            // Config overrides outrank discovery (get_context_window tier 1).
+            auto mcit = engine_->config().model_contexts.find(default_model_);
+            if (mcit != engine_->config().model_contexts.end() && mcit->second > 0)
+                break;
+            if (ctx > 0) {
+                max_context_ = ctx;
+                _UpdateStatusStrip();
             }
             break;
         }
@@ -2467,11 +2500,44 @@ MainWindow::_UpdateMaxContext()
 {
     if (!engine_) { max_context_ = 0; return; }
     // default_model_ / default_provider_ are the sources of truth — see _NewSession.
-    auto provider = engine_->providers().get(default_provider_);
-    max_context_ = haicode::get_context_window(default_provider_, default_model_,
-                                               engine_->config().model_contexts,
-                                               provider.get());
+    std::string pid = default_provider_;
+    std::string mid = default_model_;
+
+    // Sync fast path: config override → provider cache (no I/O) → prefix
+    // table. Shown immediately so the meter always tracks the selection.
+    auto provider = engine_->providers().get(pid);
+    auto mcit = engine_->config().model_contexts.find(mid);
+    int override_ctx = (mcit != engine_->config().model_contexts.end())
+                     ? mcit->second : 0;
+    int peeked = provider ? provider->peek_model_context(mid) : 0;
+    // Cache hits outrank the prefix table, mirroring get_context_window's
+    // tier order (config → discovered → table).
+    max_context_ = (override_ctx > 0) ? override_ctx
+                 : (peeked     > 0) ? peeked
+                 : haicode::get_context_window(pid, mid,
+                                               engine_->config().model_contexts);
     _UpdateStatusStrip();
+
+    // Async discovery: without an override or cache hit, ask the provider on a
+    // detached thread (Ollama /api/show, llama.cpp /props, LM Studio native
+    // models — each a blocking HTTP fetch that must never run on the looper).
+    // The reply corrects a provisional prefix-table value because live
+    // discovery outranks the table (see get_context_window tier 2).
+    if (override_ctx > 0 || !provider || peeked > 0)
+        return;
+
+    // Capture the shared_ptr by value: engine_ may be swapped by SetEngine()
+    // while the fetch is in flight; the Provider object stays alive.
+    std::shared_ptr<haicode::Provider> prov = provider;
+    BMessenger msgr(this);
+    std::thread([prov, pid, mid, msgr]() {
+        int ctx = prov->get_model_context(mid);
+        BMessage reply(MSG_MODEL_CONTEXT);
+        reply.AddString("provider_id", pid.c_str());
+        reply.AddString("model_id",     mid.c_str());
+        reply.AddInt32("context",       ctx);
+        msgr.SendMessage(&reply);
+    }).detach();
 }
 
 void
