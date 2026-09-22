@@ -1,5 +1,6 @@
 #include "SettingsWindow.h"
 #include "Messages.h"
+#include "ModelMenuField.h"
 
 #include <Application.h>
 #include <Button.h>
@@ -270,7 +271,8 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         loading->SetMarked(true);
         model_menu_->AddItem(loading);
     }
-    model_field_ = new BMenuField("model_field", "Default model:", model_menu_);
+    model_field_ = new ModelMenuField("model_field", "Default model:",
+                                      model_menu_, MSG_MODEL_REFRESH);
 
     // Context-window override for the selected model. Pre-filled from
     // config_.model_contexts (exact match on config_.model); updated when the
@@ -370,8 +372,9 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         off->SetMarked(true);
         fb_model_menu_->AddItem(off);
     }
-    fb_model_field_ = new BMenuField("fb_model_field",
-                                     "Vision fallback model:", fb_model_menu_);
+    fb_model_field_ = new ModelMenuField("fb_model_field",
+                                         "Vision fallback model:",
+                                         fb_model_menu_, MSG_FB_MODEL_REFRESH);
 
     auto* general_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
     BLayoutBuilder::Group<>(general_tab)
@@ -726,6 +729,19 @@ SettingsWindow::MessageReceived(BMessage* msg)
             _RefreshContextField();
             _RefreshVisionMenu();
             break;
+        case MSG_MODEL_REFRESH: {
+            // Primary model dropdown clicked while the prior load failed.
+            // The flag gate lives here so ModelMenuField stays stateless.
+            if (models_load_failed_)
+                _FetchModelsForMarkedProvider();
+            break;
+        }
+        case MSG_FB_MODEL_REFRESH: {
+            // Vision fallback model dropdown clicked while the prior load failed.
+            if (fb_models_load_failed_)
+                _FetchFBModelsForMarkedProvider();
+            break;
+        }
         case MSG_FB_PROVIDER_SET: {
             // Fallback provider dropdown changed — refetch its model list.
             while (fb_model_menu_->CountItems() > 0)
@@ -739,6 +755,8 @@ SettingsWindow::MessageReceived(BMessage* msg)
                 off->SetEnabled(false);
                 off->SetMarked(true);
                 fb_model_menu_->AddItem(off);
+                // No fetch can happen for "(none)"; clear any stale failure.
+                fb_models_load_failed_ = false;
                 break;
             }
             auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
@@ -756,6 +774,9 @@ SettingsWindow::MessageReceived(BMessage* msg)
                     && fb_loaded_pid && std::string(fb_loaded_pid) != _MarkedFBProviderId())
                 break;
 
+            // A completed load (even an empty one) is not a failure — only the
+            // explicit error branch below re-arms the click-to-retry flag.
+            fb_models_load_failed_ = false;
             std::string preserved = config_.vision_fallback_model;
             while (fb_model_menu_->CountItems() > 0)
                 delete fb_model_menu_->RemoveItem((int32)0);
@@ -776,8 +797,13 @@ SettingsWindow::MessageReceived(BMessage* msg)
             } else {
                 std::string label = "(none available)";
                 const char* err = nullptr;
-                if (msg->FindString("error", &err) == B_OK && err && *err)
+                if (msg->FindString("error", &err) == B_OK && err && *err) {
                     label = std::string("(fetch failed: ") + err + ")";
+                    // Remember the failure so clicking the dropdown re-fetches.
+                    // A no-key "(none available)" is not an error — retrying
+                    // it cannot succeed, so the flag stays false there.
+                    fb_models_load_failed_ = true;
+                }
                 to_mark = new BMenuItem(label.c_str(), nullptr);
                 to_mark->SetEnabled(false);
                 fb_model_menu_->AddItem(to_mark);
@@ -807,6 +833,9 @@ SettingsWindow::MessageReceived(BMessage* msg)
                 break;
 
             // Repopulate model dropdown from the fetched list.
+            // A completed load (even an empty one) is not a failure — only the
+            // explicit error branch below re-arms the click-to-retry flag.
+            models_load_failed_ = false;
             std::string preserved = config_.model;
             while (model_menu_->CountItems() > 0)
                 delete model_menu_->RemoveItem((int32)0);
@@ -823,8 +852,13 @@ SettingsWindow::MessageReceived(BMessage* msg)
             } else {
                 std::string label = "(none available)";
                 const char* err = nullptr;
-                if (msg->FindString("error", &err) == B_OK && err && *err)
+                if (msg->FindString("error", &err) == B_OK && err && *err) {
                     label = std::string("(fetch failed: ") + err + ")";
+                    // Remember the failure so clicking the dropdown re-fetches.
+                    // A no-key "(none available)" is not an error — retrying
+                    // it cannot succeed, so the flag stays false there.
+                    models_load_failed_ = true;
+                }
                 to_mark = new BMenuItem(label.c_str(), nullptr);
                 to_mark->SetEnabled(false);
                 model_menu_->AddItem(to_mark);
@@ -892,8 +926,16 @@ SettingsWindow::_Save()
     // Scalars from the General/Tools tabs.
     std::string provider_sel, model_sel;
     if (auto* m = provider_menu_->FindMarked()) provider_sel = m->Label();
-    if (auto* m = model_menu_->FindMarked())    model_sel   = m->Label();
-    saved.AddString("model", model_sel.c_str());
+    if (auto* m = model_menu_->FindMarked()) {
+        std::string lbl = m->Label();
+        // Skip placeholder labels ("(loading…)", "(fetch failed: …)",
+        // "(none available)"). Omitting the model string entirely makes
+        // HaiCodeApp keep the previously persisted value — a failed fetch
+        // must not poison config.json or the context/vision overrides below.
+        if (!lbl.empty() && lbl[0] != '(') model_sel = lbl;
+    }
+    if (!model_sel.empty())
+        saved.AddString("model", model_sel.c_str());
     saved.AddString("provider", provider_sel.c_str());
     const char* mode = "plan";
     if (mode_build_radio_ && mode_build_radio_->Value() == B_CONTROL_ON)
@@ -1090,6 +1132,8 @@ SettingsWindow::_FetchModelsForMarkedProvider()
 {
     std::string pid = _MarkedProviderId();
     if (pid.empty()) return;
+    // A load is in flight; a dropdown click won't re-trigger it.
+    models_load_failed_ = false;
     BMessage fetch(MSG_FETCH_MODELS);
     fetch.AddString("provider_id", pid.c_str());
     // Route the reply back to this window instead of MainWindow.
@@ -1102,6 +1146,8 @@ SettingsWindow::_FetchFBModelsForMarkedProvider()
 {
     std::string pid = _MarkedFBProviderId();
     if (pid.empty()) return;
+    // A load is in flight; a dropdown click won't re-trigger it.
+    fb_models_load_failed_ = false;
     BMessage fetch(MSG_FETCH_MODELS);
     fetch.AddString("provider_id", pid.c_str());
     fetch.AddMessenger("reply", BMessenger(this));

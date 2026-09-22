@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "Messages.h"
+#include "ModelMenuField.h"
 #include "ChatView.h"
 #include "PermissionWindow.h"
 #include "PlanReviewWindow.h"
@@ -120,33 +121,6 @@ public:
             toggle.AddInt32("index", idx);
             Window()->PostMessage(&toggle);
         }
-    }
-};
-
-// ---------------------------------------------------------------------------
-// ModelMenuField — BMenuField that posts MSG_MODEL_REFRESH to its window when
-// clicked, so a previously failed model list can be re-fetched on demand.
-// BMenuField tracks its menu on a separate menu-task thread, so the window
-// looper stays free to process the refresh while the menu is open.
-// ---------------------------------------------------------------------------
-
-class ModelMenuField : public BMenuField {
-public:
-    ModelMenuField(const char* name, const char* label, BMenu* menu)
-        : BMenuField(name, label, menu)
-    {
-    }
-
-    void MouseDown(BPoint where) override
-    {
-        int32 buttons = 0;
-        if (Window() && Window()->CurrentMessage()
-            && Window()->CurrentMessage()->FindInt32("buttons", &buttons) == B_OK
-            && (buttons & B_PRIMARY_MOUSE_BUTTON)) {
-            BMessage refresh(MSG_MODEL_REFRESH);
-            Window()->PostMessage(&refresh);
-        }
-        BMenuField::MouseDown(where);
     }
 };
 
@@ -326,7 +300,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     loading_item->SetEnabled(false);
     loading_item->SetMarked(true);
     model_menu_->AddItem(loading_item);
-    model_field_ = new ModelMenuField("model_field", "Model:", model_menu_);
+    model_field_ = new ModelMenuField("model_field", "Model:", model_menu_,
+                                      MSG_MODEL_REFRESH);
 
     // Mode selector — Build (full access), Plan (read-only + propose_plan),
     // Chat (conversation + web research only, zero local computer access).
@@ -947,6 +922,7 @@ MainWindow::MessageReceived(BMessage* msg)
             }
 
             BMenuItem* to_mark = nullptr;
+            bool placeholder = false;
             if (model_menu_->CountItems() > 0) {
                 // Prefer re-marking the previously selected model.
                 if (auto* existing = model_menu_->FindItem(preserved.c_str()))
@@ -971,9 +947,14 @@ MainWindow::MessageReceived(BMessage* msg)
                 none_item->SetEnabled(false);
                 model_menu_->AddItem(none_item);
                 to_mark = none_item;
+                // The marked item is a UI placeholder, not a model id —
+                // default_model_ must not absorb it (a failed fetch would
+                // otherwise poison the session DB and persisted config).
+                placeholder = true;
             }
             to_mark->SetMarked(true);
-            default_model_ = to_mark->Label();
+            if (!placeholder)
+                default_model_ = to_mark->Label();
             _UpdateMaxContext();
             // Sync the engine: without this, switching provider leaves the
             // active session's stored model stale (the auto-marked default

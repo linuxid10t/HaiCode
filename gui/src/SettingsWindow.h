@@ -100,6 +100,11 @@ private:
     BMenuField*  fb_provider_field_= nullptr;
     BPopUpMenu*  fb_model_menu_    = nullptr;
     BMenuField*  fb_model_field_   = nullptr;
+    // Last model fetch errored (empty list + non-empty error). Clicking the
+    // respective dropdown re-fetches; the no-key "(none available)" case is
+    // not a failure and never arms these (matching MainWindow's rule).
+    bool         models_load_failed_    = false;
+    bool         fb_models_load_failed_ = false;
     BRadioButton* mode_plan_radio_   = nullptr;
     BRadioButton* mode_build_radio_  = nullptr;
 
