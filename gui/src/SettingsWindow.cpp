@@ -408,6 +408,30 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     mode_build_radio_ = new BRadioButton("mode_build", "Build mode", nullptr);
     (mode_is_plan ? mode_plan_radio_ : mode_build_radio_)->SetValue(B_CONTROL_ON);
 
+    // Thinking-block display: radio dropdown over the three modes; each
+    // item's message carries the value (read at save time via
+    // _MarkedThinkingDisplay()). Initial marking follows config_.
+    thinking_menu_ = new BPopUpMenu("thinking_menu");
+    thinking_menu_->SetRadioMode(true);
+    thinking_menu_->SetLabelFromMarked(true);
+    struct ThinkingEntry { const char* label; const char* value; };
+    static const ThinkingEntry kThinkingChoices[] = {
+        {"Off",               "off"},
+        {"On",                "on"},
+        {"On While Thinking", "on_while_thinking"},
+    };
+    BMenuItem* thinking_marked = nullptr;
+    for (auto& e : kThinkingChoices) {
+        auto* item = new BMenuItem(e.label, new BMessage());
+        item->Message()->AddString("thinking_display", e.value);
+        thinking_menu_->AddItem(item);
+        if (std::string(e.value) == config_.thinking_display) thinking_marked = item;
+    }
+    if (!thinking_marked) thinking_marked = thinking_menu_->ItemAt(2);
+    thinking_marked->SetMarked(true);
+    thinking_field_ = new BMenuField("thinking_field", "Thinking display:",
+                                     thinking_menu_);
+
     // Vision override for the selected model: Auto (table + fail-closed),
     // Yes/No (explicit override stored in config "vision"). Initial marking
     // follows config_.model_vision for config_.model; _RefreshVisionMenu()
@@ -509,6 +533,13 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
             .Add(mode_plan_radio_)
             .Add(mode_build_radio_)
         .End()
+        .Add(new BSeparatorView(B_HORIZONTAL))
+        .Add(thinking_field_)
+        .Add(new BStringView("thinking_hint",
+            "how the [Thinking] block shows: Off = always collapsed,"
+            " On = always expanded, On While Thinking = expanded while"
+            " streaming, collapsed after. Clicking a [Thinking] header"
+            " always toggles it."))
         .AddGlue();
 
     // ---- Tools tab ----
@@ -1085,6 +1116,7 @@ SettingsWindow::_Save()
     if (mode_build_radio_ && mode_build_radio_->Value() == B_CONTROL_ON)
         mode = "build";
     saved.AddString("default_mode", mode);
+    saved.AddString("thinking_display", _MarkedThinkingDisplay().c_str());
     saved.AddString("build_command",
                     build_cmd_field_ ? build_cmd_field_->Text() : "");
     // Selected engine comes from the dropdown's marked item's message.
@@ -1224,6 +1256,19 @@ SettingsWindow::_MarkedWSEngine() const
             return engine;
     }
     return "";
+}
+
+std::string
+SettingsWindow::_MarkedThinkingDisplay() const
+{
+    if (auto* marked = thinking_menu_->FindMarked()) {
+        const char* value = nullptr;
+        if (marked->Message()
+            && marked->Message()->FindString("thinking_display", &value) == B_OK
+            && value)
+            return value;
+    }
+    return "on_while_thinking";
 }
 
 void

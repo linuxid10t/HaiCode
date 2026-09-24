@@ -82,6 +82,7 @@ private:
     void _RefreshVisionMenu();     // sync vision dropdown to marked model's override
     std::string _MarkedVision() const;           // "auto"/"yes"/"no" of marked item
     std::string _MarkedWSEngine() const;          // engine id of marked menu item
+    std::string _MarkedThinkingDisplay() const;   // "off"/"on"/"on_while_thinking"
     void _UpdateKeyFieldVisibility();             // show key field for exa/zai only
     void _RememberKeyForEngine(const char* engine_id); // stash typed key per engine
 
@@ -117,6 +118,10 @@ private:
     bool         fb_models_load_failed_ = false;
     BRadioButton* mode_plan_radio_   = nullptr;
     BRadioButton* mode_build_radio_  = nullptr;
+    // Default thinking-block display in the chat view ("off"/"on"/
+    // "on_while_thinking"); value rides on each menu item's message.
+    BPopUpMenu*  thinking_menu_     = nullptr;
+    BMenuField*  thinking_field_    = nullptr;
 
     // Tools tab
     BTextControl* build_cmd_field_   = nullptr;

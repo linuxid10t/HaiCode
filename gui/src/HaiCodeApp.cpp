@@ -420,6 +420,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             const char* model = nullptr;
             const char* provider = nullptr;
             const char* default_mode = nullptr;
+            const char* thinking_display = nullptr;
             const char* build_command = nullptr;
             const char* ws_engine = nullptr;
             int32 ws_max = 0;
@@ -433,6 +434,13 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 // Accept "plan"/"build"; treat empty as "leave as-is".
                 if (*default_mode)
                     config_.default_mode = default_mode;
+            }
+            if (msg->FindString("thinking_display", &thinking_display) == B_OK
+                && thinking_display
+                && (std::string(thinking_display) == "off"
+                    || std::string(thinking_display) == "on"
+                    || std::string(thinking_display) == "on_while_thinking")) {
+                config_.thinking_display = thinking_display;
             }
             if (msg->FindString("build_command", &build_command) == B_OK)
                 config_.build_command = build_command ? build_command : "";
@@ -528,6 +536,13 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 if (!config_.model.empty())    j["model"]    = config_.model;
                 if (!config_.default_mode.empty())
                     j["default_mode"] = config_.default_mode;
+                // Thinking display: erase-when-default (and when never set)
+                // so the file stays minimal for the default behavior.
+                if (!config_.thinking_display.empty()
+                    && config_.thinking_display != "on_while_thinking")
+                    j["thinking_display"] = config_.thinking_display;
+                else
+                    j.erase("thinking_display");
                 if (!config_.build_command.empty())
                     j["build_command"] = config_.build_command;
                 else

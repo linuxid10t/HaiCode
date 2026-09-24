@@ -28,6 +28,14 @@ struct ChatEntry {
     bool        collapsed = false;  // meaningful for ToolCalled and Reasoning
 };
 
+// How [Thinking] blocks display by default; the user's manual
+// click-to-toggle on a header still works in all modes.
+enum class ThinkingDisplay {
+    AlwaysCollapsed,       // "off"
+    AlwaysExpanded,        // "on"
+    ExpandedWhileStreaming // "on_while_thinking"
+};
+
 struct ToolHeaderRange {
     int32 start, end;
     int   model_idx;
@@ -46,6 +54,9 @@ public:
     void AppendReasoningDelta(const std::string& delta);
     void EndReasoningStreaming();
     void EndStreaming();
+    // Default thinking-block display; applied by MainWindow from config
+    // (initially and after each settings save).
+    void SetThinkingDisplay(ThinkingDisplay d) { thinking_display_ = d; }
     void AppendToolCalled(const std::string& tool_name, const std::string& input_json);
     void AppendToolResult(const std::string& output, bool success);
     void AppendSystem(const std::string& text);
@@ -77,6 +88,7 @@ private:
     bool               reasoning_streaming_ = false;
     bool               inhibit_scroll_  = false;
     bool               defer_rebuild_   = false;
+    ThinkingDisplay    thinking_display_ = ThinkingDisplay::ExpandedWhileStreaming;
 
     std::vector<ChatEntry>       model_;
     std::vector<ToolHeaderRange> header_ranges_;

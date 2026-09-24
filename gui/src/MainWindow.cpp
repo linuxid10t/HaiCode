@@ -351,6 +351,9 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // ---- ChatView ----
     chat_view_ = new ChatView("chat_view");
+    // Engine already exists (created before MainWindow) — apply the persisted
+    // thinking-display preference so the initial view matches the config.
+    _ApplyThinkingDisplay();
 
     // ---- Input area ----
     input_view_ = new InputTextView("input_view");
@@ -827,6 +830,7 @@ MainWindow::MessageReceived(BMessage* msg)
             // and the skills list (default skills may have changed).
             _UpdateMaxContext();
             _RefreshSkills();
+            _ApplyThinkingDisplay();
             break;
         case MSG_SHOW_SETTINGS:
             be_app->PostMessage(msg);
@@ -2572,6 +2576,21 @@ MainWindow::_UpdateMaxContext()
         reply.AddInt32("context",       ctx);
         msgr.SendMessage(&reply);
     }).detach();
+}
+
+void
+MainWindow::_ApplyThinkingDisplay()
+{
+    if (!chat_view_ || !engine_) return;
+    // Map the config string onto the ChatView display mode; anything other
+    // than the two non-default values falls back to the streaming behavior.
+    const std::string& td = engine_->config().thinking_display;
+    ThinkingDisplay d = ThinkingDisplay::ExpandedWhileStreaming;
+    if (td == "off")
+        d = ThinkingDisplay::AlwaysCollapsed;
+    else if (td == "on")
+        d = ThinkingDisplay::AlwaysExpanded;
+    chat_view_->SetThinkingDisplay(d);
 }
 
 void

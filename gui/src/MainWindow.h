@@ -101,6 +101,8 @@ private:
     void _ApplyModeCheckboxVisibility(bool reset_hidden);
     void _UpdateStatusStrip();
     void _UpdateMaxContext();
+    // Push config_.thinking_display (via the engine) into ChatView.
+    void _ApplyThinkingDisplay();
     void _RefreshModeButton();
     void _FetchModels();                  // reset model dropdown to (loading…) and forward to be_app
     void _ApplyProviderModelToActiveSession();

@@ -87,6 +87,12 @@ struct AppConfig {
     // Initial mode for newly created sessions: "plan" or "build".
     // Defaults to "plan" so new sessions start in Plan mode unless overridden.
     std::string default_mode = "plan";
+    // Thinking-block display in the chat view: "off" (always collapsed),
+    // "on" (always expanded), or "on_while_thinking" (expanded while
+    // streaming, collapsed after). Empty = "on_while_thinking"; must default
+    // to empty so merge() doesn't let the project layer clobber the global
+    // config when the project config file is absent.
+    std::string thinking_display;
     // Skill ids (filenames, e.g. "git-commit.md") enabled by default for
     // newly created sessions. Parsed from the top-level "skills" array in
     // config.json (global or project); seeded into each new session's

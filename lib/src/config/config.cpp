@@ -213,6 +213,14 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 cfg.default_mode = dm;
         }
 
+        // Thinking-block display: "off", "on", or "on_while_thinking".
+        // Unrecognized values are ignored so the struct default stands.
+        if (j.contains("thinking_display") && j["thinking_display"].is_string()) {
+            std::string td = j["thinking_display"].get<std::string>();
+            if (td == "off" || td == "on" || td == "on_while_thinking")
+                cfg.thinking_display = td;
+        }
+
         // Auto-compaction tuning.
         if (j.contains("auto_compact") && j["auto_compact"].is_boolean())
             cfg.auto_compact = j["auto_compact"].get<bool>();
@@ -311,6 +319,8 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
         result.build_command = overlay.build_command;
     if (!overlay.default_mode.empty())
         result.default_mode = overlay.default_mode;
+    if (!overlay.thinking_display.empty())
+        result.thinking_display = overlay.thinking_display;
     if (!overlay.auto_compact)
         result.auto_compact = false;
     if (overlay.auto_compact_threshold != 0.80)

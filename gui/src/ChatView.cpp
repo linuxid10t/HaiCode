@@ -241,8 +241,19 @@ ChatView::AppendReasoningDelta(const std::string& delta)
 {
     if (!reasoning_streaming_) {
         model_.push_back({ChatEntry::Reasoning, "", "", true, false});
-        AppendStyled("\n[Thinking] \xe2\x96\xbc\n", kColorThinkingHeader, true);
         reasoning_streaming_ = true;
+        if (thinking_display_ == ThinkingDisplay::AlwaysCollapsed) {
+            // Collapsed header only; the body is never rendered.
+            model_.back().collapsed = true;
+            std::string header = "\n[Thinking] \xe2\x96\xb6\n";
+            int32 hstart = text_view_->TextLength();
+            AppendStyled(header, kColorThinkingHeader, true);
+            int32 hend = text_view_->TextLength();
+            header_ranges_.push_back({hstart, hend, (int)model_.size() - 1});
+            model_.back().text += delta;
+            return;
+        }
+        AppendStyled("\n[Thinking] \xe2\x96\xbc\n", kColorThinkingHeader, true);
     }
     model_.back().text += delta;
     AppendStyled(delta, kColorThinkingBody, false);
@@ -251,14 +262,15 @@ ChatView::AppendReasoningDelta(const std::string& delta)
 void
 ChatView::EndReasoningStreaming()
 {
-    if (reasoning_streaming_) {
-        reasoning_streaming_ = false;
-        if (!model_.empty() && model_.back().kind == ChatEntry::Reasoning) {
-            model_.back().collapsed = true;
-            AppendStyled("\n", kColorThinkingBody, false);
-            if (!defer_rebuild_)
-                _Rebuild();
-        }
+    if (!reasoning_streaming_) return;
+    reasoning_streaming_ = false;
+    if (model_.empty() || model_.back().kind != ChatEntry::Reasoning) return;
+    // ExpandedWhileStreaming: collapse now and re-render. AlwaysExpanded and
+    // AlwaysCollapsed leave the view as-is (body already shown / hidden).
+    if (thinking_display_ == ThinkingDisplay::ExpandedWhileStreaming) {
+        model_.back().collapsed = true;
+        if (!defer_rebuild_)
+            _Rebuild();
     }
 }
 
