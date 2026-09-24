@@ -304,6 +304,17 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     model_field_ = new ModelMenuField("model_field", "Model:", model_menu_,
                                       MSG_MODEL_REFRESH);
 
+    inf_effort_menu_ = new BPopUpMenu("effort");
+    inf_effort_menu_->SetRadioMode(true);
+    inf_effort_menu_->SetLabelFromMarked(true);
+    for (const char* lbl : {"Default", "Off", "Minimal", "Low", "Medium",
+                            "High", "XHigh", "Max"}) {
+        auto* it = new BMenuItem(lbl, new BMessage(MSG_REASONING_SELECTED));
+        inf_effort_menu_->AddItem(it);
+        if (lbl[0] == 'D') it->SetMarked(true);
+    }
+    inf_effort_field_ = new BMenuField("effort_field", "Reasoning:", inf_effort_menu_);
+
     // Mode selector — Build (full access), Plan (read-only + propose_plan),
     // Chat (conversation + web research only, zero local computer access).
     // Radio mode keeps exactly one item marked; _RefreshModeButton() re-marks
@@ -386,6 +397,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(dir_slot_, 0.f)
         .Add(provider_field_)
         .Add(model_field_)
+        .Add(inf_effort_field_, 0.f)
         // Weight 0: BMenuField is horizontally stretchy, and a third
         // stretchy field was redistributing the toolbar's surplus space,
         // shrinking the Provider/Model dropdowns. Keep it at preferred
@@ -430,23 +442,12 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     inf_temperature_ = new BTextControl("temperature", "Temperature:", "", nullptr);
     inf_top_p_       = new BTextControl("top_p", "Top p:", "", nullptr);
     inf_max_steps_   = new BTextControl("max_steps", "Max steps:", "", nullptr);
-
-    // Reasoning dropdown — maps to reasoning_effort (OpenAI) and
-    // output_config.effort (Anthropic). Each provider uses only the levels it
-    // supports; the rest are ignored. Default = unset (provider default).
-    inf_effort_menu_ = new BPopUpMenu("effort");
-    inf_effort_menu_->SetRadioMode(true);
-    inf_effort_menu_->SetLabelFromMarked(true);
-    for (const char* lbl : {"Default", "Off", "Minimal", "Low", "Medium",
-                            "High", "XHigh", "Max"}) {
-        auto* it = new BMenuItem(lbl, nullptr);
-        inf_effort_menu_->AddItem(it);
-        if (lbl[0] == 'D') it->SetMarked(true);  // "Default" selected initially
-    }
-    inf_effort_field_ = new BMenuField("effort_field", "Reasoning:", inf_effort_menu_);
+    for (auto* field : {inf_max_tokens_, inf_temperature_, inf_top_p_, inf_max_steps_})
+        field->SetModificationMessage(new BMessage(MSG_INFERENCE_CHANGED));
 
     inf_apply_btn_ = new BButton("inf_apply", "Apply",
                                  new BMessage(MSG_APPLY_INFERENCE));
+    inf_apply_btn_->SetEnabled(false);
 
     auto* inf_tab_view = new BView("inference_tab", B_SUPPORTS_LAYOUT);
     BLayoutBuilder::Group<>(inf_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
@@ -455,7 +456,6 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(inf_temperature_)
         .Add(inf_top_p_)
         .Add(inf_max_steps_)
-        .Add(inf_effort_field_)
         .Add(inf_apply_btn_)
         .AddGlue()
     .End();
@@ -811,6 +811,16 @@ MainWindow::MessageReceived(BMessage* msg)
         }
         case MSG_APPLY_INFERENCE:
             _ApplyInference();
+            break;
+        case MSG_INFERENCE_CHANGED:
+            _UpdateInferenceDirty();
+            break;
+        case MSG_REASONING_SELECTED:
+            if (!active_session_id_.empty() && engine_) {
+                auto p = _LoadInference();
+                p.reasoning_effort = _SelectedReasoningEffort();
+                engine_->update_inference(active_session_id_, p);
+            }
             break;
         case MSG_SETTINGS_SAVED:
             // Engine was recreated with new config — refresh the context meter
@@ -2257,6 +2267,36 @@ MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
     }
 }
 
+std::string
+MainWindow::_SelectedReasoningEffort() const
+{
+    auto* marked = inf_effort_menu_ ? inf_effort_menu_->FindMarked() : nullptr;
+    if (!marked) return "";
+    std::string label = marked->Label();
+    if (label == "Off")     return "off";
+    if (label == "Minimal") return "minimal";
+    if (label == "Low")     return "low";
+    if (label == "Medium")  return "medium";
+    if (label == "High")    return "high";
+    if (label == "XHigh")   return "xhigh";
+    if (label == "Max")     return "max";
+    return "";
+}
+
+std::array<std::string, 4>
+MainWindow::_InferenceFields() const
+{
+    return {inf_max_tokens_->Text(), inf_temperature_->Text(),
+            inf_top_p_->Text(), inf_max_steps_->Text()};
+}
+
+void
+MainWindow::_UpdateInferenceDirty()
+{
+    inf_apply_btn_->SetEnabled(!active_session_id_.empty()
+                               && _InferenceFields() != inf_saved_fields_);
+}
+
 void
 MainWindow::_ApplyInference()
 {
@@ -2301,20 +2341,7 @@ MainWindow::_ApplyInference()
         }
     }
 
-    // reasoning_effort from dropdown. The label maps directly to the effort
-    // string; Default = unset (provider/model default applies).
-    if (inf_effort_menu_) {
-        if (auto* marked = inf_effort_menu_->FindMarked()) {
-            std::string lbl = marked->Label();
-            if      (lbl == "Off")     p.reasoning_effort = "off";
-            else if (lbl == "Minimal") p.reasoning_effort = "minimal";
-            else if (lbl == "Low")     p.reasoning_effort = "low";
-            else if (lbl == "Medium")  p.reasoning_effort = "medium";
-            else if (lbl == "High")    p.reasoning_effort = "high";
-            else if (lbl == "XHigh")   p.reasoning_effort = "xhigh";
-            else if (lbl == "Max")     p.reasoning_effort = "max";
-        }
-    }
+    p.reasoning_effort = _SelectedReasoningEffort();
 
     engine_->update_inference(active_session_id_, p);
 
@@ -2373,10 +2400,12 @@ MainWindow::_RestoreInferenceFrom(const haicode::InferenceParams& p)
                 it->SetMarked(strcmp(it->Label(), pick) == 0);
         }
     }
+    inf_saved_fields_ = _InferenceFields();
+    _UpdateInferenceDirty();
 }
 
-void
-MainWindow::_RestoreInference()
+haicode::InferenceParams
+MainWindow::_LoadInference() const
 {
     haicode::InferenceParams p;
 
@@ -2403,8 +2432,13 @@ MainWindow::_RestoreInference()
             } catch (...) {}
         }
     }
+    return p;
+}
 
-    _RestoreInferenceFrom(p);
+void
+MainWindow::_RestoreInference()
+{
+    _RestoreInferenceFrom(_LoadInference());
 }
 
 static std::string format_tokens(int n)

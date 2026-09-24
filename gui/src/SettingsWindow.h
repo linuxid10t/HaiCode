@@ -68,6 +68,7 @@ private:
     std::string _SummaryFor(const haicode::ProviderConfig& p) const;
     void _OpenEditor(const std::string& editing_id);
     void _ApplyDialogResult(BMessage* msg);
+    void _SendProviderUpdate();
     void _Save();
     void _FetchModelsForMarkedProvider();
     void _FetchFBModelsForMarkedProvider();  // fallback pair's model fetch

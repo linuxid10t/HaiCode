@@ -61,10 +61,12 @@ private:
     // "session_id" when present, else the currently selected session.
     std::string _TargetSession(const BMessage* msg) const;
     void _ApplySessionRules(const std::string& session_id);
+    bool _ApplyProviders(const BMessage* msg);
+    void _RefreshProviders();
 
     // Stop the current engine (interrupt + cancel pending asks + destroy,
     // which joins the agentic-loop threads) and construct a fresh one from
-    // the current config_. Returns the new engine. Used by MSG_SETTINGS_SAVED
-    // and MSG_DIR_CHANGED; must run before providers_ is mutated.
+    // the current config_. Call before replacing providers_ when refreshing
+    // the registry.
     haicode::SessionEngine* _RecreateEngine();
 };

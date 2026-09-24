@@ -32,6 +32,7 @@ static const uint32 MSG_ASK_USER_REPLY = 'AUrp';  // UI → engine: user's answe
 // Settings
 static const uint32 MSG_SHOW_SETTINGS   = 'SHst';
 static const uint32 MSG_SETTINGS_SAVED  = 'SVst';  // carries "providers" JSON string
+static const uint32 MSG_PROVIDERS_UPDATED = 'PVup'; // carries only "providers" JSON string
 
 // SettingsWindow internal
 static const uint32 MSG_PROVIDER_ADD    = 'PVad';  // add button
@@ -78,8 +79,10 @@ static const uint32 MSG_READ_EVERYWHERE  = 'RDew'; // plan-mode checkbox → be_
 // Provider/model persistence — MainWindow → be_app; "provider"+"model" strings
 static const uint32 MSG_PERSIST_PM      = 'PMps';
 
-// Inference settings — Inference tab Apply button → MainWindow
+// Inference settings — Inference tab fields and toolbar reasoning → MainWindow
 static const uint32 MSG_APPLY_INFERENCE = 'APin';
+static const uint32 MSG_INFERENCE_CHANGED = 'INch';
+static const uint32 MSG_REASONING_SELECTED = 'RSsl';
 
 // Skills — Skills tab list row selected (click toggles that skill);
 // "index" int32 into the skills list

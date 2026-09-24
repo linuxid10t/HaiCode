@@ -722,19 +722,24 @@ SettingsWindow::_RebuildProviderMenus()
     while (fb_provider_menu_->CountItems() > 0)
         delete fb_provider_menu_->RemoveItem((int32)0);
     {
+        bool found_fb = keep_fb.empty();
         auto* none_item = new BMenuItem("(none)", new BMessage(MSG_FB_PROVIDER_SET));
         none_item->Message()->AddString("provider_id", "");
         fb_provider_menu_->AddItem(none_item);
-        if (keep_fb.empty())
+        if (found_fb)
             none_item->SetMarked(true);
         for (auto& [id, p] : config_.providers) {
             auto* m = new BMessage(MSG_FB_PROVIDER_SET);
             m->AddString("provider_id", id.c_str());
             auto* item = new BMenuItem(id.c_str(), m);
             fb_provider_menu_->AddItem(item);
-            if (id == keep_fb)
+            if (id == keep_fb) {
                 item->SetMarked(true);
+                found_fb = true;
+            }
         }
+        if (!found_fb)
+            none_item->SetMarked(true);
     }
 }
 
@@ -751,6 +756,28 @@ SettingsWindow::_OpenEditor(const std::string& editing_id)
     }
     auto* w = new ProviderEditWindow(BMessenger(this), editing_id, type, key, url);
     w->Show();
+}
+
+static nlohmann::json
+provider_json(const std::map<std::string, haicode::ProviderConfig>& providers)
+{
+    nlohmann::json j = nlohmann::json::object();
+    for (auto& [id, p] : providers) {
+        j[id] = {
+            {"type",     p.type},
+            {"api_key",  p.api_key},
+            {"base_url", p.base_url},
+        };
+    }
+    return j;
+}
+
+void
+SettingsWindow::_SendProviderUpdate()
+{
+    BMessage updated(MSG_PROVIDERS_UPDATED);
+    updated.AddString("providers", provider_json(config_.providers).dump().c_str());
+    target_.SendMessage(&updated);
 }
 
 void
@@ -780,15 +807,13 @@ SettingsWindow::_ApplyDialogResult(BMessage* msg)
     config_.providers[p.id] = std::move(p);
     _RepopulateList();
 
-    // Keep the General-tab provider dropdowns in sync with add/edit. If the
-    // mark moved (e.g. first provider added while "(none configured)" was
-    // marked), refetch so the model list matches the new default.
     std::string prev_primary = _MarkedProviderId();
     std::string prev_fb      = _MarkedFBProviderId();
     _RebuildProviderMenus();
-    if (_MarkedProviderId() != prev_primary)
+    _SendProviderUpdate();
+    if (_MarkedProviderId() != prev_primary || _MarkedProviderId() == id_s)
         _FetchModelsForMarkedProvider();
-    if (_MarkedFBProviderId() != prev_fb)
+    if (_MarkedFBProviderId() != prev_fb || _MarkedFBProviderId() == id_s)
         _FetchFBModelsForMarkedProvider();
 }
 
@@ -821,10 +846,22 @@ SettingsWindow::MessageReceived(BMessage* msg)
             std::string prev_primary = _MarkedProviderId();
             std::string prev_fb      = _MarkedFBProviderId();
             _RebuildProviderMenus();
-            if (_MarkedProviderId() != prev_primary)
-                _FetchModelsForMarkedProvider();
-            if (_MarkedFBProviderId() != prev_fb)
-                _FetchFBModelsForMarkedProvider();
+            _SendProviderUpdate();
+            if (_MarkedProviderId() != prev_primary) {
+                if (_MarkedProviderId().empty()) {
+                    BMessage empty(MSG_MODELS_LOADED);
+                    empty.AddString("provider_id", "");
+                    PostMessage(&empty);
+                } else {
+                    _FetchModelsForMarkedProvider();
+                }
+            }
+            if (_MarkedFBProviderId() != prev_fb) {
+                if (_MarkedFBProviderId().empty())
+                    PostMessage(new BMessage(MSG_FB_PROVIDER_SET));
+                else
+                    _FetchFBModelsForMarkedProvider();
+            }
             break;
         }
         case MSG_PROVIDER_DIALOG_DONE:
@@ -1028,21 +1065,12 @@ SettingsWindow::MessageReceived(BMessage* msg)
 void
 SettingsWindow::_Save()
 {
-    // Serialize providers as a JSON object { "id": {type,key,url}, ... }.
-    nlohmann::json j;
-    for (auto& [id, p] : config_.providers) {
-        j[id] = {
-            {"type",     p.type},
-            {"api_key",  p.api_key},
-            {"base_url", p.base_url},
-        };
-    }
     BMessage saved(MSG_SETTINGS_SAVED);
-    saved.AddString("providers", j.dump().c_str());
+    saved.AddString("providers", provider_json(config_.providers).dump().c_str());
 
     // Scalars from the General/Tools tabs.
-    std::string provider_sel, model_sel;
-    if (auto* m = provider_menu_->FindMarked()) provider_sel = m->Label();
+    std::string provider_sel = _MarkedProviderId();
+    std::string model_sel;
     if (auto* m = model_menu_->FindMarked()) {
         // model_item_id() returns "" for placeholder items (no message),
         // which doubles as the skip test: omitting the model string makes
@@ -1119,8 +1147,12 @@ SettingsWindow::_Save()
 std::string
 SettingsWindow::_MarkedProviderId() const
 {
-    if (auto* marked = provider_menu_->FindMarked())
-        return marked->Label();
+    if (auto* marked = provider_menu_->FindMarked()) {
+        const char* pid = nullptr;
+        if (marked->Message()
+            && marked->Message()->FindString("provider_id", &pid) == B_OK && pid)
+            return pid;
+    }
     return "";
 }
 

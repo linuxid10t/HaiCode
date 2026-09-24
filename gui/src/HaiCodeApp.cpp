@@ -37,6 +37,47 @@
 
 
 
+static nlohmann::json
+providers_json(const std::map<std::string, haicode::ProviderConfig>& providers)
+{
+    nlohmann::json j = nlohmann::json::object();
+    for (auto& [id, p] : providers)
+        j[id] = {{"type", p.type}, {"api_key", p.api_key}, {"base_url", p.base_url}};
+    return j;
+}
+
+static std::unique_ptr<haicode::ProviderRegistry>
+make_provider_registry(const std::map<std::string, haicode::ProviderConfig>& providers)
+{
+    auto registry = std::make_unique<haicode::ProviderRegistry>();
+    for (auto& [id, pcfg] : providers) {
+        std::string key = pcfg.api_key;
+        std::string type = pcfg.type.empty()
+            ? (id == "anthropic" ? "anthropic"
+              : id == "chatgpt" ? "chatgpt" : "openai") : pcfg.type;
+        if (key.empty() && id == "anthropic") {
+            if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
+        }
+        if (key.empty() && id == "openai") {
+            if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
+        }
+        if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
+        if (type == "chatgpt") {
+            if (!haicode::codex_auth_signed_in()) continue;
+            registry->register_provider(haicode::make_codex_provider(id, pcfg.base_url));
+        } else if (type == "anthropic") {
+            registry->register_provider(haicode::make_anthropic_provider(key, pcfg.base_url, id));
+        } else if (type == "ollama" || type == "vllm" || type == "openrouter"
+                   || type == "lmstudio" || type == "llamacpp") {
+            registry->register_provider(
+                haicode::make_openai_compat_provider(key, pcfg.base_url, id, type));
+        } else {
+            registry->register_provider(haicode::make_openai_provider(key, pcfg.base_url, id));
+        }
+    }
+    return registry;
+}
+
 HaiCodeApp::HaiCodeApp(int argc, char* argv[])
     : BApplication("application/x-vnd.haicode")
     , window_holder_(std::make_shared<MainWindow*>(nullptr))
@@ -108,44 +149,10 @@ HaiCodeApp::ReadyToRun()
 
     // --- 4. Create core objects ---
     store_     = std::make_unique<haicode::SessionStore>(*db_);
-    providers_ = std::make_unique<haicode::ProviderRegistry>();
+    providers_ = make_provider_registry(config_.providers);
     tools_     = std::make_unique<haicode::ToolRegistry>();
     perm_gate_ = std::make_unique<haicode::PermissionGate>();
     bus_       = std::make_unique<haicode::SessionEventBus>();
-
-    // --- 5. Register providers (generic: supports any number of Anthropic
-    // and OpenAI-compatible endpoints, distinguished by config `type`). ---
-    for (auto& [id, pcfg] : config_.providers) {
-        std::string key = pcfg.api_key;
-        std::string type = pcfg.type.empty()
-            ? (id == "anthropic" ? "anthropic"
-              : id == "chatgpt"  ? "chatgpt" : "openai") : pcfg.type;
-        if (key.empty() && id == "anthropic") {
-            if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
-        }
-        if (key.empty() && id == "openai") {
-            if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
-        }
-        // Skip Anthropic with neither key nor base_url; OpenAI-compatible can
-        // run keyless against a local endpoint (Ollama, LM Studio). ChatGPT
-        // needs a completed OAuth sign-in (token store), not a key.
-        if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-        if (type == "chatgpt") {
-            if (!haicode::codex_auth_signed_in()) continue;
-            providers_->register_provider(
-                haicode::make_codex_provider(id, pcfg.base_url));
-        } else if (type == "anthropic") {
-            providers_->register_provider(
-                haicode::make_anthropic_provider(key, pcfg.base_url, id));
-        } else if (type == "ollama" || type == "vllm" || type == "openrouter"
-                   || type == "lmstudio" || type == "llamacpp") {
-            providers_->register_provider(
-                haicode::make_openai_compat_provider(key, pcfg.base_url, id, type));
-        } else {
-            providers_->register_provider(
-                haicode::make_openai_provider(key, pcfg.base_url, id));
-        }
-    }
 
     // Default model unconditionally — providers may be configured later
     if (config_.model.empty())
@@ -385,28 +392,29 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             win->Show();
             break;
         }
-        case MSG_SETTINGS_SAVED: {
-            // Replace the in-memory providers map wholesale from the JSON
-            // the settings window sent us.
-            const char* providers_json = nullptr;
-            if (msg->FindString("providers", &providers_json) != B_OK || !providers_json)
-                break;
-            try {
-                auto pj = nlohmann::json::parse(providers_json, nullptr, false);
-                if (!pj.is_discarded() && pj.is_object()) {
-                    config_.providers.clear();
-                    for (auto& [k, v] : pj.items()) {
-                        haicode::ProviderConfig p;
-                        p.id = k;
-                        p.type = v.value("type", "");
-                        if (p.type.empty())
-                            p.type = (k == "anthropic") ? "anthropic" : "openai";
-                        p.api_key  = v.value("api_key", "");
-                        p.base_url = v.value("base_url", "");
-                        config_.providers[k] = std::move(p);
-                    }
+        case MSG_PROVIDERS_UPDATED: {
+            if (!_ApplyProviders(msg)) break;
+            BPath settings_path;
+            if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
+                BPath cfg_path(settings_path);
+                cfg_path.Append("haicode");
+                create_directory(cfg_path.Path(), 0755);
+                cfg_path.Append("config.json");
+                nlohmann::json j = nlohmann::json::object();
+                {
+                    std::ifstream f(cfg_path.Path());
+                    if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
                 }
-            } catch (...) {}
+                if (!j.is_object()) j = nlohmann::json::object();
+                j["providers"] = providers_json(config_.providers);
+                std::ofstream f(cfg_path.Path());
+                if (f.is_open()) f << j.dump(2);
+            }
+            _RefreshProviders();
+            break;
+        }
+        case MSG_SETTINGS_SAVED: {
+            if (!_ApplyProviders(msg)) break;
 
             // Apply scalar settings from the settings window.
             const char* model = nullptr;
@@ -516,6 +524,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
                 }
                 if (!config_.provider.empty()) j["provider"] = config_.provider;
+                else j.erase("provider");
                 if (!config_.model.empty())    j["model"]    = config_.model;
                 if (!config_.default_mode.empty())
                     j["default_mode"] = config_.default_mode;
@@ -573,59 +582,13 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 } else {
                     j.erase("vision_fallback");
                 }
-                nlohmann::json providers_j = nlohmann::json::object();
-                for (auto& [id, p] : config_.providers) {
-                    providers_j[id] = {
-                        {"type",     p.type},
-                        {"api_key",  p.api_key},
-                        {"base_url", p.base_url},
-                    };
-                }
-                j["providers"] = providers_j;
+                j["providers"] = providers_json(config_.providers);
 
                 std::ofstream f(cfg_path.Path());
                 if (f.is_open()) f << j.dump(2);
             }
 
-            // Re-register providers from the updated config (generic loop).
-            providers_ = std::make_unique<haicode::ProviderRegistry>();
-            for (auto& [id, pcfg] : config_.providers) {
-                std::string key = pcfg.api_key;
-                std::string type = pcfg.type.empty()
-                    ? (id == "anthropic" ? "anthropic"
-                      : id == "chatgpt"  ? "chatgpt" : "openai") : pcfg.type;
-                if (key.empty() && id == "anthropic") {
-                    if (const char* e = std::getenv("ANTHROPIC_API_KEY"); e && *e) key = e;
-                }
-                if (key.empty() && id == "openai") {
-                    if (const char* e = std::getenv("OPENAI_API_KEY"); e && *e) key = e;
-                }
-                if (key.empty() && pcfg.base_url.empty() && type == "anthropic") continue;
-                if (type == "chatgpt") {
-                    if (!haicode::codex_auth_signed_in()) continue;
-                    providers_->register_provider(
-                        haicode::make_codex_provider(id, pcfg.base_url));
-                } else if (type == "anthropic") {
-                    providers_->register_provider(
-                        haicode::make_anthropic_provider(key, pcfg.base_url, id));
-                } else if (type == "ollama" || type == "vllm" || type == "openrouter"
-                           || type == "lmstudio" || type == "llamacpp") {
-                    providers_->register_provider(
-                        haicode::make_openai_compat_provider(key, pcfg.base_url, id, type));
-                } else {
-                    providers_->register_provider(
-                        haicode::make_openai_provider(key, pcfg.base_url, id));
-                }
-            }
-
-            // Recreate engine with updated provider registry and refresh the UI.
-            // _RecreateEngine stops any running loop first — the destructor
-            // joins the workers, so this can't free a live engine (the crash
-            // this fixes: saving settings mid-run destroyed mu_/config_ under
-            // the agentic-loop thread).
-            engine_ = std::unique_ptr<haicode::SessionEngine>(_RecreateEngine());
-            main_window_->SetEngine(*engine_);
-            main_window_->RebuildProviderMenu(config_.providers);
+            _RefreshProviders();
             main_window_->PostMessage(new BMessage(MSG_SETTINGS_SAVED));
 
             // Re-fetch models for the currently selected provider.
@@ -641,6 +604,52 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         }
         default:
             BApplication::MessageReceived(msg);
+    }
+}
+
+bool
+HaiCodeApp::_ApplyProviders(const BMessage* msg)
+{
+    const char* text = nullptr;
+    if (msg->FindString("providers", &text) != B_OK || !text) return false;
+    try {
+        auto j = nlohmann::json::parse(text);
+        if (!j.is_object()) return false;
+        std::map<std::string, haicode::ProviderConfig> updated;
+        for (auto& [id, v] : j.items()) {
+            haicode::ProviderConfig p;
+            p.id = id;
+            p.type = v.value("type", "");
+            if (p.type.empty())
+                p.type = id == "anthropic" ? "anthropic"
+                    : id == "chatgpt" ? "chatgpt" : "openai";
+            p.api_key = v.value("api_key", "");
+            p.base_url = v.value("base_url", "");
+            updated[id] = std::move(p);
+        }
+        config_.providers = std::move(updated);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+void
+HaiCodeApp::_RefreshProviders()
+{
+    if (engine_) {
+        engine_->cancel_pending_asks();
+        if (main_window_) {
+            std::string sid = main_window_->active_session_id();
+            if (!sid.empty()) engine_->interrupt(sid);
+        }
+        engine_.reset();
+    }
+    providers_ = make_provider_registry(config_.providers);
+    engine_ = std::unique_ptr<haicode::SessionEngine>(_RecreateEngine());
+    if (main_window_) {
+        main_window_->SetEngine(*engine_);
+        main_window_->RebuildProviderMenu(config_.providers);
     }
 }
 

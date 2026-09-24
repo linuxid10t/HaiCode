@@ -23,6 +23,7 @@
 #include <haicode/types.h>
 
 #include <string>
+#include <array>
 #include <vector>
 #include <map>
 #include <future>
@@ -105,8 +106,12 @@ private:
     void _ApplyProviderModelToActiveSession();
     void _PersistProviderModel();
     void _ApplyInference();       // Inference tab Apply button
+    haicode::InferenceParams _LoadInference() const;
+    std::string _SelectedReasoningEffort() const;
     void _RestoreInference();     // read model_json → fill inference fields
     void _RestoreInferenceFrom(const haicode::InferenceParams& p);
+    std::array<std::string, 4> _InferenceFields() const;
+    void _UpdateInferenceDirty();
 
     // Skills tab: rebuild the checkbox list from disk (list_skills) and
     // mirror the active session's enabled set onto it.
@@ -180,6 +185,8 @@ private:
     std::vector<std::pair<std::string, std::string>> pending_attachments_;
     BMenuField*    model_field_     = nullptr;
     BPopUpMenu*    model_menu_      = nullptr;
+    BMenuField*    inf_effort_field_ = nullptr;
+    BPopUpMenu*    inf_effort_menu_  = nullptr;
     BMenuField*    provider_field_  = nullptr;
     BPopUpMenu*    provider_menu_   = nullptr;
     BMenuBar*      menu_bar_        = nullptr;
@@ -208,9 +215,8 @@ private:
     BTextControl*  inf_temperature_  = nullptr;
     BTextControl*  inf_top_p_        = nullptr;
     BTextControl*  inf_max_steps_    = nullptr;
-    BMenuField*    inf_effort_field_ = nullptr;
-    BPopUpMenu*    inf_effort_menu_  = nullptr;
     BButton*       inf_apply_btn_    = nullptr;
+    std::array<std::string, 4> inf_saved_fields_;
 
     // Engine state mirror for UI
     bool           engine_running_        = false;
