@@ -179,12 +179,23 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
+    bus_.subscribe(EventType::BuildHookStarted, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+        BMessage msg(MSG_BUILD_HOOK_START);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddString("call_id", data.value("call_id", "").c_str());
+        main_window_.SendMessage(&msg);
+    });
+
     // BuildHookResult → MSG_BUILD_HOOK
     bus_.subscribe(EventType::BuildHookResult, [this](const json& data) {
         std::string sid = data.value("session_id", "");
         if (!is_active_session(sid)) return;
 
         BMessage msg(MSG_BUILD_HOOK);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddString("call_id", data.value("call_id", "").c_str());
         msg.AddBool("success",   data.value("success", false));
         msg.AddInt32("exit_code", data.value("exit_code", -1));
         main_window_.SendMessage(&msg);

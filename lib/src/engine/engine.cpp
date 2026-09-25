@@ -17,20 +17,92 @@
 #include <sstream>
 #include <set>
 #include <dirent.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <cerrno>
+#include <cstring>
 
 namespace haicode {
 
-// Single-quote a string for safe shell embedding: 'value' with ' → '\''.
-// Same contract as the static sq() in tools.cpp, duplicated here for the
-// build hook's timeout/cd wrapping (tools.cpp's copy is file-local).
-static std::string shell_quote(const std::string& s) {
-    std::string r = "'";
-    for (char c : s) {
-        if (c == '\'') r += "'\\''";
-        else r += c;
+std::pair<int, std::string> detail::run_build_hook(const std::string& command,
+                                                    const std::string& directory,
+                                                    int timeout_sec,
+                                                    const std::atomic<bool>* interrupted) {
+    int fds[2];
+    if (pipe(fds) != 0)
+        return {-1, std::string("pipe failed: ") + strerror(errno)};
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return {-1, std::string("fork failed: ") + strerror(errno)};
     }
-    r += "'";
-    return r;
+    if (pid == 0) {
+        setpgid(0, 0);
+        close(fds[0]);
+        dup2(fds[1], STDOUT_FILENO);
+        dup2(fds[1], STDERR_FILENO);
+        close(fds[1]);
+        if (chdir(directory.c_str()) != 0) _exit(127);
+        execl("/bin/sh", "sh", "-c", command.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    close(fds[1]);
+    setpgid(pid, pid);
+    int flags = fcntl(fds[0], F_GETFL);
+    if (flags >= 0) fcntl(fds[0], F_SETFL, flags | O_NONBLOCK);
+    constexpr size_t kLimit = 100 * 1024;
+    std::string output;
+    bool pipe_open = true;
+    bool child_done = false;
+    bool timed_out = false;
+    bool cancelled = false;
+    int status = 0;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
+    while (pipe_open || !child_done) {
+        if (!child_done) {
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid || (waited < 0 && errno == ECHILD)) child_done = true;
+        }
+        if ((interrupted && interrupted->load()) || std::chrono::steady_clock::now() >= deadline) {
+            cancelled = interrupted && interrupted->load();
+            timed_out = !cancelled;
+            kill(-pid, SIGKILL);
+            if (!child_done) {
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+                child_done = true;
+            }
+            break;
+        }
+        if (pipe_open) {
+            struct pollfd pfd {fds[0], POLLIN | POLLHUP, 0};
+            int ready = poll(&pfd, 1, 100);
+            if (ready > 0) {
+                char buf[4096];
+                ssize_t n = read(fds[0], buf, sizeof(buf));
+                if (n > 0 && output.size() < kLimit)
+                    output.append(buf, std::min(static_cast<size_t>(n), kLimit - output.size()));
+                else if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN))
+                    pipe_open = false;
+            } else if (ready < 0 && errno != EINTR) {
+                pipe_open = false;
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+    close(fds[0]);
+    if (!child_done) {
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+    output = util::sanitize_utf8(output);
+    if (output.size() > kLimit) output = util::truncate_utf8(output, kLimit);
+    if (timed_out) return {124, output};
+    if (cancelled) return {130, output};
+    return {WIFEXITED(status) ? WEXITSTATUS(status) : -1, output};
 }
 
 // Hard per-turn ceiling multiplier for the renewable step budget: even a
@@ -1734,60 +1806,34 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             auto result = tools_.execute(call.name, call.input, ctx, permissions_);
 
             // After a successful write or edit, run the configured build command
-            // so the model sees compile errors immediately rather than
-            // discovering them several steps later. Wrapped like BashTool:
-            // cwd = the session's project directory, 300s timeout via the
-            // `timeout` binary, output capped at 100 KB — the bare popen
-            // used to inherit the app cwd with no bound on either.
+            // so compile errors reach the model in the same tool result.
             if (result.success && !config_.build_command.empty()
                     && (call.name == "write" || call.name == "edit")) {
+                nlohmann::json started;
+                started["session_id"] = session_id;
+                started["call_id"] = call.id;
+                bus_.publish(events::EventType::BuildHookStarted, started);
                 constexpr int kBuildHookTimeoutSec = 300;
-                std::string inner = "cd " + shell_quote(session.directory)
-                                  + " && { " + config_.build_command + "; }";
-                std::string full_cmd = "timeout "
-                                     + std::to_string(kBuildHookTimeoutSec)
-                                     + " sh -c " + shell_quote(inner) + " 2>&1";
-                FILE* bp = popen(full_cmd.c_str(), "r");
-                if (bp) {
-                    std::string build_out;
-                    std::array<char, 4096> buf;
-                    while (fgets(buf.data(), buf.size(), bp)) {
-                        build_out += buf.data();
-                        if (build_out.size() >= 100 * 1024) break;
-                    }
-                    // Raw process output bypassed ToolRegistry::execute's
-                    // sanitize (it is appended to result.output afterwards),
-                    // and a byte-level clamp could split a UTF-8 sequence —
-                    // the exact crash class this guards against.
-                    constexpr size_t MAX_BUILD_OUT = 100 * 1024;
-                    build_out = util::sanitize_utf8(build_out);
-                    if (build_out.size() > MAX_BUILD_OUT) {
-                        build_out = util::truncate_utf8(build_out, MAX_BUILD_OUT);
-                        build_out += "\n[output truncated]";
-                    }
-                    int brc = pclose(bp);
-                    int bec = WIFEXITED(brc) ? WEXITSTATUS(brc) : -1;
+                auto [bec, build_out] = detail::run_build_hook(config_.build_command,
+                    session.directory, kBuildHookTimeoutSec, interrupt_flag);
+                nlohmann::json bev;
+                bev["session_id"] = session_id;
+                bev["call_id"] = call.id;
+                bev["success"] = (bec == 0);
+                bev["exit_code"] = bec;
+                bus_.publish(events::EventType::BuildHookResult, bev);
 
-                    {
-                        nlohmann::json bev;
-                        bev["session_id"] = session_id;
-                        bev["success"]    = (bec == 0);
-                        bev["exit_code"]  = bec;
-                        bus_.publish(events::EventType::BuildHookResult, bev);
-                    }
-
-                    if (bec == 124) {
-                        result.output += "\n\n[build_hook] Build timed out after "
-                                       + std::to_string(kBuildHookTimeoutSec)
-                                       + "s\n" + build_out;
-                        result.success = false;
-                        result.error   = result.output;
-                    } else if (bec != 0) {
-                        result.output += "\n\n[build_hook] Build failed (exit "
-                                       + std::to_string(bec) + "):\n" + build_out;
-                        result.success = false;
-                        result.error   = result.output;
-                    }
+                if (bec == 124) {
+                    result.output += "\n\n[build_hook] Build timed out after "
+                                   + std::to_string(kBuildHookTimeoutSec)
+                                   + "s\n" + build_out;
+                    result.success = false;
+                    result.error = result.output;
+                } else if (bec != 0) {
+                    result.output += "\n\n[build_hook] Build failed (exit "
+                                   + std::to_string(bec) + "):\n" + build_out;
+                    result.success = false;
+                    result.error = result.output;
                 }
             }
 

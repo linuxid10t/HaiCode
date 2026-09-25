@@ -37,6 +37,7 @@ enum class EventType {
     PermissionGranted,
     PlanProposed,
     TodoUpdated,
+    BuildHookStarted,
     BuildHookResult,
     AskUserRequested,
     SessionRenamed,

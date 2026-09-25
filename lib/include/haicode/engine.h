@@ -11,8 +11,16 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <utility>
 
 namespace haicode {
+
+namespace detail {
+std::pair<int, std::string> run_build_hook(const std::string& command,
+                                           const std::string& directory,
+                                           int timeout_sec,
+                                           const std::atomic<bool>* interrupted);
+}
 
 class ContextBuilder {
 public:

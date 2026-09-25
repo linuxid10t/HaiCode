@@ -748,6 +748,9 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_TODOS_UPDATED:
             _HandleTodosUpdated(msg);
             break;
+        case MSG_BUILD_HOOK_START:
+            _HandleBuildHookStart(msg);
+            break;
         case MSG_BUILD_HOOK:
             _HandleBuildHookResult(msg);
             break;
@@ -1139,6 +1142,7 @@ MainWindow::_NewSession()
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
+    build_call_id_.clear();
     _UpdateMaxContext();
     _RefreshModeButton();
     _RefreshTodosFromEngine();
@@ -1264,6 +1268,7 @@ MainWindow::_SelectSession(int idx)
     interrupt_btn_->SetEnabled(engine_running_);
     streaming_state_ = engine_running_ ? "thinking" : "idle";
     current_tool_name_.clear();
+    build_call_id_.clear();
     _UpdateMaxContext();
     _RefreshModeButton();
     _RefreshTodosFromEngine();
@@ -1740,6 +1745,7 @@ MainWindow::_HandleToolResult(BMessage* msg)
     msg->FindString("output",  &output);
     msg->FindBool("success",   &success);
     chat_view_->AppendToolResult(output ? output : "", success);
+    build_call_id_.clear();
     // After a tool finishes, the engine may keep going (another tool or more
     // text). If it does, MSG_STEP_STARTED will reset state to "thinking".
     current_tool_name_.clear();
@@ -1802,6 +1808,7 @@ MainWindow::_HandleStepFailed(BMessage* msg)
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
+    build_call_id_.clear();
 
     const char* error = nullptr;
     msg->FindString("error", &error);
@@ -1820,6 +1827,7 @@ MainWindow::_HandleInterrupted()
     engine_running_ = false;
     streaming_state_ = "idle";
     current_tool_name_.clear();
+    build_call_id_.clear();
     chat_view_->AppendSystem("Interrupted.");
     _UpdateStatusStrip();
 }
@@ -1990,8 +1998,29 @@ MainWindow::_HandleTodosUpdated(BMessage* msg)
 }
 
 void
+MainWindow::_HandleBuildHookStart(BMessage* msg)
+{
+    const char* sid = nullptr;
+    const char* call_id = nullptr;
+    msg->FindString("session_id", &sid);
+    msg->FindString("call_id", &call_id);
+    if (!sid || sid != active_session_id_ || !call_id) return;
+    build_call_id_ = call_id;
+    chat_view_->AppendSystem("build started…");
+    _UpdateStatusStrip();
+}
+
+void
 MainWindow::_HandleBuildHookResult(BMessage* msg)
 {
+    const char* sid = nullptr;
+    const char* call_id = nullptr;
+    msg->FindString("session_id", &sid);
+    msg->FindString("call_id", &call_id);
+    if (!sid || sid != active_session_id_ || !call_id || build_call_id_ != call_id)
+        return;
+    build_call_id_.clear();
+    _UpdateStatusStrip();
     bool success = false;
     int32 exit_code = -1;
     msg->FindBool("success", &success);
@@ -2499,6 +2528,9 @@ MainWindow::_UpdateStatusStrip()
     } else if (!engine_running_) {
         glyph = "\xe2\x9c\x93";  // CHECK MARK
         label = "idle";
+    } else if (!build_call_id_.empty()) {
+        glyph = "\xf0\x9f\x94\xa7";
+        label = "building\xe2\x80\xa6";
     } else if (streaming_state_ == "streaming") {
         glyph = "\xf0\x9f\x92\xac";  // 💬
         label = "streaming\xe2\x80\xa6";

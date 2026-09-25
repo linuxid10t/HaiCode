@@ -16,6 +16,9 @@
 #include <thread>
 #include <vector>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
 
@@ -658,8 +661,18 @@ static bool test_build_hook_cwd_and_failure_e2e() {
 
         std::atomic<bool> hook_event{false};
         std::atomic<int> hook_exit{0};
+        std::vector<std::string> order;
+        bus.subscribe(haicode::events::EventType::BuildHookStarted,
+                      [&](const nlohmann::json& d) {
+                          if (d.value("call_id", "") == "w1") order.push_back("start");
+                      });
+        bus.subscribe(haicode::events::EventType::ToolFailed,
+                      [&](const nlohmann::json& d) {
+                          if (d.value("call_id", "") == "w1") order.push_back("tool");
+                      });
         bus.subscribe(haicode::events::EventType::BuildHookResult,
                       [&](const nlohmann::json& d) {
+                          order.push_back("result");
                           hook_event = true;
                           hook_exit = d.value("exit_code", -1);
                       });
@@ -673,6 +686,8 @@ static bool test_build_hook_cwd_and_failure_e2e() {
             CHECK(wait_for_rows(store, sid, 4), "turn must complete");
         }
         CHECK(hook_event.load(), "BuildHookResult must be published");
+        CHECK(order == std::vector<std::string>({"start", "result", "tool"}),
+              "build start/result must precede tool failure");
         CHECK(hook_exit.load() == 3, "hook exit code must be 3");
 
         std::string out = first_tool_result_output(store, sid);
@@ -729,10 +744,75 @@ static bool test_build_hook_cwd_and_failure_e2e() {
               "green build must not pollute the tool result, got: " + out);
     }
 
+    // A failed edit must not start the hook.
+    {
+        haicode::Database db(tmp + "/edit_fail.db");
+        db.migrate();
+        haicode::SessionStore store(db);
+        auto provider = std::make_shared<ToolCallProvider>();
+        provider->pending.id = "e1";
+        provider->pending.name = "edit";
+        provider->pending.input = {{"path", proj + "/ok.txt"},
+                                   {"old_string", "not present"},
+                                   {"new_string", "z"}};
+        haicode::ProviderRegistry registry;
+        registry.register_provider(provider);
+        haicode::ToolRegistry tools;
+        haicode::register_builtin_tools(tools);
+        haicode::PermissionGate perms;
+        perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+        haicode::SessionEventBus bus;
+        haicode::AppConfig cfg;
+        cfg.model = "tc-model";
+        cfg.provider = "toolcall";
+        cfg.autoname_sessions = false;
+        cfg.default_mode = "build";
+        cfg.build_command = "echo SHOULD_NOT_RUN";
+        std::atomic<int> starts{0};
+        bus.subscribe(haicode::events::EventType::BuildHookStarted,
+                      [&](const nlohmann::json&) { ++starts; });
+        std::string sid;
+        {
+            haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+            sid = engine.create_session(proj, "build", "tc-model", "toolcall");
+            engine.submit_prompt(sid, "edit it");
+            CHECK(wait_for_rows(store, sid, 4), "failed edit must complete");
+        }
+        CHECK(starts == 0, "failed edit must not start a build");
+    }
+
     std::string rm = "rm -rf " + tmp;
     system(rm.c_str());
     std::cout << "[OK] e2e build hook runs in session dir, reports failure\n";
     return true;
+}
+
+static bool test_build_hook_inherited_pipe_timeout() {
+    std::cout.flush();
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork watchdog failed");
+    if (pid == 0) {
+        auto begin = std::chrono::steady_clock::now();
+        auto [code, output] = haicode::detail::run_build_hook(
+            "sh -c 'echo STARTED; sleep 30' & exit 0", "/tmp", 1, nullptr);
+        bool ok = code == 124 && output.find("STARTED") != std::string::npos
+            && std::chrono::steady_clock::now() - begin < std::chrono::seconds(5);
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    for (int i = 0; i < 60; ++i) {
+        if (waitpid(pid, &status, WNOHANG) == pid) {
+            CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+                  "hook must time out and close inherited pipe promptly");
+            std::cout << "[OK] build hook inherited-pipe timeout\n";
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    CHECK(false, "build hook timeout exceeded test watchdog");
+    return false;
 }
 
 // ============================================================
@@ -1290,6 +1370,7 @@ int main() {
     ok &= test_provider_switch_mid_loop_e2e();
     ok &= test_interrupt_releases_ask_wait_e2e();
     ok &= test_build_hook_cwd_and_failure_e2e();
+    ok &= test_build_hook_inherited_pipe_timeout();
     ok &= test_interrupt_scoped_to_session_token();
     ok &= test_concurrent_sessions_run_in_parallel();
     ok &= test_budget_renews_on_todo_completion_e2e();

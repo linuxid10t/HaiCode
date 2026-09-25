@@ -92,6 +92,7 @@ private:
     void _HandleAskUserReq(BMessage* msg);
     void _HandleAskUserReply(BMessage* msg);
     void _HandleTodosUpdated(BMessage* msg);
+    void _HandleBuildHookStart(BMessage* msg);
     void _HandleBuildHookResult(BMessage* msg);
     void _HandleCompaction(BMessage* msg);
     void _HandleCompactNow();
@@ -227,6 +228,7 @@ private:
     int            compaction_progress_   = -1;  // 0-99 while compacting; -1 = unknown
     std::string    streaming_state_ = "idle";  // idle|thinking|streaming|tool|compacting
     std::string    current_tool_name_;
+    std::string    build_call_id_;
 
     // Per-prompt / per-session token accounting
     int            last_prompt_input_     = 0;

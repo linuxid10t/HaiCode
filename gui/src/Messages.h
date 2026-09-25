@@ -12,6 +12,7 @@ static const uint32 MSG_STEP_FAILED    = 'STfl';
 static const uint32 MSG_PERMISSION_REQ = 'PRrq';
 static const uint32 MSG_PLAN_PROPOSED  = 'PLpr';   // plan_str + path_str
 static const uint32 MSG_TODOS_UPDATED  = 'TDup';   // repeated "todo_content"/"todo_active"/"todo_status" strings
+static const uint32 MSG_BUILD_HOOK_START = 'BHst';
 static const uint32 MSG_BUILD_HOOK     = 'BHrs';   // "success" bool, "exit_code" int32
 static const uint32 MSG_INTERRUPTED    = 'INtd';   // engine → UI: interrupt completed
 static const uint32 MSG_COMPACTION     = 'CMpt';   // "phase" string ("start"/"end"), counts
