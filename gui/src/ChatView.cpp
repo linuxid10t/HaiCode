@@ -181,8 +181,9 @@ ChatView::_Rebuild()
         const auto& e = model_[i];
         switch (e.kind) {
         case ChatEntry::UserText:
-            AppendStyled("\nYou: ", kColorUser, true);
-            AppendStyled(e.text + "\n", kColorUser, false);
+            AppendStyled("\nYou:", kColorUser, true);
+            AppendCopyControl(i);
+            AppendStyled("\n" + e.text + "\n", kColorUser, false);
             if (!e.name.empty())
                 AppendStyled("[image: " + e.name + "]\n", kColorUser, false);
             break;
@@ -268,8 +269,9 @@ ChatView::AppendUserText(const std::string& text,
         names += attachment_names[i];
     }
     model_.push_back({ChatEntry::UserText, text, names, true, false});
-    AppendStyled("\nYou: ", kColorUser, true);
-    AppendStyled(text + "\n", kColorUser, false);
+    AppendStyled("\nYou:", kColorUser, true);
+    AppendCopyControl((int)model_.size() - 1);
+    AppendStyled("\n" + text + "\n", kColorUser, false);
     if (!names.empty())
         AppendStyled("[image: " + names + "]\n", kColorUser, false);
 }
@@ -470,7 +472,8 @@ ChatView::CopyEntry(int model_idx)
 {
     if (model_idx < 0 || model_idx >= (int)model_.size()) return;
     const ChatEntry& entry = model_[model_idx];
-    if (entry.kind != ChatEntry::AssistantText && entry.kind != ChatEntry::Reasoning)
+    if (entry.kind != ChatEntry::UserText && entry.kind != ChatEntry::AssistantText
+        && entry.kind != ChatEntry::Reasoning)
         return;
 
     if (!be_clipboard->Lock()) return;
