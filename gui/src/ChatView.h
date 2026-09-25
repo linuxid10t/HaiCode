@@ -2,7 +2,9 @@
 
 #include <TextView.h>
 #include <ScrollView.h>
+#include <MessageRunner.h>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,8 @@ public:
                       uint32 flags, uint32 resizingMode);
     void SetOwner(ChatView* owner) { owner_ = owner; }
     void MouseDown(BPoint where) override;
+    void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override;
+    void MessageReceived(BMessage* message) override;
 private:
     ChatView* owner_ = nullptr;
 };
@@ -38,6 +42,12 @@ enum class ThinkingDisplay {
 
 struct ToolHeaderRange {
     int32 start, end;
+    int   model_idx;
+};
+
+struct CopyControlRange {
+    int32 start, end;
+    int32 feedback_start;
     int   model_idx;
 };
 
@@ -75,10 +85,16 @@ public:
 
     // Called by ClickableTextView::MouseDown
     int  FindBlockAt(int32 offset) const;
+    int  FindCopyAt(int32 offset) const;
+    void CopyEntry(int model_idx);
+    void ResetCopyFeedback(int32 generation);
     void ToggleBlock(int model_idx);
 
 private:
     void AppendStyled(const std::string& text, rgb_color color, bool bold = false);
+    void AppendCopyControl(int model_idx);
+    void SetCopyFeedback(int model_idx, bool visible);
+    void ClearCopyFeedback();
     void ScrollToBottom();
     void _Rebuild();
 
@@ -90,7 +106,11 @@ private:
     bool               defer_rebuild_   = false;
     ThinkingDisplay    thinking_display_ = ThinkingDisplay::ExpandedWhileStreaming;
 
-    std::vector<ChatEntry>       model_;
-    std::vector<ToolHeaderRange> header_ranges_;
+    std::vector<ChatEntry>        model_;
+    std::vector<ToolHeaderRange>  header_ranges_;
+    std::vector<CopyControlRange> copy_ranges_;
+    int                          feedback_idx_ = -1;
+    int32                        feedback_generation_ = 0;
+    std::unique_ptr<BMessageRunner> feedback_timer_;
     int                          pending_tool_idx_ = -1;
 };

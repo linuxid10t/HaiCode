@@ -1,8 +1,14 @@
 #include "ChatView.h"
 
+#include <Clipboard.h>
+#include <Cursor.h>
+#include <Font.h>
+#include <Message.h>
+#include <MessageRunner.h>
+#include <Messenger.h>
 #include <ScrollView.h>
 #include <TextView.h>
-#include <Font.h>
+#include <Window.h>
 
 #include <string>
 
@@ -16,6 +22,9 @@ static const rgb_color kColorToolErr        = { 200,  30,  30, 255 };
 static const rgb_color kColorSystem         = { 200, 120,   0, 255 };
 static const rgb_color kColorThinkingHeader = { 110,  90, 180, 255 };
 static const rgb_color kColorThinkingBody   = { 140, 140, 140, 255 };
+static const rgb_color kColorCopyControl    = {  45,  90, 160, 255 };
+static const rgb_color kColorCopyFeedback   = {  30, 160,  50, 255 };
+static const uint32 kMsgResetCopyFeedback  = 'RCfb';
 
 // ---------------------------------------------------------------------------
 // ClickableTextView
@@ -31,14 +40,48 @@ void
 ClickableTextView::MouseDown(BPoint where)
 {
     if (owner_) {
-        int32 offset = OffsetAt(where);
-        int idx = owner_->FindBlockAt(offset);
-        if (idx >= 0) {
-            owner_->ToggleBlock(idx);
-            return;
+        int32 buttons = 0;
+        if (Window() && Window()->CurrentMessage())
+            Window()->CurrentMessage()->FindInt32("buttons", &buttons);
+        if (buttons & B_PRIMARY_MOUSE_BUTTON) {
+            int32 offset = OffsetAt(where);
+            int copy_idx = owner_->FindCopyAt(offset);
+            if (copy_idx >= 0) {
+                owner_->CopyEntry(copy_idx);
+                return;
+            }
+            int idx = owner_->FindBlockAt(offset);
+            if (idx >= 0) {
+                owner_->ToggleBlock(idx);
+                return;
+            }
         }
     }
     BTextView::MouseDown(where);
+}
+
+void
+ClickableTextView::MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage)
+{
+    BTextView::MouseMoved(where, transit, dragMessage);
+    if (transit == B_EXITED_VIEW) return;
+
+    static const BCursor pointer(B_CURSOR_ID_SYSTEM_DEFAULT);
+    static const BCursor text_cursor(B_CURSOR_ID_I_BEAM);
+    bool over_copy = owner_ && owner_->FindCopyAt(OffsetAt(where)) >= 0;
+    SetViewCursor(over_copy ? &pointer : &text_cursor);
+}
+
+void
+ClickableTextView::MessageReceived(BMessage* message)
+{
+    if (message->what == kMsgResetCopyFeedback && owner_) {
+        int32 generation;
+        if (message->FindInt32("generation", &generation) == B_OK)
+            owner_->ResetCopyFeedback(generation);
+        return;
+    }
+    BTextView::MessageReceived(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +130,19 @@ ChatView::AppendStyled(const std::string& text, rgb_color color, bool bold)
 }
 
 void
+ChatView::AppendCopyControl(int model_idx)
+{
+    AppendStyled("  ", kColorCopyControl);
+    int32 start = text_view_->TextLength();
+    AppendStyled("[Copy]", kColorCopyControl, true);
+    int32 end = text_view_->TextLength();
+    AppendStyled(" ", kColorCopyControl);
+    int32 feedback_start = text_view_->TextLength();
+    AppendStyled("   ", kColorCopyFeedback);
+    copy_ranges_.push_back({start, end, feedback_start, model_idx});
+}
+
+void
 ChatView::ScrollToBottom()
 {
     if (inhibit_scroll_) return;
@@ -115,9 +171,11 @@ ChatView::ScrollToBottom()
 void
 ChatView::_Rebuild()
 {
+    ClearCopyFeedback();
     inhibit_scroll_ = true;
     text_view_->SetText("");
     header_ranges_.clear();
+    copy_ranges_.clear();
 
     for (int i = 0; i < (int)model_.size(); i++) {
         const auto& e = model_[i];
@@ -130,8 +188,9 @@ ChatView::_Rebuild()
             break;
 
         case ChatEntry::AssistantText:
-            AppendStyled("\nAssistant: ", kColorAssistant, true);
-            AppendStyled(e.text + "\n", kColorAssistant, false);
+            AppendStyled("\nAssistant:", kColorAssistant, true);
+            AppendCopyControl(i);
+            AppendStyled("\n" + e.text + "\n", kColorAssistant, false);
             break;
 
         case ChatEntry::ToolCalled: {
@@ -161,11 +220,13 @@ ChatView::_Rebuild()
 
         case ChatEntry::Reasoning: {
             std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
-            std::string header = "\n[Thinking]" + indicator + "\n";
+            std::string header = "\n[Thinking]" + indicator;
             int32 hstart = text_view_->TextLength();
             AppendStyled(header, kColorThinkingHeader, true);
             int32 hend = text_view_->TextLength();
             header_ranges_.push_back({hstart, hend, i});
+            AppendCopyControl(i);
+            AppendStyled("\n", kColorThinkingHeader);
             if (!e.collapsed && !e.text.empty()) {
                 AppendStyled(e.text + "\n", kColorThinkingBody, false);
             }
@@ -219,7 +280,9 @@ ChatView::AppendTextDelta(const std::string& delta)
     EndReasoningStreaming();
     if (!streaming_) {
         model_.push_back({ChatEntry::AssistantText, "", "", true, false});
-        AppendStyled("\nAssistant: ", kColorAssistant, true);
+        AppendStyled("\nAssistant:", kColorAssistant, true);
+        AppendCopyControl((int)model_.size() - 1);
+        AppendStyled("\n", kColorAssistant);
         streaming_ = true;
     }
     model_.back().text += delta;
@@ -242,21 +305,19 @@ ChatView::AppendReasoningDelta(const std::string& delta)
     if (!reasoning_streaming_) {
         model_.push_back({ChatEntry::Reasoning, "", "", true, false});
         reasoning_streaming_ = true;
-        if (thinking_display_ == ThinkingDisplay::AlwaysCollapsed) {
-            // Collapsed header only; the body is never rendered.
-            model_.back().collapsed = true;
-            std::string header = "\n[Thinking] \xe2\x96\xb6\n";
-            int32 hstart = text_view_->TextLength();
-            AppendStyled(header, kColorThinkingHeader, true);
-            int32 hend = text_view_->TextLength();
-            header_ranges_.push_back({hstart, hend, (int)model_.size() - 1});
-            model_.back().text += delta;
-            return;
-        }
-        AppendStyled("\n[Thinking] \xe2\x96\xbc\n", kColorThinkingHeader, true);
+        int idx = (int)model_.size() - 1;
+        bool collapsed = thinking_display_ == ThinkingDisplay::AlwaysCollapsed;
+        model_.back().collapsed = collapsed;
+        int32 hstart = text_view_->TextLength();
+        AppendStyled(collapsed ? "\n[Thinking] \xe2\x96\xb6" : "\n[Thinking] \xe2\x96\xbc",
+                     kColorThinkingHeader, true);
+        header_ranges_.push_back({hstart, text_view_->TextLength(), idx});
+        AppendCopyControl(idx);
+        AppendStyled("\n", kColorThinkingHeader);
     }
     model_.back().text += delta;
-    AppendStyled(delta, kColorThinkingBody, false);
+    if (!model_.back().collapsed)
+        AppendStyled(delta, kColorThinkingBody, false);
 }
 
 void
@@ -332,11 +393,13 @@ ChatView::AppendCompactionSummary(const std::string& header,
 void
 ChatView::Clear()
 {
+    ClearCopyFeedback();
     streaming_            = false;
     reasoning_streaming_  = false;
     pending_tool_idx_     = -1;
     model_.clear();
     header_ranges_.clear();
+    copy_ranges_.clear();
     text_view_->SetText("");
 }
 
@@ -354,6 +417,79 @@ ChatView::EndBatch()
     defer_rebuild_ = false;
     // _Rebuild() resets inhibit_scroll_ and ends with a single ScrollToBottom.
     _Rebuild();
+}
+
+int
+ChatView::FindCopyAt(int32 offset) const
+{
+    for (const auto& range : copy_ranges_) {
+        if (offset >= range.start && offset < range.end)
+            return range.model_idx;
+    }
+    return -1;
+}
+
+void
+ChatView::SetCopyFeedback(int model_idx, bool visible)
+{
+    for (const auto& range : copy_ranges_) {
+        if (range.model_idx != model_idx) continue;
+        int32 start = range.feedback_start;
+        int32 selected_start, selected_end;
+        text_view_->GetSelection(&selected_start, &selected_end);
+        text_view_->Delete(start, start + 3);
+        const char* label = visible ? "\xe2\x9c\x93" : "   ";
+        text_view_->Insert(start, label, 3);
+        BFont font(*be_bold_font);
+        rgb_color color = visible ? kColorCopyFeedback : kColorCopyControl;
+        text_view_->SetFontAndColor(start, start + 3, &font, B_FONT_ALL, &color);
+        text_view_->Select(selected_start, selected_end);
+        return;
+    }
+}
+
+void
+ChatView::ClearCopyFeedback()
+{
+    ++feedback_generation_;
+    feedback_timer_.reset();
+    if (feedback_idx_ >= 0)
+        SetCopyFeedback(feedback_idx_, false);
+    feedback_idx_ = -1;
+}
+
+void
+ChatView::ResetCopyFeedback(int32 generation)
+{
+    if (generation == feedback_generation_)
+        ClearCopyFeedback();
+}
+
+void
+ChatView::CopyEntry(int model_idx)
+{
+    if (model_idx < 0 || model_idx >= (int)model_.size()) return;
+    const ChatEntry& entry = model_[model_idx];
+    if (entry.kind != ChatEntry::AssistantText && entry.kind != ChatEntry::Reasoning)
+        return;
+
+    if (!be_clipboard->Lock()) return;
+    bool copied = be_clipboard->Clear() == B_OK
+        && be_clipboard->Data()->AddData("text/plain", B_MIME_TYPE,
+                                         entry.text.data(), entry.text.size()) == B_OK
+        && be_clipboard->Commit() == B_OK;
+    be_clipboard->Unlock();
+    if (!copied) return;
+
+    ClearCopyFeedback();
+    feedback_idx_ = model_idx;
+    SetCopyFeedback(model_idx, true);
+    BMessage reset(kMsgResetCopyFeedback);
+    reset.AddInt32("generation", feedback_generation_);
+    feedback_timer_ = std::make_unique<BMessageRunner>(
+        BMessenger(text_view_), reset, 1500000, 1);
+    if (feedback_timer_->InitCheck() != B_OK)
+        ClearCopyFeedback();
 }
 
 int
