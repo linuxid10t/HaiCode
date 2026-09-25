@@ -535,11 +535,6 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         .End()
         .Add(new BSeparatorView(B_HORIZONTAL))
         .Add(thinking_field_)
-        .Add(new BStringView("thinking_hint",
-            "how the [Thinking] block shows: Off = always collapsed,"
-            " On = always expanded, On While Thinking = expanded while"
-            " streaming, collapsed after. Clicking a [Thinking] header"
-            " always toggles it."))
         .AddGlue();
 
     // ---- Tools tab ----
