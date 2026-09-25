@@ -43,6 +43,9 @@ public:
                   SessionEventBus& bus,
                   const AppConfig& config);
     ~SessionEngine();
+    // Stop and join workers while event recipients still reference this engine.
+    // Safe to call before destruction; the destructor then does nothing.
+    void shutdown();
 
     std::string create_session(const std::string& project_dir,
                                 const std::string& agent_id = "",

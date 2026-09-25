@@ -591,6 +591,19 @@ MainWindow::RebuildProviderMenu(const std::map<std::string, haicode::ProviderCon
 }
 
 void
+MainWindow::SetEngine(haicode::SessionEngine& engine)
+{
+    engine_ = &engine;
+    engine_running_ = !active_session_id_.empty()
+        && engine_->is_running(active_session_id_);
+    interrupt_btn_->SetEnabled(engine_running_);
+    streaming_state_ = engine_running_ ? "thinking" : "idle";
+    current_tool_name_.clear();
+    chat_view_->EndStreaming();
+    _UpdateStatusStrip();
+}
+
+void
 MainWindow::SelectProvider(const std::string& provider_id)
 {
     default_provider_ = provider_id;

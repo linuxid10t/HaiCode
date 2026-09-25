@@ -560,6 +560,10 @@ SessionEngine::SessionEngine(SessionStore& store,
 {}
 
 SessionEngine::~SessionEngine() {
+    shutdown();
+}
+
+void SessionEngine::shutdown() {
     // 1. Snapshot everything the join needs, under mu_, and flip
     // shutting_down_ so submit_prompt/continue_session/compact_now refuse
     // to spawn new runners from this point on.
@@ -568,6 +572,7 @@ SessionEngine::~SessionEngine() {
     std::vector<std::atomic<bool>*> flags;
     {
         std::lock_guard<std::mutex> lock(mu_);
+        if (shutting_down_) return;
         shutting_down_ = true;
         for (auto& [id, flag] : interrupt_flags_)
             if (flag) flag->store(true);

@@ -327,11 +327,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             project_dir_ = path;
             haicode::ConfigLoader loader2;
             config_ = loader2.load(project_dir_);
-            // Recreate the engine so config_.agents_md takes effect for new
-            // sessions. _RecreateEngine stops any running loop first — the
-            // destructor joins the workers, so this can't free a live engine.
-            engine_ = std::unique_ptr<haicode::SessionEngine>(_RecreateEngine());
-            if (main_window_) main_window_->SetEngine(*engine_);
+            _RecreateEngine();
             break;
         }
         case MSG_ACTIVE_SESSION: {
@@ -652,39 +648,41 @@ HaiCodeApp::_ApplyProviders(const BMessage* msg)
 void
 HaiCodeApp::_RefreshProviders()
 {
-    if (engine_) {
-        engine_->cancel_pending_asks();
-        if (main_window_) {
-            std::string sid = main_window_->active_session_id();
-            if (!sid.empty()) engine_->interrupt(sid);
-        }
-        engine_.reset();
-    }
-    providers_ = make_provider_registry(config_.providers);
-    engine_ = std::unique_ptr<haicode::SessionEngine>(_RecreateEngine());
+    auto next_providers = make_provider_registry(config_.providers);
+    _RecreateEngine(std::move(next_providers));
     if (main_window_) {
-        main_window_->SetEngine(*engine_);
+        main_window_->Lock();
         main_window_->RebuildProviderMenu(config_.providers);
+        main_window_->Unlock();
     }
 }
 
-haicode::SessionEngine*
-HaiCodeApp::_RecreateEngine()
+void
+HaiCodeApp::_RecreateEngine(std::unique_ptr<haicode::ProviderRegistry> next_providers)
 {
-    if (engine_) {
-        // Unblock any pending ask_user dialogs and interrupt the active
-        // session's in-flight request, then destroy the engine. The
-        // destructor joins the agentic-loop threads, so it returns only
-        // after the workers have fully exited — no use-after-free window.
-        engine_->cancel_pending_asks();
-        if (main_window_) {
-            std::string sid = main_window_->active_session_id();
-            if (!sid.empty()) engine_->interrupt(sid);
-        }
-        engine_.reset();
+    std::string sid;
+    if (main_window_) {
+        main_window_->Lock();
+        sid = main_window_->active_session_id();
+        main_window_->Unlock();
     }
-    return new haicode::SessionEngine(
+    if (engine_) {
+        engine_->cancel_pending_asks();
+        if (!sid.empty()) engine_->interrupt(sid);
+        engine_->shutdown();
+    }
+
+    auto old_engine = std::move(engine_);
+    auto old_providers = next_providers ? std::move(providers_) : nullptr;
+    if (next_providers) providers_ = std::move(next_providers);
+    engine_ = std::make_unique<haicode::SessionEngine>(
         *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
+    if (main_window_) {
+        main_window_->Lock();
+        main_window_->SetEngine(*engine_);
+        main_window_->Unlock();
+    }
+    old_engine.reset();
 }
 
 std::string

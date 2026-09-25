@@ -64,9 +64,7 @@ private:
     bool _ApplyProviders(const BMessage* msg);
     void _RefreshProviders();
 
-    // Stop the current engine (interrupt + cancel pending asks + destroy,
-    // which joins the agentic-loop threads) and construct a fresh one from
-    // the current config_. Call before replacing providers_ when refreshing
-    // the registry.
-    haicode::SessionEngine* _RecreateEngine();
+    // Replace the engine after handing the window its new pointer. When supplied,
+    // keep the old provider registry alive until the retiring engine is destroyed.
+    void _RecreateEngine(std::unique_ptr<haicode::ProviderRegistry> next_providers = nullptr);
 };

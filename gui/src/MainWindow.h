@@ -58,8 +58,8 @@ public:
                                const std::string& detail,
                                void* promise_ptr);
 
-    // Called by HaiCodeApp after recreating the engine (e.g. settings change)
-    void SetEngine(haicode::SessionEngine& engine) { engine_ = &engine; }
+    // Called by HaiCodeApp while holding the window lock.
+    void SetEngine(haicode::SessionEngine& engine);
 
     // Mark the provider dropdown to match the given provider id.
     void SelectProvider(const std::string& provider_id);
