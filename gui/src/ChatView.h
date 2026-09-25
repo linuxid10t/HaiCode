@@ -18,6 +18,8 @@ public:
     void SetOwner(ChatView* owner) { owner_ = owner; }
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override;
+    void MakeFocus(bool focus = true) override;
+    void Select(int32 startOffset, int32 endOffset) override;
     void MessageReceived(BMessage* message) override;
 private:
     ChatView* owner_ = nullptr;
@@ -85,6 +87,7 @@ public:
 
     // Called by ClickableTextView::MouseDown
     int  FindBlockAt(int32 offset) const;
+    bool IsIndicatorAt(BPoint where) const;
     int  FindCopyAt(int32 offset) const;
     void CopyEntry(int model_idx);
     void ResetCopyFeedback(int32 generation);

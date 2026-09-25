@@ -61,15 +61,52 @@ ClickableTextView::MouseDown(BPoint where)
 }
 
 void
+ClickableTextView::MakeFocus(bool focus)
+{
+    if (focus) {
+        int32 start, end;
+        GetSelection(&start, &end);
+        if (start == end) return;
+    }
+    BTextView::MakeFocus(focus);
+}
+
+void
+ClickableTextView::Select(int32 startOffset, int32 endOffset)
+{
+    if (startOffset == endOffset && IsFocus())
+        BTextView::MakeFocus(false);
+    BTextView::Select(startOffset, endOffset);
+    if (startOffset != endOffset)
+        MakeFocus(true);
+}
+
+void
 ClickableTextView::MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage)
 {
     BTextView::MouseMoved(where, transit, dragMessage);
-    if (transit == B_EXITED_VIEW) return;
-
     static const BCursor pointer(B_CURSOR_ID_SYSTEM_DEFAULT);
     static const BCursor text_cursor(B_CURSOR_ID_I_BEAM);
-    bool over_copy = owner_ && owner_->FindCopyAt(OffsetAt(where)) >= 0;
-    SetViewCursor(over_copy ? &pointer : &text_cursor);
+    if (transit == B_EXITED_VIEW) {
+        SetViewCursor(&pointer);
+        return;
+    }
+
+    bool over_text = false;
+    if (TextLength() > 0 && Bounds().Contains(where)) {
+        int32 line = LineAt(where);
+        if (line >= 0 && line < CountLines()) {
+            float height;
+            BPoint origin = PointAt(OffsetAt(line), &height);
+            float width = LineWidth(line);
+            over_text = width > 0 && where.x >= origin.x
+                && where.x < origin.x + width && where.y >= origin.y
+                && where.y < origin.y + height;
+        }
+    }
+    bool over_copy = over_text && owner_ && owner_->FindCopyAt(OffsetAt(where)) >= 0;
+    bool over_indicator = over_text && owner_ && owner_->IsIndicatorAt(where);
+    SetViewCursor(over_text && !over_copy && !over_indicator ? &text_cursor : &pointer);
 }
 
 void
@@ -173,6 +210,7 @@ ChatView::_Rebuild()
 {
     ClearCopyFeedback();
     inhibit_scroll_ = true;
+    text_view_->MakeFocus(false);
     text_view_->SetText("");
     header_ranges_.clear();
     copy_ranges_.clear();
@@ -402,6 +440,7 @@ ChatView::Clear()
     model_.clear();
     header_ranges_.clear();
     copy_ranges_.clear();
+    text_view_->MakeFocus(false);
     text_view_->SetText("");
 }
 
@@ -439,6 +478,7 @@ ChatView::SetCopyFeedback(int model_idx, bool visible)
         int32 start = range.feedback_start;
         int32 selected_start, selected_end;
         text_view_->GetSelection(&selected_start, &selected_end);
+        text_view_->MakeFocus(false);
         text_view_->Delete(start, start + 3);
         const char* label = visible ? "\xe2\x9c\x93" : "   ";
         text_view_->Insert(start, label, 3);
@@ -503,6 +543,32 @@ ChatView::FindBlockAt(int32 offset) const
             return h.model_idx;
     }
     return -1;
+}
+
+bool
+ChatView::IsIndicatorAt(BPoint where) const
+{
+    for (const auto& h : header_ranges_) {
+        int32 end = h.end;
+        if (end > h.start && text_view_->ByteAt(end - 1) == '\n')
+            --end;
+        int32 start = end - 3;
+        if (start < h.start || text_view_->ByteAt(start) != 0xe2
+            || text_view_->ByteAt(start + 1) != 0x96
+            || (text_view_->ByteAt(start + 2) != 0xb6
+                && text_view_->ByteAt(start + 2) != 0xbc))
+            continue;
+
+        float height;
+        BPoint origin = text_view_->PointAt(start, &height);
+        BFont font;
+        text_view_->GetFontAndColor(start, &font);
+        char indicator[] = {char(0xe2), char(0x96), char(text_view_->ByteAt(start + 2)), 0};
+        if (where.x >= origin.x && where.x < origin.x + font.StringWidth(indicator)
+            && where.y >= origin.y && where.y < origin.y + height)
+            return true;
+    }
+    return false;
 }
 
 void
