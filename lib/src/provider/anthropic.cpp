@@ -153,7 +153,11 @@ public:
         };
 
         ParseState state;
-        std::string body_str = body.dump();
+        // replace handler: a stray invalid byte (post-truncation edge cases)
+        // degrades to U+FFFD instead of throwing type_error.316 off the
+        // runner thread.
+        std::string body_str = body.dump(-1, ' ', false,
+            nlohmann::json::error_handler_t::replace);
         bool error_occurred = false;
 
         long code = 0;

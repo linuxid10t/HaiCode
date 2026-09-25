@@ -1,6 +1,7 @@
 #include <haicode/haicode.h>
 #include <haicode/tool.h>
 #include <haicode/util.h>
+#include <haicode/compaction.h>
 #include <iostream>
 #include <fstream>
 #include <cstdio>
@@ -14,6 +15,11 @@
 //   1. util::sanitize_utf8 — byte-level validation/replacement
 //   2. ToolRegistry::execute — exceptions become failed results; output is
 //      sanitized so downstream .dump() can never throw
+//   3. util::truncate_utf8 — boundary-safe truncation (the byte-level cut
+//      that orphaned a UTF-8 lead byte and aborted the app via
+//      estimate_request_tokens → type_error.316 on the runner thread)
+//   4. Crash repro: assemble_messages + estimate_request_tokens over an
+//      old-turn tool result whose 10 KB cut lands mid-character
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << (msg) << "\n"; return false; } } while(0)
@@ -325,6 +331,116 @@ static bool registry_plan_mode_blocks_write_allows_read() {
 }
 
 // ============================================================
+// util::truncate_utf8
+// ============================================================
+
+static bool truncate_passes_short_and_exact_fit() {
+    using haicode::util::truncate_utf8;
+    CHECK(truncate_utf8("hello", 10) == "hello", "short string unchanged");
+    CHECK(truncate_utf8("hello", 5) == "hello", "exact fit unchanged");
+    CHECK(truncate_utf8("", 0).empty(), "empty stays empty");
+    CHECK(truncate_utf8("abc", 0).empty(), "zero cap yields empty");
+    // Cut exactly at a character boundary keeps the character.
+    std::string cjk = "\xe4\xb8\xad"; // 中, 3 bytes
+    CHECK(truncate_utf8("ab" + cjk, 5) == "ab" + cjk,
+          "boundary cut keeps complete character");
+    std::cout << "[OK] truncate_passes_short_and_exact_fit\n";
+    return true;
+}
+
+static bool truncate_mid_sequence_is_valid_utf8() {
+    using haicode::util::truncate_utf8;
+    using haicode::util::sanitize_utf8;
+    const std::string two   = "\xc3\xa9";        // é
+    const std::string three = "\xe4\xb8\xad";    // 中
+    const std::string four  = "\xf0\x9f\x9a\x80"; // 🚀
+    for (size_t cap = 1; cap <= 4; ++cap) {
+        std::string out = truncate_utf8("x" + two, 1 + cap);
+        CHECK(out.size() <= 1 + cap, "2-byte case respects cap");
+        CHECK(sanitize_utf8(out) == out, "2-byte case output is valid UTF-8");
+        out = truncate_utf8("x" + three, 1 + cap);
+        CHECK(out.size() <= 1 + cap, "3-byte case respects cap");
+        CHECK(sanitize_utf8(out) == out, "3-byte case output is valid UTF-8");
+        out = truncate_utf8("x" + four, 1 + cap);
+        CHECK(out.size() <= 1 + cap, "4-byte case respects cap");
+        CHECK(sanitize_utf8(out) == out, "4-byte case output is valid UTF-8");
+    }
+    // Lead byte sitting exactly at the cut: the whole sequence is dropped.
+    CHECK(truncate_utf8("a" + three, 2) == "a", "lead at cut dropped");
+    // Exhaustive-ish sweep: every cut position of a mixed string.
+    std::string mixed;
+    for (int i = 0; i < 200; ++i) mixed += "a" + two + three + four + "\n";
+    for (size_t cap = 0; cap <= mixed.size(); cap += 7) {
+        std::string out = truncate_utf8(mixed, cap);
+        CHECK(out.size() <= cap, "sweep respects cap");
+        CHECK(sanitize_utf8(out) == out, "sweep output is valid UTF-8");
+    }
+    std::cout << "[OK] truncate_mid_sequence_is_valid_utf8\n";
+    return true;
+}
+
+// ============================================================
+// Crash repro: the abort() from the Codex-provider report
+// ============================================================
+
+// Reproduces the shipped crash: assemble_messages byte-cut an old-turn tool
+// result mid-character, then estimate_request_tokens dumped it — strict
+// serializer threw type_error.316 on the runner thread → std::terminate.
+static bool crash_repro_old_tool_result_truncation() {
+    using haicode::SessionMessage;
+    // 10239 ASCII bytes, then a 3-byte 中 starting exactly at byte 10240
+    // (0-based index 10239) — the old resize(10240) orphaned its lead byte.
+    std::string big = std::string(10 * 1024 - 1, 'a')
+                    + "\xe4\xb8\xad"
+                    + std::string(600, 'b');
+
+    SessionMessage tr;
+    tr.seq = 1; tr.type = "tool_result";
+    tr.data_json = nlohmann::json{
+        {"call_id", "tc1"}, {"success", true}, {"output", big}}.dump();
+
+    SessionMessage up;
+    up.seq = 2; up.type = "user_prompted";
+    up.data_json = nlohmann::json{{"text", "next turn"}}.dump();
+
+    haicode::ContextBuilder builder;
+    auto assembled = builder.assemble_messages({tr, up});
+    CHECK(assembled.size() == 2, "two provider messages assembled");
+
+    // The truncated tool result must be valid UTF-8 with the marker intact.
+    std::string out = assembled[0]["content"][0]["content"].get<std::string>();
+    CHECK(haicode::util::sanitize_utf8(out) == out,
+          "truncated old tool result must be valid UTF-8");
+    CHECK(out.find("[truncated: 603 more bytes]") != std::string::npos,
+          "honest dropped-byte marker (603 = 3 + 600)");
+    CHECK(out.find("\xe4\xb8\xad") == std::string::npos,
+          "split character must not survive into the output");
+
+    // The exact crash frame: this used to throw type_error.316.
+    bool threw = false;
+    std::string what;
+    try {
+        haicode::estimate_request_tokens("sys", "dyn", assembled, {});
+    } catch (const std::exception& e) {
+        threw = true;
+        what = e.what();
+    }
+    CHECK(!threw, "estimate_request_tokens must not throw: " + what);
+
+    // Also serialize the way providers do — same strict default handler.
+    try {
+        auto dumped = assembled[0].dump();
+        (void)dumped;
+    } catch (const std::exception& e) {
+        threw = true;
+        what = e.what();
+    }
+    CHECK(!threw, "strict dump of assembled message must not throw: " + what);
+    std::cout << "[OK] crash_repro_old_tool_result_truncation\n";
+    return true;
+}
+
+// ============================================================
 
 int main() {
     std::cout << "=== Tool Safety Tests ===\n\n";
@@ -340,6 +456,13 @@ int main() {
     ok &= sanitize_surrogate();
     ok &= sanitize_mixed();
     ok &= sanitize_prevents_dump_throw();
+
+    std::cout << "\n-- util::truncate_utf8 --\n";
+    ok &= truncate_passes_short_and_exact_fit();
+    ok &= truncate_mid_sequence_is_valid_utf8();
+
+    std::cout << "\n-- Crash repro (abort via estimate_request_tokens) --\n";
+    ok &= crash_repro_old_tool_result_truncation();
 
     std::cout << "\n-- ToolRegistry chokepoint --\n";
     ok &= registry_catches_tool_exception();

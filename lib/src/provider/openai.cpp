@@ -499,7 +499,10 @@ public:
         TokenUsage usage;
         bool error_occurred = false;
 
-        std::string body_str = body.dump();
+        // replace handler: see anthropic.cpp — degrade, never throw, on any
+        // stray invalid UTF-8 byte.
+        std::string body_str = body.dump(-1, ' ', false,
+            nlohmann::json::error_handler_t::replace);
         long code = 0;
         std::string transport_err;
         http_.post_sse(base_url_ + "/chat/completions", headers, body_str,

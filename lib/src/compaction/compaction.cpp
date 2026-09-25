@@ -1,4 +1,5 @@
 #include <haicode/compaction.h>
+#include <haicode/util.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
@@ -27,7 +28,8 @@ int estimate_request_tokens(const std::string& system,
     // before real usage exists).
     for (const auto& td : tools)
         chars += td.name.size() + td.description.size()
-               + td.input_schema.dump().size();
+               + td.input_schema.dump(-1, ' ', false,
+                     nlohmann::json::error_handler_t::replace).size();
     for (auto& m : messages) {
         auto cit = m.find("content");
         if (cit != m.end() && cit->is_array()) {
@@ -35,10 +37,12 @@ int estimate_request_tokens(const std::string& system,
                 if (block.value("type", "") == "image")
                     chars += IMAGE_CHARS;
                 else
-                    chars += block.dump().size();
+                    chars += block.dump(-1, ' ', false,
+                               nlohmann::json::error_handler_t::replace).size();
             }
         } else {
-            chars += m.dump().size();
+            chars += m.dump(-1, ' ', false,
+                      nlohmann::json::error_handler_t::replace).size();
         }
     }
     return static_cast<int>(chars / 4);
@@ -227,8 +231,11 @@ std::string serialize_history(const std::vector<SessionMessage>& msgs,
                 bool ok = d.value("success", true);
                 std::string output = d.value("output", "");
                 if (output.size() > max_tool_output_bytes) {
-                    size_t dropped = output.size() - max_tool_output_bytes;
-                    output.resize(max_tool_output_bytes);
+                    size_t orig = output.size();
+                    output = util::truncate_utf8(output, max_tool_output_bytes);
+                    // Recompute from the actual cut: a UTF-8-safe boundary
+                    // may sit a few bytes below the cap.
+                    size_t dropped = orig - output.size();
                     output += "\n[truncated: " + std::to_string(dropped)
                             + " more bytes]";
                 }

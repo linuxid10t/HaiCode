@@ -498,8 +498,11 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 // model can see every tool it called within this agentic run.
                 if (i < last_user_prompt_idx
                         && output.size() > MAX_OLD_TOOL_RESULT) {
-                    size_t dropped = output.size() - MAX_OLD_TOOL_RESULT;
-                    output.resize(MAX_OLD_TOOL_RESULT);
+                    size_t orig = output.size();
+                    output = util::truncate_utf8(output, MAX_OLD_TOOL_RESULT);
+                    // Recompute from the actual cut: a UTF-8-safe boundary
+                    // may sit a few bytes below the cap.
+                    size_t dropped = orig - output.size();
                     output += "\n[truncated: " + std::to_string(dropped)
                             + " more bytes]";
                 }
@@ -814,9 +817,7 @@ void SessionEngine::submit_prompt(const std::string& session_id,
         session_running_[session_id] = true;
 
         runner_threads_[session_id] = std::thread([this, session_id]() {
-            agentic_loop(session_id);
-            std::lock_guard<std::mutex> g(mu_);
-            session_running_[session_id] = false;
+            runner_main(session_id);
         });
     }
 }
@@ -854,9 +855,7 @@ void SessionEngine::continue_session(const std::string& session_id) {
         interrupt_flags_[session_id] = new std::atomic<bool>(false);
         session_running_[session_id] = true;
         runner_threads_[session_id] = std::thread([this, session_id]() {
-            agentic_loop(session_id);
-            std::lock_guard<std::mutex> g(mu_);
-            session_running_[session_id] = false;
+            runner_main(session_id);
         });
     }
 }
@@ -892,9 +891,7 @@ void SessionEngine::retry_last_turn(const std::string& session_id) {
     interrupt_flags_[session_id] = new std::atomic<bool>(false);
     session_running_[session_id] = true;
     runner_threads_[session_id] = std::thread([this, session_id]() {
-        agentic_loop(session_id);
-        std::lock_guard<std::mutex> g(mu_);
-        session_running_[session_id] = false;
+        runner_main(session_id);
     });
 }
 
@@ -1006,6 +1003,33 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
     if (config_.default_mode == "plan") return SessionMode::Plan;
     if (config_.default_mode == "chat") return SessionMode::Chat;
     return SessionMode::Build;
+}
+
+void SessionEngine::runner_main(const std::string& session_id) {
+    try {
+        agentic_loop(session_id);
+    } catch (const std::exception& e) {
+        // Exception barrier: anything escaping the loop (e.g. nlohmann
+        // type_error.316 on invalid UTF-8) must surface as a failed step,
+        // not propagate out of the thread and abort the whole app.
+        fprintf(stderr, "[engine] internal error in agentic loop: %s\n",
+                e.what());
+        fflush(stderr);
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["error"] = std::string("internal error: ") + e.what();
+        bus_.publish(events::EventType::StepFailed, ev);
+    } catch (...) {
+        fprintf(stderr, "[engine] internal error in agentic loop "
+                        "(unknown exception)\n");
+        fflush(stderr);
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["error"] = "internal error: unknown exception";
+        bus_.publish(events::EventType::StepFailed, ev);
+    }
+    std::lock_guard<std::mutex> g(mu_);
+    session_running_[session_id] = false;
 }
 
 void SessionEngine::agentic_loop(const std::string& session_id) {
@@ -1724,11 +1748,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     std::array<char, 4096> buf;
                     while (fgets(buf.data(), buf.size(), bp)) {
                         build_out += buf.data();
-                        if (build_out.size() >= 100 * 1024) {
-                            build_out.resize(100 * 1024);
-                            build_out += "\n[output truncated]";
-                            break;
-                        }
+                        if (build_out.size() >= 100 * 1024) break;
+                    }
+                    // Raw process output bypassed ToolRegistry::execute's
+                    // sanitize (it is appended to result.output afterwards),
+                    // and a byte-level clamp could split a UTF-8 sequence —
+                    // the exact crash class this guards against.
+                    constexpr size_t MAX_BUILD_OUT = 100 * 1024;
+                    build_out = util::sanitize_utf8(build_out);
+                    if (build_out.size() > MAX_BUILD_OUT) {
+                        build_out = util::truncate_utf8(build_out, MAX_BUILD_OUT);
+                        build_out += "\n[output truncated]";
                     }
                     int brc = pclose(bp);
                     int bec = WIFEXITED(brc) ? WEXITSTATUS(brc) : -1;
@@ -2516,7 +2546,8 @@ void SessionEngine::backfill_attachment_descriptions(
             if (!desc.empty()) {
                 // Clamp persisted descriptions so one verbose image can't
                 // bloat every future request.
-                if (desc.size() > 4096) desc.resize(4096);
+                if (desc.size() > 4096)
+                    desc = util::truncate_utf8(desc, 4096);
                 att["description"] = desc;
                 changed = true;
             }
@@ -2589,29 +2620,50 @@ void SessionEngine::compact_now(const std::string& session_id) {
     session_running_[session_id] = true;
     runner_threads_[session_id] = std::thread(
         [this, session_id, provider, model_id, provider_id]() {
-            // Mint and register this worker's own stream token so interrupt()
-            // resolves this session (and only this session) — the empty
-            // default would instead sweep every session's stream on the
-            // shared provider. Same contract as agentic_loop.
-            std::string run_token;
-            {
-                std::lock_guard<std::mutex> g(mu_);
-                run_token = "s:" + session_id + ":r" + std::to_string(next_run_seq_++);
-                session_stream_tokens_[session_id] = run_token;
-            }
-            // Sentinel threshold of 0 — compact_history only echoes it in the
-            // CompactionStarted payload, not in the decision logic.
-            bool committed = compact_history(session_id, *provider, model_id,
-                                             provider_id, nullptr, 0, 0, run_token);
-            if (!committed) {
-                // Manual compactions must not fail silently: the user pressed
-                // a button. Explain why nothing changed.
-                auto cp = store_.latest_complete_checkpoint(session_id);
+            // Exception barrier, same contract as runner_main: a throw out
+            // of compact_history must surface as CompactionEnded, never
+            // escape the thread (std::terminate → abort).
+            try {
+                // Mint and register this worker's own stream token so interrupt()
+                // resolves this session (and only this session) — the empty
+                // default would instead sweep every session's stream on the
+                // shared provider. Same contract as agentic_loop.
+                std::string run_token;
+                {
+                    std::lock_guard<std::mutex> g(mu_);
+                    run_token = "s:" + session_id + ":r" + std::to_string(next_run_seq_++);
+                    session_stream_tokens_[session_id] = run_token;
+                }
+                // Sentinel threshold of 0 — compact_history only echoes it in the
+                // CompactionStarted payload, not in the decision logic.
+                bool committed = compact_history(session_id, *provider, model_id,
+                                                 provider_id, nullptr, 0, 0, run_token);
+                if (!committed) {
+                    // Manual compactions must not fail silently: the user pressed
+                    // a button. Explain why nothing changed.
+                    auto cp = store_.latest_complete_checkpoint(session_id);
+                    nlohmann::json ev;
+                    ev["session_id"] = session_id;
+                    ev["status"]     = "skipped";
+                    ev["messages_before"] = store_.load_messages(session_id).size();
+                    ev["messages_after"]  = ev["messages_before"];
+                    bus_.publish(events::EventType::CompactionEnded, ev);
+                }
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[engine] internal error in compact worker: %s\n",
+                        e.what());
+                fflush(stderr);
                 nlohmann::json ev;
                 ev["session_id"] = session_id;
-                ev["status"]     = "skipped";
-                ev["messages_before"] = store_.load_messages(session_id).size();
-                ev["messages_after"]  = ev["messages_before"];
+                ev["error"] = std::string("internal error: ") + e.what();
+                bus_.publish(events::EventType::CompactionEnded, ev);
+            } catch (...) {
+                fprintf(stderr, "[engine] internal error in compact worker "
+                                "(unknown exception)\n");
+                fflush(stderr);
+                nlohmann::json ev;
+                ev["session_id"] = session_id;
+                ev["error"] = "internal error: unknown exception";
                 bus_.publish(events::EventType::CompactionEnded, ev);
             }
             std::unique_lock<std::mutex> g(mu_);

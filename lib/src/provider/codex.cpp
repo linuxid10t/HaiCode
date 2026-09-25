@@ -236,7 +236,10 @@ public:
             body["parallel_tool_calls"] = true;
         }
 
-        const std::string body_str = body.dump();
+        // replace handler: see anthropic.cpp — degrade, never throw, on any
+        // stray invalid UTF-8 byte.
+        const std::string body_str = body.dump(-1, ' ', false,
+            nlohmann::json::error_handler_t::replace);
 
         // ---- SSE parse state (reset per attempt) ----
         struct ToolCallState {

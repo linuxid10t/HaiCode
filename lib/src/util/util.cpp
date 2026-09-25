@@ -141,6 +141,30 @@ std::string sanitize_utf8(const std::string& s) {
     return out;
 }
 
+std::string truncate_utf8(const std::string& s, size_t max_bytes) {
+    if (s.size() <= max_bytes) return s;
+    // Walk back over continuation bytes to the lead byte of the sequence
+    // straddling the cut (at most 3: a 4-byte sequence has 3 continuations).
+    size_t end = max_bytes;
+    size_t back = 0;
+    while (back < 3 && end >= back + 1
+            && ((uint8_t)s[end - 1 - back] & 0xC0) == 0x80) {
+        ++back;
+    }
+    if (end >= back + 1) {
+        uint8_t lead = (uint8_t)s[end - 1 - back];
+        size_t seq_len = (lead & 0xE0) == 0xC0 ? 2
+                       : (lead & 0xF0) == 0xE0 ? 3
+                       : (lead & 0xF8) == 0xF0 ? 4 : 1;
+        // The sequence is complete within the prefix only if every byte of
+        // it precedes the cut (seq_len <= back + 1); otherwise trim down to
+        // the lead position so no orphaned byte of it is kept.
+        if (seq_len > back + 1)
+            end -= back + 1;
+    }
+    return s.substr(0, end);
+}
+
 std::string atomic_write_file(const std::string& path, const std::string& content) {
     // Remember the target's permission bits so replacement preserves them
     // (an 0755 script keeps its execute bits). 0 = target doesn't exist yet.

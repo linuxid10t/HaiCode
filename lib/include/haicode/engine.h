@@ -136,6 +136,14 @@ public:
 private:
     void agentic_loop(const std::string& session_id);
 
+    // Entry point for the std::thread runners spawned by submit_prompt /
+    // continue_session / retry_last_turn: agentic_loop plus an exception
+    // barrier. An exception escaping the loop must never propagate out of
+    // the thread (std::terminate → abort — the crash this guards against);
+    // it is logged and surfaced to the UI as a failed step instead, and the
+    // running flag is always cleared.
+    void runner_main(const std::string& session_id);
+
     // Load the provider-facing message list through the single checkpoint-
     // aware path: full stored history, then — if a completed checkpoint
     // exists — sliced to seq > through_seq with the rendered checkpoint

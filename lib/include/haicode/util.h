@@ -27,6 +27,13 @@ std::string base64_decode(const std::string& in);
 // is embedded in JSON — nlohmann's strict serializer throws otherwise.
 std::string sanitize_utf8(const std::string& s);
 
+// Longest prefix of s not exceeding max_bytes bytes that does not split a
+// UTF-8 sequence: a cut would otherwise orphan a lead byte and make every
+// downstream .dump() throw (type_error.316). Returns s unchanged when it
+// already fits. Input is assumed valid UTF-8; use sanitize_utf8 first on
+// external content.
+std::string truncate_utf8(const std::string& s, size_t max_bytes);
+
 // Atomically replace `path` with `content`: the temp file is created via
 // mkstemp (O_CREAT|O_EXCL — it can never clobber a pre-existing sibling),
 // inherits the target's previous permission bits when the target existed
