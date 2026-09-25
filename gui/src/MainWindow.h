@@ -3,6 +3,7 @@
 #include <Window.h>
 #include <ListView.h>
 #include <MenuBar.h>
+#include <MenuItem.h>
 #include <ScrollView.h>
 #include <Button.h>
 #include <MenuField.h>
@@ -193,6 +194,7 @@ private:
     BMenuField*    provider_field_  = nullptr;
     BPopUpMenu*    provider_menu_   = nullptr;
     BMenuBar*      menu_bar_        = nullptr;
+    BMenuItem*     offline_item_    = nullptr;
     BStringView*   status_strip_    = nullptr;
 
     // Todos side panel

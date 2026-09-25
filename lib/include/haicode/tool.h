@@ -104,6 +104,10 @@ private:
 // execution (ToolRegistry::execute_impl) — so the two can never diverge.
 bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode);
 
+void set_offline_mode(bool offline);
+bool offline_mode();
+bool tool_available(const std::string& tool_name, SessionMode mode);
+
 // Classify a complete git invocation (subcommand + args) as read-only or not.
 // Fail-closed: anything that could mutate the repo or write a file (branch
 // with a positional arg, `stash pop/clear`, `git tag v1`, `--output=...`)

@@ -1,5 +1,6 @@
 #include <haicode/tool.h>
 #include <haicode/util.h>
+#include <atomic>
 #include <climits>
 #include <fnmatch.h>
 #include <cstdlib>
@@ -225,6 +226,23 @@ bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode) {
     return true;
 }
 
+// ---- tool availability ----
+
+static std::atomic<bool> sOfflineMode{false};
+
+void set_offline_mode(bool offline) {
+    sOfflineMode.store(offline);
+}
+
+bool offline_mode() {
+    return sOfflineMode.load();
+}
+
+bool tool_available(const std::string& tool_name, SessionMode mode) {
+    return tool_allowed_in_mode(tool_name, mode)
+        && !(offline_mode() && (tool_name == "web_search" || tool_name == "web_extract"));
+}
+
 // ---- git_invocation_is_readonly ----
 //
 // True only for invocations that provably cannot mutate the repo or write
@@ -360,6 +378,8 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
                 + " mode";
         return r;
     }
+    if (!tool_available(name, ctx.mode))
+        return {false, "", "[offline mode] tool '" + name + "' is unavailable while offline"};
 
     // Read-only tools inside the working directory are always allowed — no
     // prompt, no rule lookup. The user has implicitly trusted the project

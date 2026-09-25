@@ -13,6 +13,7 @@
 #include <ScrollView.h>
 #include <Button.h>
 #include <MenuBar.h>
+#include <Menu.h>
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
@@ -43,6 +44,7 @@
 #include <haicode/default_prompt.h>
 #include <haicode/model_info.h>
 #include <haicode/skills.h>
+#include <haicode/tool.h>
 
 #include <nlohmann/json.hpp>
 
@@ -265,6 +267,15 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 {
     // ---- Menu bar ----
     menu_bar_ = new BMenuBar("menu_bar");
+    BMenu* file_menu = new BMenu("File");
+    file_menu->AddItem(new BMenuItem("New Session", new BMessage(MSG_NEW_SESSION)));
+    file_menu->AddItem(new BMenu("Cleanup"));
+    offline_item_ = new BMenuItem("Offline Mode", new BMessage(MSG_OFFLINE_MODE));
+    file_menu->AddItem(offline_item_);
+    file_menu->AddSeparatorItem();
+    file_menu->AddItem(new BMenuItem("Quit", new BMessage(B_QUIT_REQUESTED), 'Q'));
+    file_menu->SetTargetForItems(this);
+    menu_bar_->AddItem(file_menu);
     BMenu* settings_menu = new BMenu("Settings");
     settings_menu->AddItem(new BMenuItem("Preferences" B_UTF8_ELLIPSIS,
                                          new BMessage(MSG_SHOW_SETTINGS), ','));
@@ -632,6 +643,10 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_NEW_SESSION:
             _NewSession();
+            break;
+        case MSG_OFFLINE_MODE:
+            haicode::set_offline_mode(!haicode::offline_mode());
+            offline_item_->SetMarked(haicode::offline_mode());
             break;
         case MSG_CHOOSE_DIR: {
             if (!dir_panel_) {

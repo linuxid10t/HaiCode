@@ -2,11 +2,16 @@
 #include <haicode/tool.h>
 #include <haicode/util.h>
 #include <haicode/compaction.h>
+#include <haicode/engine.h>
+#include <haicode/db.h>
 #include <iostream>
 #include <fstream>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <stdexcept>
+#include <thread>
+#include <chrono>
 #include <nlohmann/json.hpp>
 
 // Regression tests for the crash where invalid UTF-8 in tool output made
@@ -302,6 +307,202 @@ static bool registry_chat_mode_blocks_tools() {
     return true;
 }
 
+static bool registry_offline_mode_restricts_web_tools_only() {
+    using haicode::tool_available;
+    using haicode::set_offline_mode;
+
+    // Process-wide flag: start from a known online state whatever earlier
+    // tests did, and restore it on every exit path below.
+    set_offline_mode(false);
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+
+    // ---- Online: web tools available in every mode that allows them ----
+    CHECK(tool_available("web_search", haicode::SessionMode::Build), "online Build allows web_search");
+    CHECK(tool_available("web_search", haicode::SessionMode::Plan),  "online Plan allows web_search");
+    CHECK(tool_available("web_extract", haicode::SessionMode::Chat), "online Chat allows web_extract");
+    CHECK(tool_available("write", haicode::SessionMode::Build),      "online Build allows write");
+
+    // ---- Offline: web tools hidden, local tools and mode rules intact ----
+    set_offline_mode(true);
+    for (auto m : {haicode::SessionMode::Build, haicode::SessionMode::Plan,
+                   haicode::SessionMode::Chat}) {
+        CHECK(!tool_available("web_search", m),  "offline must hide web_search");
+        CHECK(!tool_available("web_extract", m), "offline must hide web_extract");
+    }
+    CHECK(tool_available("write", haicode::SessionMode::Build), "offline Build still allows write");
+    CHECK(tool_available("read", haicode::SessionMode::Plan),   "offline Plan still allows read");
+    CHECK(!tool_available("write", haicode::SessionMode::Plan), "offline Plan keeps blocking write");
+    CHECK(!tool_available("read", haicode::SessionMode::Chat),  "offline Chat keeps blocking read");
+
+    // Direct registry execution: a valid web_search call must be refused
+    // BEFORE execution (no network I/O) as a failed result, not a denial,
+    // so a provider returning a hidden call can't reach the network and the
+    // model can recover.
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+    ctx.mode = haicode::SessionMode::Build;
+    auto ws = reg.execute("web_search", {{"query", "x"}, {"max_results", 1}},
+                          ctx, gate);
+    CHECK(!ws.success, "offline web_search must fail");
+    CHECK(!ws.denied,  "offline refusal is not a permission denial");
+    CHECK(ws.error.find("[offline mode]") != std::string::npos,
+          "error should name offline mode, got: " + ws.error);
+    auto we = reg.execute("web_extract", {{"url", "https://example.com/"}},
+                          ctx, gate);
+    CHECK(!we.success && we.error.find("[offline mode]") != std::string::npos,
+          "offline web_extract must fail with the offline marker");
+
+    // Local tools still execute offline (read inside the working dir takes
+    // the always-allow path, which must sit after the offline check).
+    const std::string rp = "/tmp/tts_offline_read.txt";
+    std::remove(rp.c_str());
+    { std::ofstream wf(rp); wf << "data\n"; }
+    auto rd = reg.execute("read", {{"path", rp}}, ctx, gate);
+    CHECK(rd.success, "offline read must still work: " + rd.error);
+    std::remove(rp.c_str());
+
+    // ---- Back online: web availability restored, mode rules unchanged ----
+    set_offline_mode(false);
+    CHECK(tool_available("web_search", haicode::SessionMode::Build),
+          "web_search availability must return after going back online");
+    CHECK(!tool_available("write", haicode::SessionMode::Chat),
+          "mode restrictions must survive an offline/online cycle");
+
+    set_offline_mode(false);  // leave the global state online for other tests
+    std::cout << "[OK] registry offline mode restricts web tools only\n";
+    return true;
+}
+
+// ============================================================
+// Engine e2e: offline note rides system_dynamic, not the cached body
+// ============================================================
+
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+
+class OfflineE2EProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "fake"; }
+    void cancel(const std::string& = "") override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"fake-model"};
+    }
+    int get_model_context(const std::string&) const override { return 0; }
+    void stream(const haicode::LLMRequest& req,
+                haicode::StreamCallbacks cb, const std::string& = "") override {
+        ++calls;
+        last_system = req.system;
+        last_dynamic = req.system_dynamic;
+        has_web_tools = false;
+        for (const auto& t : req.tools)
+            if (t.name == "web_search" || t.name == "web_extract")
+                has_web_tools = true;
+        cb.on_text_delta("t", "ok");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    int calls = 0;
+    std::string last_system;
+    std::string last_dynamic;
+    bool has_web_tools = false;
+};
+
+static void rm_rf_dir(const std::string& path) {
+    DIR* d = opendir(path.c_str());
+    if (d) {
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+            std::string child = path + "/" + ent->d_name;
+            struct stat st;
+            if (lstat(child.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+                rm_rf_dir(child);
+            else
+                ::unlink(child.c_str());
+        }
+        closedir(d);
+    }
+    ::rmdir(path.c_str());
+}
+
+static bool engine_offline_note_rides_dynamic_block() {
+    using haicode::set_offline_mode;
+    char buf[] = "/tmp/hc_tts_offline_e2e_XXXXXX";
+    if (!mkdtemp(buf)) { CHECK(false, "mkdtemp"); return false; }
+    std::string tmp = buf;
+    set_offline_mode(false);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<OfflineE2EProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "fake-model";
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(tmp, "build",
+                                                "fake-model", "fake");
+
+        auto turn = [&](int want_calls) {
+            for (int i = 0; i < 200; ++i) {
+                if (provider->calls >= want_calls && !engine.is_running(sid))
+                    return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+            return false;
+        };
+
+        // Online: no note anywhere, web tools on the wire.
+        engine.submit_prompt(sid, "hello");
+        CHECK(turn(1), "first turn completes");
+        CHECK(provider->last_dynamic.find("Offline mode") == std::string::npos,
+              "online: dynamic block must not mention offline mode");
+        CHECK(provider->last_system.find("Offline mode") == std::string::npos,
+              "online: stable system prompt must not mention offline mode");
+        CHECK(provider->has_web_tools, "online: web tools must be on the wire");
+
+        // Offline: note in system_dynamic only; web tools filtered.
+        set_offline_mode(true);
+        engine.submit_prompt(sid, "hello again");
+        CHECK(turn(2), "offline turn completes");
+        CHECK(provider->last_dynamic.find("# Offline mode") != std::string::npos,
+              "offline: dynamic block must carry the offline note");
+        CHECK(provider->last_dynamic.find("web_search") != std::string::npos,
+              "offline note should name the unavailable tools");
+        CHECK(provider->last_system.find("Offline mode") == std::string::npos,
+              "offline: cached stable body must stay byte-stable");
+        CHECK(!provider->has_web_tools, "offline: web tools must be filtered");
+
+        // Back online: note gone, web tools restored.
+        set_offline_mode(false);
+        engine.submit_prompt(sid, "hello once more");
+        CHECK(turn(3), "return-to-online turn completes");
+        CHECK(provider->last_dynamic.find("Offline mode") == std::string::npos,
+              "back online: note must disappear");
+        CHECK(provider->has_web_tools,
+              "back online: web tools must return to the wire");
+    }  // ~SessionEngine joins the loop threads
+
+    set_offline_mode(false);
+    rm_rf_dir(tmp);
+    std::cout << "[OK] engine offline note rides system_dynamic only\n";
+    return true;
+}
+
 static bool registry_plan_mode_blocks_write_allows_read() {
     haicode::ToolRegistry reg;
     haicode::register_builtin_tools(reg);
@@ -473,6 +674,8 @@ int main() {
     ok &= registry_ask_callback_allow_executes();
     ok &= registry_explicit_deny_still_denied();
     ok &= registry_chat_mode_blocks_tools();
+    ok &= registry_offline_mode_restricts_web_tools_only();
+    ok &= engine_offline_note_rides_dynamic_block();
     ok &= registry_plan_mode_blocks_write_allows_read();
 
     if (ok) {

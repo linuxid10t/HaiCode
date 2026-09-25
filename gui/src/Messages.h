@@ -23,6 +23,7 @@ static const uint32 MSG_SUBMIT_PROMPT  = 'PMpt';
 static const uint32 MSG_INTERRUPT      = 'INTr';
 static const uint32 MSG_COMPACT_NOW    = 'CMnw';  // Compact button pressed
 static const uint32 MSG_NEW_SESSION    = 'NSes';
+static const uint32 MSG_OFFLINE_MODE   = 'OFmd';
 static const uint32 MSG_SELECT_SESSION = 'SLss';
 static const uint32 MSG_PERMISSION_REP = 'PRrp';  // reply from PermissionWindow
 static const uint32 MSG_MODE_SELECTED   = 'MDmd';  // mode menu item; "mode" string ("build"/"plan"/"chat")

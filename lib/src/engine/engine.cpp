@@ -1420,6 +1420,18 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             system_dynamic += render_todos_block(todos_now);
         }
 
+        // Offline note: the tool list is filtered above, but the model is not
+        // told why. State it explicitly so it doesn't hallucinate web lookups.
+        // Re-checked every step in the dynamic tail, so a mid-turn toggle
+        // reaches the very next request without touching the cached body.
+        if (offline_mode()) {
+            system_dynamic += "\n\n# Offline mode\n\n"
+                "Offline mode is enabled: the web_search and web_extract tools "
+                "are unavailable. Do not attempt web lookups or claim their "
+                "results — answer from local files, project context, and your "
+                "own knowledge.\n";
+        }
+
         auto messages = load_context_messages(session_id);
 
         // Vision fallback: when the primary is text-only and a fallback is
@@ -1432,16 +1444,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
-        // Filter tools by mode via the shared allowlist (tool_allowed_in_mode,
-        // also enforced at execution time in ToolRegistry::execute_impl, so
-        // the wire list and the execution check can never diverge). Plan and
-        // Chat are fail-closed: anything not explicitly safe for that mode is
-        // hidden, so future tools don't silently leak into restricted turns.
-        // Build mode has no filter. (Chat = conversation + web research only;
-        // todo_write touches only app-internal session state and ask_user
-        // only round-trips to the UI.)
+        // Filter tools by mode and current offline state at every step. The
+        // registry applies the same predicate when a returned call executes.
         std::erase_if(tool_defs, [&](const ToolDefinition& td) {
-            return !tool_allowed_in_mode(td.name, mode);
+            return !tool_available(td.name, mode);
         });
         // Vision gate: the screenshot tool returns an image the model must be
         // able to see. Hide it from text-only models unless a vision fallback
