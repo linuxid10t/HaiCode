@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <memory>
@@ -32,6 +33,7 @@
 #include <thread>
 #include <cstdio>
 #include <sys/stat.h>
+#include <system_error>
 
 #include <unistd.h>
 
@@ -116,19 +118,30 @@ HaiCodeApp::ReadyToRun()
 {
     // --- 1. Locate settings directory for DB ---
     BPath settings_path;
-    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) != B_OK) {
-        settings_path.SetTo("/boot/home/config/settings");
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path, true) != B_OK) {
+        BAlert* alert = new BAlert("Error", "Failed to locate the settings directory.", "Quit");
+        alert->Go();
+        Quit();
+        return;
     }
     settings_path.Append("haicode");
 
-    // Create directory if needed
-    BDirectory dir;
-    if (dir.SetTo(settings_path.Path()) != B_OK) {
-        create_directory(settings_path.Path(), 0755);
+    std::error_code dir_error;
+    std::filesystem::create_directories(settings_path.Path(), dir_error);
+    if (dir_error) {
+        BString err("Failed to create settings directory:\n");
+        err << settings_path.Path() << "\n" << dir_error.message().c_str();
+        BAlert* alert = new BAlert("Error", err.String(), "Quit");
+        alert->Go();
+        Quit();
+        return;
     }
 
     BPath db_path(settings_path);
     db_path.Append("sessions.db");
+
+    // Project plans are optional for read-only projects.
+    std::filesystem::create_directories(project_dir_ + "/.haicode/plans", dir_error);
 
     // --- 2. Open database & run migrations ---
     try {
