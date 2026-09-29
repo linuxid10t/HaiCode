@@ -324,7 +324,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         inf_effort_menu_->AddItem(it);
         if (lbl[0] == 'D') it->SetMarked(true);
     }
-    inf_effort_field_ = new BMenuField("effort_field", "Reasoning:", inf_effort_menu_);
+    inf_effort_field_ = new BMenuField("effort_field", "", inf_effort_menu_);
 
     // Mode selector — Build (full access), Plan (read-only + propose_plan),
     // Chat (conversation + web research only, zero local computer access).
@@ -344,7 +344,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         mode_menu_->AddItem(new BMenuItem(item.label, mode_msg));
     }
     if (BMenuItem* it = mode_menu_->ItemAt(0)) it->SetMarked(true);
-    mode_field_ = new BMenuField("mode_field", "Mode:", mode_menu_);
+    mode_field_ = new BMenuField("mode_field", "", mode_menu_);
 
     auto_edits_chk_ = new BCheckBox("auto_edits", "Auto-allow edits",
                                     new BMessage(MSG_AUTO_ALLOW_EDITS));
@@ -370,8 +370,6 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     input_view_ = new InputTextView("input_view");
     BScrollView* input_scroll = new BScrollView("input_scroll", input_view_,
                                                 0, false, true, B_FANCY_BORDER);
-    input_scroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 70));
-    input_scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
 
     send_btn_ = new BButton("send", "Send \xe2\x96\xb6", new BMessage(MSG_SUBMIT_PROMPT));
     send_btn_->MakeDefault(false);
@@ -415,12 +413,27 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .AddGlue()
     .End();
 
-    // Input group (attach "+" + text + send button)
+    // Input group (selectors above attach "+" and Send, beside the text box)
+    BGroupView* left_controls = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(left_controls)
+        .Add(mode_field_)
+        .Add(attach_btn_)
+    .End();
+    BGroupView* right_controls = new BGroupView(B_VERTICAL, B_USE_SMALL_SPACING);
+    BLayoutBuilder::Group<>(right_controls)
+        .Add(inf_effort_field_)
+        .Add(send_btn_)
+    .End();
+    float input_height = std::max(left_controls->PreferredSize().height,
+                                  right_controls->PreferredSize().height);
+    input_scroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, input_height));
+    input_scroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, input_height));
+
     BGroupView* input_group = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
     BLayoutBuilder::Group<>(input_group)
-        .Add(attach_btn_)
+        .Add(left_controls, 0.f)
         .Add(input_scroll)
-        .Add(send_btn_)
+        .Add(right_controls, 0.f)
     .End();
 
     auto* transcript_label = new BStringView("transcript_label", "Conversation");
@@ -530,8 +543,6 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                         .Add(auto_edits_chk_)
                         .Add(yolo_chk_)
                         .Add(read_everywhere_chk_)
-                        .Add(inf_effort_field_, 0.f)
-                        .Add(mode_field_, 0.f)
                     .End()
                     .Add(input_group)
                 .End()
