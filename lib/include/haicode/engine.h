@@ -15,6 +15,8 @@
 
 namespace haicode {
 
+class PermissionRequestBroker;
+
 namespace detail {
 std::pair<int, std::string> run_build_hook(const std::string& command,
                                            const std::string& directory,
@@ -138,6 +140,13 @@ public:
     void cancel_pending_asks();
     void cancel_pending_asks(const std::string& session_id);
 
+    // Route unresolved permission Asks through a broker instead of the plain
+    // gate callback. The broker owns the wait state cancellably: interrupt()
+    // denies that session's pending approvals, shutdown() denies all, and a
+    // new run re-arms submissions. Passing nullptr detaches (the gate's own
+    // ask callback is used again). The broker must outlive the engine.
+    void set_permission_broker(PermissionRequestBroker* broker);
+
     const AppConfig& config() const { return config_; }
 
     // Read-only access to the provider registry (used by the UI to look up
@@ -217,6 +226,7 @@ private:
     PermissionGate& permissions_;
     SessionEventBus& bus_;
     AppConfig config_;
+    PermissionRequestBroker* perm_broker_ = nullptr;
 
     std::map<std::string, std::thread> runner_threads_;
     std::map<std::string, std::atomic<bool>*> interrupt_flags_;

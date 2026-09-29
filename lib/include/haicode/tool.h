@@ -17,6 +17,7 @@ struct ToolContext {
     std::string agent_id;
     std::string assistant_message_id;
     std::string call_id;
+    std::string tool_name;
     std::string working_dir;
     // Read-only view of the merged AppConfig. Set by SessionEngine before tool
     // execution; tools that need configurable behaviour (e.g. web_search)
@@ -27,6 +28,10 @@ struct ToolContext {
     // the wire request can never be executed by a provider that returns it
     // anyway. Defaults to Build so direct-call test sites keep full access.
     SessionMode mode = SessionMode::Build;
+    // Run-interruption flag owned by the engine's runner. When an approval
+    // wait resolves, execute_impl re-checks this: an interrupt that landed
+    // while the user was deciding must stop the call before it executes.
+    const std::atomic<bool>* interrupt = nullptr;
 };
 
 struct ToolResult {
@@ -54,8 +59,31 @@ public:
     virtual ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) = 0;
 };
 
+struct AuthorizationDecision {
+    PermissionEffect effect = PermissionEffect::Ask;
+    std::string reason;
+    std::string source;
+    int rule_index = -1;
+    bool blocked = false;
+};
+
+struct PermissionSnapshot {
+    std::vector<PermissionRule> configured;
+    std::vector<PermissionRule> session;
+    std::vector<PermissionRule> temporary_patterns;
+    std::vector<PermissionRule> temporary_exact;
+};
+
 class PermissionGate {
 public:
+    AuthorizationDecision evaluate(const std::string& session_id,
+        const std::string& action, const std::string& resource) const;
+    PermissionSnapshot snapshot(const std::string& session_id) const;
+    void add_exact_allow(const std::string& session_id,
+        const std::string& action, const std::string& resource);
+    bool revoke_exact_allow(const std::string& session_id,
+        const std::string& action, const std::string& resource);
+    void revoke_temporary_allows(const std::string& session_id);
     // session_id is the id of the session the check runs for ("" = unscoped,
     // used by tests and legacy callers).
     using AskCallback = std::function<PermissionEffect(
@@ -73,13 +101,28 @@ public:
     void add_allow(const std::string& session_id,
                    const std::string& action,
                    const std::string& resource);
+    // Context-aware ask: receives everything an approval UI needs (tool
+    // identity, call id, working dir). Used in preference to AskCallback
+    // when set; check_tool() routes through it.
+    using AskCallbackEx = std::function<PermissionEffect(const ToolContext&,
+        const std::string& tool_name, const std::string& action,
+        const std::string& resource, const nlohmann::json& input)>;
+
     void set_ask_callback(AskCallback cb);
+    void set_ask_callback_ex(AskCallbackEx cb);
 
     PermissionEffect check(const std::string& action, const std::string& resource,
                            const nlohmann::json& input = nlohmann::json::object());
     PermissionEffect check(const std::string& session_id,
                            const std::string& action, const std::string& resource,
                            const nlohmann::json& input);
+    // Context-aware check used by ToolRegistry::execute_impl: same rule
+    // layers as check(), but an unresolved Ask routes through AskCallbackEx
+    // (which receives tool identity, call id, and working dir).
+    PermissionEffect check_tool(const ToolContext& ctx,
+                                const std::string& action,
+                                const std::string& resource,
+                                const nlohmann::json& input);
 
 private:
     PermissionEffect match_rules(const std::vector<PermissionRule>& rules,
@@ -95,7 +138,9 @@ private:
     // Allow-Always grants per session, kept separate so replacing a session's
     // rules never wipes its accumulated grants.
     std::map<std::string, std::vector<PermissionRule>> session_allows_;
+    std::map<std::string, std::vector<PermissionRule>> exact_allows_;
     AskCallback ask_cb_;
+    AskCallbackEx ask_cb_ex_;
 };
 
 // Single source of truth for per-mode tool allowlists. Build mode allows
@@ -128,6 +173,8 @@ public:
     void register_tool(std::shared_ptr<Tool> tool);
     std::vector<ToolDefinition> definitions() const;
     std::shared_ptr<Tool> get(const std::string& name) const;
+    AuthorizationDecision evaluate(const std::string& name, const nlohmann::json& input,
+        const ToolContext& ctx, const PermissionGate& gate) const;
     // Executes a tool, converting any exception thrown by the tool into a
     // failed ToolResult and sanitizing output/error to valid UTF-8 — so a
     // misbehaving tool can never crash the engine.

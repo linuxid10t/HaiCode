@@ -25,6 +25,8 @@
 #include <cerrno>
 #include <cstring>
 
+#include <haicode/permission_requests.h>
+
 namespace haicode {
 
 std::pair<int, std::string> detail::run_build_hook(const std::string& command,
@@ -660,8 +662,12 @@ void SessionEngine::shutdown() {
     }
 
     // 2. Release the ask waits and cancel in-flight HTTP requests (no locks
-    // held — cancel can block on network teardown).
+    // held — cancel can block on network teardown). Permission waits are
+    // released the same way BEFORE the join below: a worker parked on an
+    // approval cannot be joined out, and shutdown must not hang on one.
     cancel_pending_asks();
+    if (perm_broker_)
+        perm_broker_->cancel_all("engine shutdown");
     for (auto& provider : providers)
         provider->cancel();
 
@@ -972,6 +978,32 @@ void SessionEngine::retry_last_turn(const std::string& session_id) {
     });
 }
 
+void SessionEngine::set_permission_broker(PermissionRequestBroker* broker) {
+    perm_broker_ = broker;
+    if (broker) {
+        // Route unresolved gate Asks through the broker so they carry full
+        // context and become cancellable. The gate outlives any single
+        // engine instance (GUI recreates engines against the same gate), so
+        // reinstalling on each engine is safe.
+        permissions_.set_ask_callback_ex(
+            [broker](const ToolContext& ctx, const std::string& tool_name,
+                     const std::string& action, const std::string& resource,
+                     const nlohmann::json& input) -> PermissionEffect {
+                PermissionRequest req;
+                req.session_id = ctx.session_id;
+                req.call_id = ctx.call_id;
+                req.tool_name = tool_name;
+                req.action = action;
+                req.resource = resource;
+                req.working_dir = ctx.working_dir;
+                req.input = input;
+                return broker->submit(std::move(req)).effect;
+            });
+    } else {
+        permissions_.set_ask_callback_ex(PermissionGate::AskCallbackEx());
+    }
+}
+
 void SessionEngine::interrupt(const std::string& session_id) {
     // 1. Set interrupt flag and fetch this session's provider + stream token
     // (under lock). The token scopes the cancel to THIS session's in-flight
@@ -1013,6 +1045,12 @@ void SessionEngine::interrupt(const std::string& session_id) {
     // engine destruction. Scoped so stopping one session never answers
     // another session's open question.
     cancel_pending_asks(session_id);
+
+    // 3b. Deny any permission approval THIS session is parked on, and
+    // auto-deny its requests until the next run re-arms submissions. Same
+    // scoping rationale as cancel_pending_asks.
+    if (perm_broker_)
+        perm_broker_->cancel_session(session_id, "run interrupted");
 
     // 4. Publish Interrupted event so UIs know the interrupt was processed.
     nlohmann::json ev;
@@ -1083,6 +1121,10 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
 }
 
 void SessionEngine::runner_main(const std::string& session_id) {
+    // A new run re-arms permission submissions for this session: an earlier
+    // interrupt blocked them until now (see interrupt()).
+    if (perm_broker_)
+        perm_broker_->allow_submissions(session_id);
     try {
         agentic_loop(session_id);
     } catch (const std::exception& e) {
@@ -1805,9 +1847,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ToolContext ctx;
             ctx.session_id = session_id;
             ctx.call_id = call.id;
+            ctx.tool_name = call.name;
             ctx.working_dir = session.directory;
             ctx.config = &config_;
             ctx.mode = mode;
+            ctx.interrupt = interrupt_flag;
 
             auto result = tools_.execute(call.name, call.input, ctx, permissions_);
 

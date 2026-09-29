@@ -90,3 +90,6 @@ target_link_libraries(test_symbols haicode)
 
 add_executable(test_codex_auth tests/test_codex_auth.cpp)
 target_link_libraries(test_codex_auth haicode)
+
+add_executable(test_permission_requests tests/test_permission_requests.cpp)
+target_link_libraries(test_permission_requests haicode)

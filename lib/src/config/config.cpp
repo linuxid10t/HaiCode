@@ -5,7 +5,9 @@
 #include <fstream>
 #include <sstream>
 #include <cstdio>
+#include <cstdlib>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <FindDirectory.h>
 #include <Path.h>
 
@@ -342,6 +344,143 @@ AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
     if (!overlay.autoname_llm_refine)
         result.autoname_llm_refine = false;
     return result;
+}
+
+// ---- Source-aware permission policy documents ----
+
+static const char* effect_string(PermissionEffect e) {
+    switch (e) {
+    case PermissionEffect::Allow: return "allow";
+    case PermissionEffect::Deny:  return "deny";
+    default:                      return "ask";
+    }
+}
+
+// Canonical serialization of a rule list: the fingerprint compares by parsed
+// content, never raw text, so cosmetic reformatting of the file is not a
+// conflict while any semantic permission change is.
+static std::string rules_fingerprint(const std::vector<PermissionRule>& rules) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& r : rules)
+        arr.push_back({{"action",   r.action},
+                       {"resource", r.resource},
+                       {"effect",   effect_string(r.effect)}});
+    return arr.dump();
+}
+
+std::string global_config_path() {
+    BPath settings_path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
+        BPath cfg_path(settings_path);
+        cfg_path.Append("haicode");
+        cfg_path.Append("config.json");
+        return cfg_path.Path();
+    }
+    return "";
+}
+
+std::string project_config_path(const std::string& project_dir) {
+    if (project_dir.empty()) return "";
+    return project_dir + "/.haicode/config.json";
+}
+
+PermissionPolicyDocument load_permission_document(const std::string& path) {
+    PermissionPolicyDocument doc;
+    doc.path = path;
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0) {
+        doc.exists = true;
+        std::ifstream f(path);
+        if (f.is_open()) {
+            std::stringstream ss;
+            ss << f.rdbuf();
+            auto j = nlohmann::json::parse(ss.str(), nullptr, false);
+            if (!j.is_discarded() && j.is_object()
+                    && j.contains("permissions") && j["permissions"].is_array()) {
+                for (const auto& p : j["permissions"])
+                    append_permission(doc.rules, p);
+            }
+        }
+    }
+    doc.fingerprint = rules_fingerprint(doc.rules);
+    return doc;
+}
+
+bool save_permission_document(const std::string& path,
+                              const std::vector<PermissionRule>& rules,
+                              const std::string& expected_fingerprint,
+                              std::string& error) {
+    error.clear();
+
+    // 1. Re-read and validate the document as it exists now.
+    nlohmann::json j = nlohmann::json::object();
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0) {
+        std::ifstream f(path);
+        if (!f.is_open()) {
+            error = "cannot open " + path;
+            return false;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        j = nlohmann::json::parse(ss.str(), nullptr, false);
+        if (j.is_discarded() || !j.is_object()) {
+            error = path + " is not a valid JSON object";
+            return false;
+        }
+    }
+
+    // 2. Conflicting-edit detection against what the editor loaded.
+    std::vector<PermissionRule> current;
+    if (j.contains("permissions") && j["permissions"].is_array()) {
+        for (const auto& p : j["permissions"])
+            append_permission(current, p);
+    }
+    if (rules_fingerprint(current) != expected_fingerprint) {
+        error = "the permissions in " + path
+              + " changed since they were loaded";
+        return false;
+    }
+
+    // 3. Replace only the permissions array; an empty list removes the key.
+    if (rules.empty()) {
+        j.erase("permissions");
+    } else {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& r : rules)
+            arr.push_back({{"action",   r.action},
+                           {"resource", r.resource},
+                           {"effect",   effect_string(r.effect)}});
+        j["permissions"] = arr;
+    }
+
+    // 4. Write through a temporary sibling, then atomic rename.
+    auto slash = path.find_last_of('/');
+    std::string dir = (slash == std::string::npos) ? "." : path.substr(0, slash);
+    if (slash != std::string::npos && slash > 0)
+        ::mkdir(dir.c_str(), 0755);  // EEXIST is fine — file is written next
+    std::string tmp = path + ".perm-tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f.is_open()) {
+            error = "cannot create " + tmp;
+            return false;
+        }
+        f << j.dump(2) << "\n";
+        f.flush();
+        if (!f.good()) {
+            f.close();
+            std::remove(tmp.c_str());
+            error = "failed writing " + tmp;
+            return false;
+        }
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        error = "cannot replace " + path;
+        return false;
+    }
+    return true;
 }
 
 } // namespace haicode

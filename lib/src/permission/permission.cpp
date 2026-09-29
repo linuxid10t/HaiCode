@@ -124,9 +124,103 @@ void PermissionGate::add_allow(const std::string& session_id,
     session_allows_[session_id].push_back(r);
 }
 
+PermissionSnapshot PermissionGate::snapshot(const std::string& session_id) const {
+    std::lock_guard<std::mutex> lock(*mu_);
+    PermissionSnapshot result;
+    result.configured = rules_;
+    auto copy = [&](const auto& map, auto& out) {
+        auto it = map.find(session_id);
+        if (it != map.end()) out = it->second;
+    };
+    copy(session_rules_, result.session);
+    copy(session_allows_, result.temporary_patterns);
+    copy(exact_allows_, result.temporary_exact);
+    return result;
+}
+
+void PermissionGate::add_exact_allow(const std::string& session_id,
+    const std::string& action, const std::string& resource) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    auto& grants = exact_allows_[session_id];
+    for (const auto& grant : grants)
+        if (grant.action == action && grant.resource == resource) return;
+    grants.push_back({action, resource, PermissionEffect::Allow});
+}
+
+bool PermissionGate::revoke_exact_allow(const std::string& session_id,
+    const std::string& action, const std::string& resource) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    auto found = exact_allows_.find(session_id);
+    if (found == exact_allows_.end()) return false;
+    auto& grants = found->second;
+    for (auto it = grants.begin(); it != grants.end(); ++it) {
+        if (it->action == action && it->resource == resource) {
+            grants.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+void PermissionGate::revoke_temporary_allows(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    exact_allows_.erase(session_id);
+    session_allows_.erase(session_id);
+}
+
+AuthorizationDecision PermissionGate::evaluate(const std::string& session_id,
+    const std::string& action, const std::string& resource) const {
+    auto state = snapshot(session_id);
+    for (size_t i = 0; i < state.temporary_exact.size(); ++i) {
+        const auto& rule = state.temporary_exact[i];
+        if (rule.action == action && rule.resource == resource)
+            return {PermissionEffect::Allow, "Exact temporary session grant",
+                "temporary_exact", static_cast<int>(i)};
+    }
+    auto match = [&](const auto& rules, const std::string& source) {
+        for (int i = static_cast<int>(rules.size()) - 1; i >= 0; --i) {
+            const auto& rule = rules[i];
+            if (fnmatch(rule.action.c_str(), action.c_str(), 0) == 0
+                && fnmatch(rule.resource.c_str(), resource.c_str(), 0) == 0)
+                return AuthorizationDecision{rule.effect, "Matched " + source + " rule",
+                    source, i};
+        }
+        return AuthorizationDecision{};
+    };
+    for (auto decision : {match(state.temporary_patterns, "temporary_pattern"),
+            match(state.session, "session"), match(state.configured, "configuration")})
+        if (decision.effect != PermissionEffect::Ask) return decision;
+    return {PermissionEffect::Ask, "No applicable Allow or Deny; approval required", "prompt"};
+}
+
 void PermissionGate::set_ask_callback(AskCallback cb) {
     std::lock_guard<std::mutex> lock(*mu_);
     ask_cb_ = std::move(cb);
+}
+
+void PermissionGate::set_ask_callback_ex(AskCallbackEx cb) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    ask_cb_ex_ = std::move(cb);
+}
+
+PermissionEffect PermissionGate::check_tool(const ToolContext& ctx,
+                                            const std::string& action,
+                                            const std::string& resource,
+                                            const nlohmann::json& input) {
+    auto decision = evaluate(ctx.session_id, action, resource);
+    if (decision.effect != PermissionEffect::Ask) return decision.effect;
+    AskCallbackEx ask_ex;
+    AskCallback ask;
+    {
+        std::lock_guard<std::mutex> lock(*mu_);
+        ask_ex = ask_cb_ex_;
+        ask = ask_cb_;
+    }
+    // Context-aware callback preferred; legacy callback keeps old callers
+    // (library tests) working when only it is registered.
+    if (ask_ex) return ask_ex(ctx, ctx.tool_name, action, resource, input);
+    if (ask) return ask(ctx.session_id, action, resource, input);
+    return PermissionEffect::Ask;
 }
 
 PermissionEffect PermissionGate::match_rules(const std::vector<PermissionRule>& rules,
@@ -153,37 +247,14 @@ PermissionEffect PermissionGate::check(const std::string& session_id,
                                        const std::string& action,
                                        const std::string& resource,
                                        const nlohmann::json& input) {
-    // Snapshot the relevant layers under the lock; matching and especially
-    // the ask callback (which blocks on a future) must run without it.
-    std::vector<PermissionRule> config_rules, sess_rules, sess_allows;
+    auto decision = evaluate(session_id, action, resource);
+    if (decision.effect != PermissionEffect::Ask) return decision.effect;
     AskCallback ask;
     {
         std::lock_guard<std::mutex> lock(*mu_);
-        config_rules = rules_;
-        auto sr = session_rules_.find(session_id);
-        if (sr != session_rules_.end()) sess_rules = sr->second;
-        auto sa = session_allows_.find(session_id);
-        if (sa != session_allows_.end()) sess_allows = sa->second;
         ask = ask_cb_;
     }
-
-    // Session layers (Allow-Always grants + toggle rules) take priority
-    auto allows_result = match_rules(sess_allows, action, resource);
-    if (allows_result != PermissionEffect::Ask)
-        return allows_result;
-    auto session_result = match_rules(sess_rules, action, resource);
-    if (session_result != PermissionEffect::Ask)
-        return session_result;
-
-    // Config rules
-    auto config_result = match_rules(config_rules, action, resource);
-    if (config_result != PermissionEffect::Ask)
-        return config_result;
-
-    // Ask the UI
-    if (ask)
-        return ask(session_id, action, resource, input);
-
+    if (ask) return ask(session_id, action, resource, input);
     return PermissionEffect::Ask;
 }
 
@@ -352,61 +423,37 @@ ToolResult ToolRegistry::execute(const std::string& name,
     return r;
 }
 
-ToolResult ToolRegistry::execute_impl(const std::string& name,
+AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
                                   const nlohmann::json& input,
                                   const ToolContext& ctx,
-                                  PermissionGate& gate) {
+                                  const PermissionGate& gate) const {
     auto tool = get(name);
-    if (!tool) {
-        ToolResult r;
-        r.success = false;
-        r.error = "Unknown tool: " + name;
-        return r;
-    }
+    if (!tool)
+        return {PermissionEffect::Deny, "Unknown tool: " + name, "unknown", -1, true};
 
-    // Execution-time mode restriction. The engine filters tools out of the
-    // wire request, but a provider may still return a call for a hidden
-    // tool — refuse it here, before any always-allow bypass (Chat mode must
-    // block even `read`). Deliberately not a permission denial (denied=false)
-    // so the turn isn't killed: the failed tool_result persists and the model
-    // recovers with an allowed tool or a text reply.
-    if (!tool_allowed_in_mode(name, ctx.mode)) {
-        ToolResult r;
-        r.success = false;
-        r.error = "[mode restriction] tool '" + name + "' is not available in "
-                + (ctx.mode == SessionMode::Chat ? "chat" : "plan")
-                + " mode";
-        return r;
-    }
+    if (!tool_allowed_in_mode(name, ctx.mode))
+        return {PermissionEffect::Deny,
+            "[mode restriction] tool '" + name + "' is not available in "
+                + (ctx.mode == SessionMode::Chat ? "chat" : "plan") + " mode",
+            "mode", -1, true};
     if (!tool_available(name, ctx.mode))
-        return {false, "", "[offline mode] tool '" + name + "' is unavailable while offline"};
+        return {PermissionEffect::Deny,
+            "[offline mode] tool '" + name + "' is unavailable while offline",
+            "offline", -1, true};
 
-    // Read-only tools inside the working directory are always allowed — no
-    // prompt, no rule lookup. The user has implicitly trusted the project
-    // tree by opening it. Operations outside the working dir still go
-    // through the gate. Containment is symlink-aware (path_resolves_within)
-    // so an in-project symlink pointing outside the tree stays gated.
+    auto builtin = [](const std::string& reason) {
+        return AuthorizationDecision{PermissionEffect::Allow, reason, "builtin"};
+    };
     if (!ctx.working_dir.empty()) {
-        // read, ls, grep, diff, find: resource() returns a resolved absolute path.
         if (name == "read" || name == "ls" || name == "grep" ||
             name == "diff" || name == "find" || name == "symbols") {
-            std::string path = tool->resource(input, ctx);
-            if (path_is_always_readable(path, ctx.working_dir))
-                return tool->execute(input, ctx);
+            if (path_is_always_readable(tool->resource(input, ctx), ctx.working_dir))
+                return builtin("Read within project or trusted system root");
         }
-        // glob: resource() returns the raw pattern. Extract the literal
-        // prefix before any wildcard; relative patterns are joined with
-        // working_dir first (they expand under it). The joined prefix must
-        // resolve inside the tree (or an always-readable root) — this also
-        // catches a relative pattern leading through a symlinked directory
-        // out of the project.
         if (name == "glob") {
             std::string pattern = input.value("pattern", "");
-            std::string prefix;
             size_t wild = pattern.find_first_of("*?[");
-            prefix = (wild == std::string::npos)
-                        ? pattern
-                        : pattern.substr(0, wild);
+            std::string prefix = wild == std::string::npos ? pattern : pattern.substr(0, wild);
             if (!prefix.empty() && prefix[0] != '/') {
                 std::string base = ctx.working_dir;
                 while (!base.empty() && base.back() == '/') base.pop_back();
@@ -414,64 +461,55 @@ ToolResult ToolRegistry::execute_impl(const std::string& name,
             }
             if (prefix.empty()) prefix = ctx.working_dir;
             std::string base = normalize_path(prefix);
-            if (path_resolves_within(base, ctx.working_dir) ||
-                is_within_always_readable_root(base))
-                return tool->execute(input, ctx);
+            if (path_resolves_within(base, ctx.working_dir) || is_within_always_readable_root(base))
+                return builtin("Glob within project or trusted system root");
         }
-        // git: only provably read-only invocations (classified by
-        // git_invocation_is_readonly — subcommand AND args) never modify the
-        // repo — always allow. `git branch -D x` / `git stash clear` fall
-        // through to the gate.
         if (name == "git") {
-            std::vector<std::string> git_args;
-            if (input.contains("args") && input["args"].is_array()) {
-                for (const auto& a : input["args"])
-                    if (a.is_string()) git_args.push_back(a.get<std::string>());
-            }
-            if (git_invocation_is_readonly(input.value("subcommand", ""),
-                                           git_args))
-                return tool->execute(input, ctx);
+            std::vector<std::string> args;
+            if (input.contains("args") && input["args"].is_array())
+                for (const auto& arg : input["args"])
+                    if (arg.is_string()) args.push_back(arg.get<std::string>());
+            if (git_invocation_is_readonly(input.value("subcommand", ""), args))
+                return builtin("Read-only Git invocation");
         }
     }
-    // Web tools have no filesystem side effects — always allow.
     if (name == "web_search" || name == "web_extract")
-        return tool->execute(input, ctx);
-
-    // propose_plan, todo_write, and ask_user only write internal state or ask
-    // the user a question — always allow.
+        return builtin("Built-in web tool exemption");
     if (name == "propose_plan" || name == "todo_write" || name == "ask_user")
-        return tool->execute(input, ctx);
-
-    // screenshot is read-only (captures shared screen state, writes one file
-    // to the temp directory) and must work in Plan mode — always allow.
-    if (name == "screenshot")
-        return tool->execute(input, ctx);
-
-    // process list and check_port are read-only — always allow.
+        return builtin("Built-in interaction tool exemption");
+    if (name == "screenshot") return builtin("Built-in screenshot exemption");
     if (name == "process") {
         std::string action = input.value("action", "");
         if (action == "list" || action == "check_port")
-            return tool->execute(input, ctx);
+            return builtin("Read-only process inspection");
     }
+    return gate.evaluate(ctx.session_id, tool->required_permission(), tool->resource(input, ctx));
+}
 
-    auto perm = gate.check(ctx.session_id,
-                           tool->required_permission(),
-                           tool->resource(input, ctx),
-                           input);
-    // Only an explicit Allow executes. An unresolved Ask — no rule matched
-    // and no ask callback resolved it (library consumers without a UI) —
-    // must NOT fall through to execution.
+ToolResult ToolRegistry::execute_impl(const std::string& name,
+    const nlohmann::json& input, const ToolContext& ctx, PermissionGate& gate) {
+    auto decision = evaluate(name, input, ctx, gate);
+    if (decision.blocked) return {false, "", decision.reason};
+    auto tool = get(name);
+    auto perm = decision.effect;
+    if (perm == PermissionEffect::Ask) {
+        perm = gate.check_tool(ctx, tool->required_permission(),
+                               tool->resource(input, ctx), input);
+        // An interrupt that landed while the user was deciding must stop the
+        // call before it executes — approval waits can take arbitrarily long,
+        // and the loop's pre-call interrupt check has already passed.
+        if (perm == PermissionEffect::Allow && ctx.interrupt
+                && ctx.interrupt->load())
+            return {false, "",
+                    "[interrupted] tool '" + name
+                        + "' not run: run interrupted", true};
+    }
     if (perm != PermissionEffect::Allow) {
-        ToolResult r;
-        r.success = false;
-        r.denied  = true;
-        r.error   = (perm == PermissionEffect::Deny)
-                  ? "Permission denied for tool: " + name
-                  : "Permission not granted for tool: " + name
-                    + " (no applicable Allow rule or user approval)";
-        return r;
+        return {false, "", perm == PermissionEffect::Deny
+            ? "Permission denied for tool: " + name
+            : "Permission not granted for tool: " + name
+                + " (no applicable Allow rule or user approval)", true};
     }
-
     return tool->execute(input, ctx);
 }
 

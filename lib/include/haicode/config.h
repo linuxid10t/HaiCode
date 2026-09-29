@@ -133,4 +133,32 @@ public:
     AppConfig merge(const AppConfig& base, const AppConfig& overlay);
 };
 
+// One configurable permission source (global or project file), kept
+// un-merged so the policy editor can show and edit each independently.
+struct PermissionPolicyDocument {
+    std::string path;                   // actual file path on disk
+    bool exists = false;                // file present (vs. would-be-created)
+    std::vector<PermissionRule> rules;  // this source's rules only, in order
+    // Canonical serialization of `rules` as they were read. Pass back to
+    // save_permission_document() to detect concurrent edits.
+    std::string fingerprint;
+};
+
+std::string global_config_path();                       // settings:/haicode/config.json
+std::string project_config_path(const std::string& project_dir);
+
+// Read one source's permission rules without merging. A missing or invalid
+// file yields exists=false / empty rules, never an exception.
+PermissionPolicyDocument load_permission_document(const std::string& path);
+
+// Atomically replace ONLY the "permissions" array in the file at `path`,
+// preserving every unrelated key. Fails (false + error) when the existing
+// file is unparseable, its permissions changed since `expected_fingerprint`
+// (conflicting edit), or the write could not be completed. An empty rule
+// list removes the key. Missing parent directories are created.
+bool save_permission_document(const std::string& path,
+                              const std::vector<PermissionRule>& rules,
+                              const std::string& expected_fingerprint,
+                              std::string& error);
+
 } // namespace haicode

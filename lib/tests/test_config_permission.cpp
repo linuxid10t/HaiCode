@@ -964,6 +964,295 @@ static bool perm_check_thread_safety_smoke() {
 }
 
 // ============================================================
+// Exact temporary grants + shared evaluation
+// ============================================================
+
+static bool perm_exact_grant_literal_wildcard() {
+    haicode::PermissionGate gate;
+    const nlohmann::json no_input = nlohmann::json::object();
+    // Resource that itself contains fnmatch metacharacters: a glob grant
+    // would over-authorize, an exact grant must not.
+    gate.add_exact_allow("s1", "bash", "/tmp/naive*rm");
+    CHECK(gate.check("s1", "bash", "/tmp/naive*rm", no_input)
+              == haicode::PermissionEffect::Allow,
+          "exact grant must match the literal resource");
+    CHECK(gate.check("s1", "bash", "/tmp/naive-rm", no_input)
+              == haicode::PermissionEffect::Ask,
+          "exact grant must not glob-expand");
+    CHECK(gate.check("s1", "bash", "/tmp/naiveXrm", no_input)
+              == haicode::PermissionEffect::Ask,
+          "exact grant must not match wildcard-shaped siblings");
+    CHECK(gate.check("s2", "bash", "/tmp/naive*rm", no_input)
+              == haicode::PermissionEffect::Ask,
+          "exact grant must stay scoped to its session");
+
+    // Dedup: adding the identical grant twice keeps one entry.
+    gate.add_exact_allow("s1", "bash", "/tmp/naive*rm");
+    auto snap = gate.snapshot("s1");
+    CHECK(snap.temporary_exact.size() == 1, "identical exact grants deduplicate");
+
+    // Revocation removes exactly the named pair.
+    CHECK(gate.revoke_exact_allow("s1", "bash", "/tmp/naive*rm"),
+          "revoking an existing exact grant reports success");
+    CHECK(gate.check("s1", "bash", "/tmp/naive*rm", no_input)
+              == haicode::PermissionEffect::Ask,
+          "revoked exact grant no longer authorizes");
+    CHECK(!gate.revoke_exact_allow("s1", "bash", "/tmp/naive*rm"),
+          "revoking a missing grant reports failure");
+
+    gate.add_exact_allow("s1", "bash", "/tmp/a");
+    gate.add_allow("s1", "bash", "/tmp/b*");
+    gate.revoke_temporary_allows("s1");
+    CHECK(gate.check("s1", "bash", "/tmp/a", no_input)
+              == haicode::PermissionEffect::Ask
+       && gate.check("s1", "bash", "/tmp/bx", no_input)
+              == haicode::PermissionEffect::Ask,
+          "revoke_temporary_allows clears exact and pattern grants");
+    std::cout << "[OK] exact temporary grants literal matching, dedup, revoke\n";
+    return true;
+}
+
+static bool perm_evaluate_reports_source() {
+    auto gate = make_gate({{"read", "/safe/*", haicode::PermissionEffect::Allow}});
+    gate.set_session_rules("s1", {{"write", "*", haicode::PermissionEffect::Deny}});
+
+    auto d = gate.evaluate("s1", "read", "/safe/file");
+    CHECK(d.effect == haicode::PermissionEffect::Allow && d.source == "configuration"
+          && d.rule_index == 0, "configured rule decision reports source+index");
+
+    d = gate.evaluate("s1", "write", "/x");
+    CHECK(d.effect == haicode::PermissionEffect::Deny && d.source == "session",
+          "session toggle decision reports session source");
+
+    d = gate.evaluate("s1", "bash", "/x");
+    CHECK(d.effect == haicode::PermissionEffect::Ask && d.source == "prompt"
+          && !d.blocked, "unmatched request reports prompt source, not blocked");
+
+    gate.add_allow("s1", "bash", "/cmd");
+    d = gate.evaluate("s1", "bash", "/cmd");
+    CHECK(d.effect == haicode::PermissionEffect::Allow
+          && d.source == "temporary_pattern",
+          "legacy allow-always grant reports temporary_pattern source");
+
+    // Session layers override configured denies (existing precedence kept).
+    gate.set_session_rules("s1", {{"bash", "*", haicode::PermissionEffect::Allow}});
+    gate.set_rules({{"bash", "*", haicode::PermissionEffect::Deny}});
+    d = gate.evaluate("s1", "bash", "/x");
+    CHECK(d.effect == haicode::PermissionEffect::Allow,
+          "session layer still overrides configured deny");
+    std::cout << "[OK] evaluate reports effect, source, and rule identity\n";
+    return true;
+}
+
+static bool registry_inspect_matches_execution() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"write", "*", haicode::PermissionEffect::Deny},
+                    {"write", "/tmp/tfc_inspect_ok.txt",
+                     haicode::PermissionEffect::Allow}});
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                              const std::string&, const nlohmann::json&) {
+        return haicode::PermissionEffect::Deny;
+    });
+
+    haicode::ToolContext ctx;
+    ctx.session_id = "s1";
+    ctx.working_dir = "/tmp";
+
+    const std::string allowed_path = "/tmp/tfc_inspect_ok.txt";
+    const std::string denied_path  = "/tmp/tfc_inspect_no.txt";
+    nlohmann::json in = {{"path", ""}, {"content", "x"}};
+
+    in["path"] = allowed_path;
+    auto d = reg.evaluate("write", in, ctx, gate);
+    CHECK(d.effect == haicode::PermissionEffect::Allow && !d.blocked,
+          "inspector: allowed write");
+    std::remove(allowed_path.c_str());
+
+    in["path"] = denied_path;
+    d = reg.evaluate("write", in, ctx, gate);
+    CHECK(d.effect == haicode::PermissionEffect::Deny && !d.blocked,
+          "inspector: denied write");
+
+    // Execution must agree with inspection...
+    auto r = reg.execute("write", in, ctx, gate);
+    CHECK(r.denied && !r.success, "execution agrees: denied");
+    struct stat st;
+    CHECK(::stat(denied_path.c_str(), &st) != 0,
+          "inspector must not execute the tool (no file created)");
+
+    // ...and for the allowed case too.
+    in["path"] = allowed_path;
+    r = reg.execute("write", in, ctx, gate);
+    CHECK(r.success && !r.denied, "execution agrees: allowed");
+    std::remove(allowed_path.c_str());
+
+    // Builtin exemption + mode block agreement.
+    d = reg.evaluate("read", {{"path", "/tmp"}}, ctx, gate);
+    CHECK(d.effect == haicode::PermissionEffect::Allow && d.source == "builtin",
+          "inspector reports builtin read exemption");
+    ctx.mode = haicode::SessionMode::Chat;
+    d = reg.evaluate("read", {{"path", "/tmp"}}, ctx, gate);
+    CHECK(d.blocked && d.source == "mode",
+          "inspector reports mode block with blocked flag");
+    std::cout << "[OK] ToolRegistry::evaluate agrees with execute, no side effects\n";
+    return true;
+}
+
+// ============================================================
+// Source-aware permission policy documents
+// ============================================================
+
+static bool policy_load_missing_and_present() {
+    const std::string missing = "/tmp/tfc_policy_missing.json";
+    std::remove(missing.c_str());
+    auto doc = haicode::load_permission_document(missing);
+    CHECK(!doc.exists && doc.rules.empty(), "missing policy file: exists=false, no rules");
+    CHECK(doc.path == missing, "document carries its path");
+
+    const std::string p = "/tmp/tfc_policy_present.json";
+    write_file(p, R"({
+        "model": "claude-opus-4",
+        "permissions": [
+            {"action": "bash", "resource": "/tmp/*", "effect": "allow"},
+            {"action": "write", "resource": "*"}
+        ]
+    })");
+    doc = haicode::load_permission_document(p);
+    CHECK(doc.exists, "present policy file: exists=true");
+    CHECK(doc.rules.size() == 2, "policy rules parsed");
+    CHECK(doc.rules[0].action == "bash"
+       && doc.rules[0].effect == haicode::PermissionEffect::Allow,
+          "policy rule content parsed");
+    CHECK(doc.rules[1].effect == haicode::PermissionEffect::Ask,
+          "missing effect defaults to ask");
+    CHECK(!doc.fingerprint.empty(), "fingerprint produced");
+    std::remove(p.c_str());
+    std::cout << "[OK] load_permission_document missing + present files\n";
+    return true;
+}
+
+static bool policy_save_preserves_unrelated_keys() {
+    const std::string p = "/tmp/tfc_policy_save.json";
+    write_file(p, R"({
+        "model": "claude-opus-4",
+        "unknown_future_key": {"nested": [1, 2, 3]},
+        "permissions": [{"action": "bash", "resource": "*", "effect": "deny"}]
+    })");
+    auto doc = haicode::load_permission_document(p);
+
+    std::vector<haicode::PermissionRule> next = {
+        {"write", "/boot/home/*", haicode::PermissionEffect::Allow},
+        {"read", "*", haicode::PermissionEffect::Ask},
+    };
+    std::string err;
+    CHECK(haicode::save_permission_document(p, next, doc.fingerprint, err),
+          "policy save succeeds: " + err);
+
+    // Only permissions replaced; unrelated keys intact.
+    std::ifstream f(p);
+    std::stringstream ss; ss << f.rdbuf();
+    auto j = nlohmann::json::parse(ss.str(), nullptr, false);
+    CHECK(!j.is_discarded() && j.contains("model")
+       && j["model"] == "claude-opus-4", "unrelated scalar key preserved");
+    CHECK(j.contains("unknown_future_key"), "unknown key preserved");
+    CHECK(j.contains("permissions") && j["permissions"].size() == 2,
+          "permissions array replaced");
+    CHECK(j["permissions"][0]["resource"] == "/boot/home/*", "new rule[0] written");
+
+    auto reloaded = haicode::load_permission_document(p);
+    CHECK(reloaded.rules.size() == 2 && reloaded.rules[0].action == "write",
+          "saved policy reloads identically");
+    std::remove(p.c_str());
+    std::cout << "[OK] save_permission_document replaces only permissions\n";
+    return true;
+}
+
+static bool policy_save_empty_removes_key_and_creates_file() {
+    // Existing file with rules: empty list removes the key entirely.
+    const std::string p = "/tmp/tfc_policy_empty.json";
+    write_file(p, R"({"permissions": [{"action": "bash", "resource": "*", "effect": "allow"}],
+                      "provider": "anthropic"})");
+    auto doc = haicode::load_permission_document(p);
+    std::string err;
+    CHECK(haicode::save_permission_document(p, {}, doc.fingerprint, err),
+          "clearing rules succeeds: " + err);
+    std::ifstream f(p);
+    std::stringstream ss; ss << f.rdbuf();
+    auto j = nlohmann::json::parse(ss.str(), nullptr, false);
+    CHECK(!j.contains("permissions"), "empty rule list removes permissions key");
+    CHECK(j.contains("provider"), "provider key survives clearing");
+
+    // New file (would-be-created source): starts from empty fingerprint.
+    std::remove(p.c_str());
+    const std::string fresh_dir = "/tmp/tfc_policy_newdir";
+    const std::string fresh_path = fresh_dir + "/config.json";
+    auto fresh_doc = haicode::load_permission_document(fresh_path);
+    CHECK(!fresh_doc.exists && fresh_doc.fingerprint == "[]",
+          "fresh source fingerprint is the empty list");
+    CHECK(haicode::save_permission_document(
+              fresh_path,
+              {{"bash", "*", haicode::PermissionEffect::Deny}},
+              fresh_doc.fingerprint, err),
+          "save creates the missing file: " + err);
+    auto created = haicode::load_permission_document(fresh_path);
+    CHECK(created.exists && created.rules.size() == 1
+       && created.rules[0].effect == haicode::PermissionEffect::Deny,
+          "created file parses back with the saved rule");
+    std::remove(fresh_path.c_str());
+    std::remove(fresh_dir.c_str());
+    std::remove("/tmp/tfc_policy_newdir");
+    std::cout << "[OK] policy save removes empty key, creates missing file\n";
+    return true;
+}
+
+static bool policy_save_conflict_and_validation() {
+    const std::string p = "/tmp/tfc_policy_conflict.json";
+    write_file(p, R"({"permissions": [{"action": "bash", "resource": "*", "effect": "deny"}]})");
+    auto doc = haicode::load_permission_document(p);
+
+    // Concurrent edit after load: stale fingerprint must fail without writing.
+    write_file(p, R"({"permissions": [{"action": "bash", "resource": "*", "effect": "ask"}]})");
+    std::string err;
+    CHECK(!haicode::save_permission_document(
+              p, {{"write", "*", haicode::PermissionEffect::Allow}},
+              doc.fingerprint, err),
+          "conflicting edit rejected");
+    CHECK(err.find("changed since") != std::string::npos,
+          "conflict error explains the cause");
+
+    // Reloaded fingerprint matches the new content → save proceeds.
+    auto reloaded = haicode::load_permission_document(p);
+    CHECK(haicode::save_permission_document(
+              p, {{"write", "*", haicode::PermissionEffect::Allow}},
+              reloaded.fingerprint, err),
+          "fresh fingerprint saves: " + err);
+
+    // Cosmetic reformatting of the same rules is NOT a conflict: the file now
+    // holds write/allow, so compare against the fingerprint of that content.
+    auto saved = haicode::load_permission_document(p);
+    write_file(p, "{\"permissions\":[{\"resource\":\"*\",\"action\":\"write\","
+                  "\"effect\":\"allow\"}]}");
+    CHECK(haicode::save_permission_document(
+              p, {{"read", "/tmp", haicode::PermissionEffect::Deny}},
+              saved.fingerprint, err),
+          "cosmetic reformat is not a conflict: " + err);
+
+    // Malformed JSON document refuses to save rather than clobbering.
+    write_file(p, "{ this is not json");
+    CHECK(!haicode::save_permission_document(
+              p, {{"read", "*", haicode::PermissionEffect::Deny}},
+              reloaded.fingerprint, err),
+          "malformed document rejected");
+    CHECK(err.find("valid JSON") != std::string::npos,
+          "malformed error explains the cause");
+    std::remove(p.c_str());
+    std::cout << "[OK] policy save conflict detection + validation\n";
+    return true;
+}
+
+// ============================================================
 
 int main() {
     std::cout << "=== Config + PermissionGate Tests ===\n\n";
@@ -1010,6 +1299,17 @@ int main() {
     ok &= perm_add_allow_scoped();
     ok &= perm_session_rules_replaced_independently();
     ok &= perm_check_thread_safety_smoke();
+
+    std::cout << "\n-- PermissionGate exact grants + evaluation --\n";
+    ok &= perm_exact_grant_literal_wildcard();
+    ok &= perm_evaluate_reports_source();
+    ok &= registry_inspect_matches_execution();
+
+    std::cout << "\n-- Source-aware policy documents --\n";
+    ok &= policy_load_missing_and_present();
+    ok &= policy_save_preserves_unrelated_keys();
+    ok &= policy_save_empty_removes_key_and_creates_file();
+    ok &= policy_save_conflict_and_validation();
 
     std::cout << "\n-- ToolRegistry + gate integration --\n";
     ok &= registry_read_inside_workdir_bypasses_gate();

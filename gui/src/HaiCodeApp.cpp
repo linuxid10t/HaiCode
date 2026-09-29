@@ -340,6 +340,9 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             project_dir_ = path;
             haicode::ConfigLoader loader2;
             config_ = loader2.load(project_dir_);
+            // The new project layer may add or remove permission rules; the
+            // gate keeps the previously configured set otherwise.
+            perm_gate_->set_rules(config_.permissions);
             _RecreateEngine();
             break;
         }
