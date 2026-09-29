@@ -9,7 +9,8 @@ static const uint32 MSG_TOOL_RESULT    = 'TLrs';
 static const uint32 MSG_STEP_STARTED   = 'STst';
 static const uint32 MSG_STEP_ENDED     = 'STen';
 static const uint32 MSG_STEP_FAILED    = 'STfl';
-static const uint32 MSG_PERMISSION_REQ = 'PRrq';
+static const uint32 MSG_PERMISSION_REQ = 'PRrq';  // broker → UI: show approval window; structured request + "request_id"
+static const uint32 MSG_PERMISSION_WINDOW_CLOSED = 'PRwc';  // PermissionWindow → MainWindow; "session_id" string
 static const uint32 MSG_PLAN_PROPOSED  = 'PLpr';   // plan_str + path_str
 static const uint32 MSG_TODOS_UPDATED  = 'TDup';   // repeated "todo_content"/"todo_active"/"todo_status" strings
 static const uint32 MSG_BUILD_HOOK_START = 'BHst';
@@ -25,7 +26,7 @@ static const uint32 MSG_COMPACT_NOW    = 'CMnw';  // Compact button pressed
 static const uint32 MSG_NEW_SESSION    = 'NSes';
 static const uint32 MSG_OFFLINE_MODE   = 'OFmd';
 static const uint32 MSG_SELECT_SESSION = 'SLss';
-static const uint32 MSG_PERMISSION_REP = 'PRrp';  // reply from PermissionWindow
+static const uint32 MSG_PERMISSION_DECISION = 'PRdc';  // PermissionWindow → be_app; "request_id" string + "decision" int32 (0=deny, 1=allow once, 2=allow for session)
 static const uint32 MSG_MODE_SELECTED   = 'MDmd';  // mode menu item; "mode" string ("build"/"plan"/"chat")
 static const uint32 MSG_PLAN_DECISION  = 'PLdc';  // reply from PlanReviewWindow (approved bool)
 static const uint32 MSG_ASK_USER_REQ   = 'AUrq';  // engine → UI: show AskUserWindow
@@ -73,7 +74,6 @@ static const uint32 MSG_ATTACH_REFS     = 'ATrf';  // refs forwarded from the at
 static const uint32 MSG_REMOVE_ATTACHMENT = 'RMat'; // chip "×" pressed; "index" int32
 
 // Permission management
-static const uint32 MSG_ADD_PERMISSION  = 'ADpm';  // MainWindow → be_app; "action"+"resource" strings
 static const uint32 MSG_AUTO_ALLOW_EDITS = 'AAed'; // checkbox → be_app; "be:value" int32
 static const uint32 MSG_YOLO             = 'YOLO'; // checkbox → be_app; "be:value" int32
 static const uint32 MSG_READ_EVERYWHERE  = 'RDew'; // plan-mode checkbox → be_app; "be:value" int32

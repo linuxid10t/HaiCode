@@ -22,12 +22,13 @@
 #include <haicode/engine.h>
 #include <haicode/db.h>
 #include <haicode/types.h>
+#include <haicode/permission_requests.h>
 
 #include <string>
 #include <array>
 #include <vector>
 #include <map>
-#include <future>
+#include <set>
 #include <memory>
 
 // Forward declaration
@@ -50,14 +51,10 @@ public:
     // The active session id (used by GuiEventRelay)
     std::string active_session_id() const { return active_session_id_; }
 
-    // Called by HaiCodeApp's permission callback (from any thread via PostMessage)
-    // Packs session_id/action/resource/detail/promise_ptr into
-    // MSG_PERMISSION_REQ and posts to self
-    void PostPermissionRequest(const std::string& session_id,
-                               const std::string& action,
-                               const std::string& resource,
-                               const std::string& detail,
-                               void* promise_ptr);
+    // Called by HaiCodeApp's broker delivery callback (from any thread via
+    // PostMessage). Packs the structured request into MSG_PERMISSION_REQ and
+    // posts to self; the approval window replies by request id via be_app.
+    void PostPermissionRequest(const haicode::PermissionRequest& req);
 
     // Called by HaiCodeApp while holding the window lock.
     void SetEngine(haicode::SessionEngine& engine);
@@ -88,6 +85,8 @@ private:
     void _HandleStepFailed(BMessage* msg);
     void _HandleInterrupted();
     void _HandlePermissionReq(BMessage* msg);
+    void _ShowNextPermissionRequest(const std::string& session_id);
+    void _HandlePermissionWindowClosed(BMessage* msg);
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);
     void _HandleAskUserReq(BMessage* msg);
@@ -138,6 +137,12 @@ private:
         std::vector<std::pair<std::string, std::string>> attachments;
     };
     std::map<std::string, SessionDraft> session_drafts_;
+
+    // Permission approvals: one review window per session; extra requests
+    // queue here. open_perm_sessions_ tracks which sessions have a window
+    // showing right now.
+    std::map<std::string, std::vector<haicode::PermissionRequest>> pending_perm_queue_;
+    std::set<std::string> open_perm_sessions_;
 
     // Engine & store (not owned — owned by HaiCodeApp)
     haicode::SessionEngine* engine_;  // pointer so HaiCodeApp can swap it on settings change

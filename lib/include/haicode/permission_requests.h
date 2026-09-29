@@ -81,6 +81,10 @@ public:
     // Wake ALL pending waits and reject every future submission (shutdown).
     void cancel_all(const std::string& reason);
     void allow_submissions(const std::string& session_id);
+    // Lift a cancel_all(): the GUI recreates its engine (settings/directory
+    // change) and the shared broker must serve the new one. Waits cancelled
+    // by the shutdown stay denied; only future submissions are re-allowed.
+    void reopen();
 
     // Snapshot for the Permissions center (still-waiting requests only).
     std::vector<PermissionRequest> pending_requests() const;

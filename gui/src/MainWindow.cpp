@@ -50,7 +50,6 @@
 
 #include <string>
 #include <vector>
-#include <future>
 #include <memory>
 #include <thread>
 #include <ctime>
@@ -1053,40 +1052,9 @@ MainWindow::MessageReceived(BMessage* msg)
             _PersistProviderModel();
             break;
         }
-        case MSG_PERMISSION_REP: {
-            void* promise_raw = nullptr;
-            int32 effect_int  = 2; // default Deny
-            msg->FindPointer("promise_ptr", &promise_raw);
-            msg->FindInt32("effect", &effect_int);
-
-            if (effect_int == 1) {
-                // "Allow Always" — persist the rule in the PermissionGate via
-                // be_app, scoped to the session that asked.
-                const char* action   = nullptr;
-                const char* resource = nullptr;
-                const char* sid      = nullptr;
-                msg->FindString("action",   &action);
-                msg->FindString("resource", &resource);
-                msg->FindString("session_id", &sid);
-                if (action && resource) {
-                    BMessage perm(MSG_ADD_PERMISSION);
-                    perm.AddString("action",   action);
-                    perm.AddString("resource", resource);
-                    if (sid) perm.AddString("session_id", sid);
-                    be_app->PostMessage(&perm);
-                }
-            }
-
-            if (promise_raw) {
-                auto* promise = static_cast<std::promise<haicode::PermissionEffect>*>(promise_raw);
-                haicode::PermissionEffect effect = (effect_int <= 1)
-                    ? haicode::PermissionEffect::Allow
-                    : haicode::PermissionEffect::Deny;
-                promise->set_value(effect);
-                delete promise;
-            }
+        case MSG_PERMISSION_WINDOW_CLOSED:
+            _HandlePermissionWindowClosed(msg);
             break;
-        }
         default:
             BWindow::MessageReceived(msg);
             break;
@@ -1857,55 +1825,90 @@ MainWindow::_HandleInterrupted()
 void
 MainWindow::_HandlePermissionReq(BMessage* msg)
 {
-    const char* action   = nullptr;
-    const char* resource = nullptr;
-    const char* detail   = nullptr;
-    const char* sid      = nullptr;
-    void* promise_raw    = nullptr;
+    // Deserialize the structured request posted by the broker's delivery
+    // callback (any thread). Replies go back via be_app by request id.
+    haicode::PermissionRequest req;
+    const char* s = nullptr;
+    int64 created = 0;
+    if (msg->FindString("request_id", &s) == B_OK) req.id = s;
+    if (msg->FindString("session_id", &s) == B_OK) req.session_id = s;
+    if (msg->FindString("call_id", &s) == B_OK) req.call_id = s;
+    if (msg->FindString("tool_name", &s) == B_OK) req.tool_name = s;
+    if (msg->FindString("action", &s) == B_OK) req.action = s;
+    if (msg->FindString("resource", &s) == B_OK) req.resource = s;
+    if (msg->FindString("working_dir", &s) == B_OK) req.working_dir = s;
+    if (msg->FindInt64("created_ms", &created) == B_OK) req.created_ms = created;
+    if (msg->FindString("input_json", &s) == B_OK) {
+        try {
+            req.input = nlohmann::json::parse(std::string(s), nullptr, false);
+        } catch (...) {}
+    }
+    if (req.id.empty() || req.session_id.empty()) return;
 
-    msg->FindString("action",   &action);
-    msg->FindString("resource", &resource);
-    msg->FindString("detail",   &detail);
-    msg->FindString("session_id", &sid);
-    msg->FindPointer("promise_ptr", &promise_raw);
+    // One review window per session; extra requests queue behind it.
+    pending_perm_queue_[req.session_id].push_back(req);
+    if (open_perm_sessions_.count(req.session_id)) return;
+    _ShowNextPermissionRequest(req.session_id);
+}
 
-    std::string session_id = sid ? sid : "";
+void
+MainWindow::_ShowNextPermissionRequest(const std::string& session_id)
+{
+    auto it = pending_perm_queue_.find(session_id);
+    if (it == pending_perm_queue_.end() || it->second.empty()) return;
+    haicode::PermissionRequest req = it->second.front();
+
     // Display label: the session title when known, else the id's tail —
     // same fallback formatting _RefreshSessionList uses.
     std::string label = session_id;
-    if (!session_id.empty()) {
-        auto si = store_.get(session_id);
-        if (si && !si->title.empty())
-            label = si->title;
-        else if (session_id.size() > 8)
-            label = session_id.substr(session_id.size() - 8);
-    }
+    auto si = store_.get(session_id);
+    if (si && !si->title.empty())
+        label = si->title;
+    else if (session_id.size() > 8)
+        label = session_id.substr(session_id.size() - 8);
+
+    std::string build_command;
+    if (engine_) build_command = engine_->config().build_command;
 
     PermissionWindow* perm_win = new PermissionWindow(
-        session_id,
-        label,
-        action   ? action   : "",
-        resource ? resource : "",
-        detail   ? detail   : "",
-        BMessenger(this),
-        promise_raw
-    );
+        req, label, build_command, BMessenger(this));
+    open_perm_sessions_.insert(session_id);
     perm_win->Show();
 }
 
 void
-MainWindow::PostPermissionRequest(const std::string& session_id,
-                                  const std::string& action,
-                                  const std::string& resource,
-                                  const std::string& detail,
-                                  void* promise_ptr)
+MainWindow::_HandlePermissionWindowClosed(BMessage* msg)
 {
+    const char* sid = nullptr;
+    if (msg->FindString("session_id", &sid) != B_OK || !sid) return;
+    open_perm_sessions_.erase(sid);
+    // Surface the next queued request for that session, if any.
+    auto it = pending_perm_queue_.find(sid);
+    if (it != pending_perm_queue_.end() && !it->second.empty()) {
+        _ShowNextPermissionRequest(sid);
+    } else {
+        pending_perm_queue_.erase(it);
+    }
+}
+
+void
+MainWindow::PostPermissionRequest(const haicode::PermissionRequest& req)
+{
+    // Called from engine threads via the broker's delivery callback — only
+    // PostMessage below is thread-safe; everything else happens on the
+    // window loop in _HandlePermissionReq.
+    std::string input_json;
+    try { input_json = req.input.dump(); } catch (...) {}
     BMessage msg(MSG_PERMISSION_REQ);
-    msg.AddString("session_id", session_id.c_str());
-    msg.AddString("action",   action.c_str());
-    msg.AddString("resource", resource.c_str());
-    msg.AddString("detail",   detail.c_str());
-    msg.AddPointer("promise_ptr", promise_ptr);
+    msg.AddString("request_id", req.id.c_str());
+    msg.AddString("session_id", req.session_id.c_str());
+    msg.AddString("call_id",    req.call_id.c_str());
+    msg.AddString("tool_name",  req.tool_name.c_str());
+    msg.AddString("action",     req.action.c_str());
+    msg.AddString("resource",   req.resource.c_str());
+    msg.AddString("working_dir", req.working_dir.c_str());
+    msg.AddInt64("created_ms",  req.created_ms);
+    msg.AddString("input_json", input_json.c_str());
     PostMessage(&msg);
 }
 

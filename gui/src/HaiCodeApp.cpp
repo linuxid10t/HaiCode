@@ -29,7 +29,6 @@
 #include <fstream>
 #include <string>
 #include <memory>
-#include <future>
 #include <thread>
 #include <cstdio>
 #include <sys/stat.h>
@@ -177,42 +176,27 @@ HaiCodeApp::ReadyToRun()
     // --- 8. Apply permission rules from config ---
     perm_gate_->set_rules(config_.permissions);
 
-    // --- 9. Set up PermissionGate ask callback ---
-    // Capture window_holder_ by value so the lambda can access MainWindow* safely.
-    std::shared_ptr<MainWindow*> holder = window_holder_;
-
-    perm_gate_->set_ask_callback(
-        [holder](const std::string& session_id,
-                 const std::string& action,
-                 const std::string& resource,
-                 const nlohmann::json& input) -> haicode::PermissionEffect
-        {
-            MainWindow* win = *holder;
-            if (!win) {
-                // No window yet — deny
-                return haicode::PermissionEffect::Deny;
-            }
-
-            // Build detail string from input JSON
-            std::string detail;
-            try { detail = input.dump(2); } catch (...) {}
-
-            // Allocate a promise on the heap; engine thread blocks on the future
-            auto* promise = new std::promise<haicode::PermissionEffect>();
-            std::future<haicode::PermissionEffect> fut = promise->get_future();
-
-            // Post to MainWindow (thread-safe via BMessenger)
-            win->PostPermissionRequest(session_id, action, resource, detail,
-                                       static_cast<void*>(promise));
-
-            // Block engine thread until user responds
-            return fut.get();
-        }
-    );
+    // --- 9. Permission approval broker ---
+    // The broker owns approval wait state; GUI messages carry request ids,
+    // never promise pointers. Delivery posts to MainWindow (thread-safe via
+    // BMessenger); a missing window fails delivery and denies.
+    perm_broker_ = std::make_unique<haicode::PermissionRequestBroker>(
+        perm_gate_.get());
+    {
+        std::shared_ptr<MainWindow*> holder = window_holder_;
+        perm_broker_->set_delivery_callback(
+            [holder](const haicode::PermissionRequest& req) {
+                MainWindow* win = *holder;
+                if (!win) return false;
+                win->PostPermissionRequest(req);
+                return true;
+            });
+    }
 
     // --- 10. Create SessionEngine ---
     engine_ = std::make_unique<haicode::SessionEngine>(
         *store_, *providers_, *tools_, *perm_gate_, *bus_, config_);
+    engine_->set_permission_broker(perm_broker_.get());
 
     // --- 11. Create MainWindow ---
     main_window_ = new MainWindow(*engine_, *store_, project_dir_, config_.model, config_.provider);
@@ -251,13 +235,21 @@ void
 HaiCodeApp::MessageReceived(BMessage* msg)
 {
     switch (msg->what) {
-        case MSG_ADD_PERMISSION: {
-            const char* action   = nullptr;
-            const char* resource = nullptr;
-            msg->FindString("action",   &action);
-            msg->FindString("resource", &resource);
-            if (action && resource)
-                perm_gate_->add_allow(_TargetSession(msg), action, resource);
+        case MSG_PERMISSION_DECISION: {
+            // Approval-window reply routed by request id. Unknown/stale ids
+            // are refused by the broker (exactly-once), so a closed window's
+            // late duplicate can never approve anything.
+            const char* request_id = nullptr;
+            int32 decision = 0;   // default Deny (Escape/close path)
+            msg->FindString("request_id", &request_id);
+            msg->FindInt32("decision", &decision);
+            if (request_id && perm_broker_) {
+                using PD = haicode::PermissionDecision;
+                PD d = (decision == 2) ? PD::AllowForSession
+                     : (decision == 1) ? PD::AllowOnce
+                                       : PD::Deny;
+                perm_broker_->resolve(request_id, d);
+            }
             break;
         }
         case MSG_NEW_SESSION:
@@ -687,6 +679,12 @@ HaiCodeApp::_RecreateEngine(std::unique_ptr<haicode::ProviderRegistry> next_prov
         if (!sid.empty()) engine_->interrupt(sid);
         engine_->shutdown();
     }
+
+    // The retiring engine's shutdown() closed the broker (cancel_all); the
+    // shared broker must serve the new engine, so lift the block before the
+    // replacement starts running. Waits denied by the shutdown stay denied.
+    if (perm_broker_)
+        perm_broker_->reopen();
 
     auto old_engine = std::move(engine_);
     auto old_providers = next_providers ? std::move(providers_) : nullptr;

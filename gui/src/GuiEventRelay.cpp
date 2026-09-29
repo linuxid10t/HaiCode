@@ -264,17 +264,14 @@ GuiEventRelay::attach()
         main_window_.SendMessage(&msg);
     });
 
-    // PermissionRequested → MSG_PERMISSION_REQ
-    // Note: The promise_ptr is passed directly (engine thread blocks on future.get())
-    // The promise is created in HaiCodeApp's permission callback and packed into the message
+    // PermissionRequested → published by the engine for activity logging.
+    // Approval delivery does NOT flow through the bus: the PermissionGate's
+    // ask callback routes through PermissionRequestBroker (owned by
+    // HaiCodeApp), whose delivery callback posts MSG_PERMISSION_REQ straight
+    // to MainWindow. This subscription only feeds the activity log.
     bus_.subscribe(EventType::PermissionRequested, [this](const json& data) {
         std::string sid = data.value("session_id", "");
         if (!is_active_session(sid)) return;
-
-        // The permission callback in HaiCodeApp handles the promise machinery.
-        // We don't need to subscribe here — HaiCodeApp wires the callback directly
-        // to the PermissionGate, which calls it synchronously on the engine thread.
-        // This handler is a no-op; kept for potential future use.
     });
 
     // SessionRenamed → MSG_SESSION_RENAMED. Not gated on is_active_session:

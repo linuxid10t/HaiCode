@@ -4,30 +4,30 @@
 #include <Messenger.h>
 
 #include <string>
-#include <future>
 
-#include <haicode/tool.h>
+#include <haicode/permission_requests.h>
 
+// Modeless approval window for one broker request. Replies go to be_app as
+// MSG_PERMISSION_DECISION keyed by request id (never a promise pointer);
+// Escape and window close deny. No Allow button is the default.
 class PermissionWindow : public BWindow {
 public:
-    PermissionWindow(const std::string& session_id,
+    // notify_target gets MSG_PERMISSION_WINDOW_CLOSED (with "session_id")
+    // after the decision was sent, so MainWindow can surface the next
+    // queued request for that session.
+    PermissionWindow(const haicode::PermissionRequest& req,
                      const std::string& session_label,
-                     const std::string& action,
-                     const std::string& resource,
-                     const std::string& detail,
-                     BMessenger reply_target,
-                     void* promise_ptr);
+                     const std::string& build_command,
+                     BMessenger notify_target);
 
     void MessageReceived(BMessage* msg) override;
     bool QuitRequested() override;
 
 private:
-    void _SendReply(int32 effect);
+    void _SendDecision(int32 decision);
 
-    BMessenger  reply_target_;
-    void*       promise_ptr_;
-    bool        promise_fulfilled_ = false;
+    BMessenger notify_target_;
+    std::string request_id_;
     std::string session_id_;
-    std::string action_;
-    std::string resource_;
+    bool replied_ = false;
 };

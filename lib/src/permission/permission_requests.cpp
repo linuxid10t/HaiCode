@@ -205,6 +205,13 @@ void PermissionRequestBroker::allow_submissions(const std::string& session_id) {
     blocked_sessions_.erase(session_id);
 }
 
+void PermissionRequestBroker::reopen() {
+    std::lock_guard<std::mutex> lock(mu_);
+    shutdown_ = false;
+    shutdown_reason_.clear();
+    blocked_sessions_.clear();
+}
+
 std::vector<PermissionRequest> PermissionRequestBroker::pending_requests() const {
     std::lock_guard<std::mutex> lock(mu_);
     std::vector<PermissionRequest> out;

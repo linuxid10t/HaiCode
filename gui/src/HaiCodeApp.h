@@ -9,6 +9,7 @@
 #include <haicode/provider.h>
 #include <haicode/tool.h>
 #include <haicode/config.h>
+#include <haicode/permission_requests.h>
 
 #include "MainWindow.h"
 #include "GuiEventRelay.h"
@@ -32,6 +33,7 @@ private:
     std::unique_ptr<haicode::ProviderRegistry> providers_;
     std::unique_ptr<haicode::ToolRegistry>    tools_;
     std::unique_ptr<haicode::PermissionGate>  perm_gate_;
+    std::unique_ptr<haicode::PermissionRequestBroker> perm_broker_;
     std::unique_ptr<haicode::SessionEventBus> bus_;
     std::unique_ptr<haicode::SessionEngine>   engine_;
     std::unique_ptr<GuiEventRelay>            relay_;
@@ -42,7 +44,7 @@ private:
     haicode::AppConfig config_;
     std::string project_dir_;
 
-    // Shared holder so the permission callback can capture MainWindow*
+    // Shared holder so the broker's delivery callback can capture MainWindow*
     // safely even if the callback outlives ReadyToRun scope
     std::shared_ptr<MainWindow*> window_holder_;
 
