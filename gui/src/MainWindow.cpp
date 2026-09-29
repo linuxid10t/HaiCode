@@ -362,26 +362,17 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     _RebuildPermMenu();
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel("Standard");
-    // Pin the field to a fixed compact width: BMenuField's natural preferred
-    // width tracks the menu's widest item ("Allow reads everywhere"), which
-    // made the field huge. Sized to the longest status word instead, so the
-    // width never jitters as the status changes. Explicit min AND max — the
-    // group layout can never shrink a view below its min, and min defaults
-    // to the widest item too.
-    {
-        static const char* kStatusWords[] = {
-            "Standard", "Auto-write", "YOLO",
-            "Reads: project", "Reads: everywhere", "99 waiting",
-        };
-        float word = 0.f;
-        for (auto* s : kStatusWords)
-            word = std::max(word, ceilf(perm_status_field_->StringWidth(s)));
-        float w = ceilf(perm_status_field_->StringWidth("Permissions:"))
-                + 14.f   // divider/label spacing
-                + word + 36.f;  // bar margins + popup marker + slack
-        perm_status_field_->SetExplicitMinSize(BSize(w, B_SIZE_UNSET));
-        perm_status_field_->SetExplicitMaxSize(BSize(w, B_SIZE_UNSET));
-    }
+    // The closed field hugs the CURRENT status word: _UpdatePermissionStatus
+    // re-pins explicit min/max whenever the label changes. BMenuField's
+    // natural preferred width tracks the menu's widest ITEM ("Allow reads
+    // everywhere") and its MaxSize() width is unlimited, so without the pin
+    // the field bloats to the widest item and grows on window maximize. The
+    // OPEN popup is unaffected: it lives in its own BMenuWindow that sizes
+    // to fit its items, so the menu can be wider than the closed field.
+    perm_status_field_->SetExplicitMinSize(BSize(_PermFieldWidth("Standard"),
+                                                 B_SIZE_UNSET));
+    perm_status_field_->SetExplicitMaxSize(BSize(_PermFieldWidth("Standard"),
+                                                 B_SIZE_UNSET));
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -944,8 +935,9 @@ MainWindow::MessageReceived(BMessage* msg)
             // Non-radio menus don't toggle marks on selection: flip it here,
             // send the new value; be_app's echo confirms the final state.
             // Live in Build and Plan (outside-project reads gate and prompt
-            // in both); Chat has no read tool at all.
-            if (perm_mode_ != "build" && perm_mode_ != "plan") {
+            // in both); Chat has no read tool, and YOLO subsumes the grant.
+            if ((perm_mode_ != "build" && perm_mode_ != "plan")
+                    || perm_preset_ == "unrestricted") {
                 be_app->PostMessage(MSG_PERM_SYNC);
                 break;
             }
@@ -2017,6 +2009,19 @@ MainWindow::_RebuildPermMenu()
     }
 }
 
+// Width to pin the permission field to for a status word: label + divider
+// spacing + the word + the closed bar's fixed chrome (margins, popup
+// marker). Small slack absorbs the label-draw rounding.
+float
+MainWindow::_PermFieldWidth(const std::string& status) const
+{
+    if (!perm_status_field_) return 0.f;
+    float label = ceilf(perm_status_field_->StringWidth("Permissions:"))
+                + 14.f;  // divider/label spacing (DefaultLabelSpacing)
+    float word = ceilf(perm_status_field_->StringWidth(status.c_str()));
+    return label + word + 30.f;  // bar margins + popup marker + slack
+}
+
 void
 MainWindow::_UpdatePermissionStatus()
 {
@@ -2035,8 +2040,26 @@ MainWindow::_UpdatePermissionStatus()
         }
     }
     if (perm_read_item_) perm_read_item_->SetMarked(perm_read_on_);
-    if (BMenuItem* bar = perm_status_field_->MenuItem())
-        bar->SetLabel(perm_status_.c_str());
+    // YOLO ({*,*} allow-all) subsumes the read toggle — gray it out so the
+    // menu doesn't imply a second, narrower grant on top of allow-all.
+    // BMenuItem has no tooltips; the label states the dependency.
+    if (perm_read_item_) {
+        bool yolo = (perm_preset_ == "unrestricted");
+        perm_read_item_->SetEnabled(!yolo);
+        perm_read_item_->SetLabel(yolo
+            ? "Allow reads everywhere (already allowed by YOLO)"
+            : "Allow reads everywhere");
+    }
+    if (BMenuItem* bar = perm_status_field_->MenuItem()) {
+        // Re-pin whenever the word changes so the closed field hugs it.
+        std::string prev = bar->Label() ? bar->Label() : "";
+        if (prev != perm_status_) {
+            bar->SetLabel(perm_status_.c_str());
+            float w = _PermFieldWidth(perm_status_);
+            perm_status_field_->SetExplicitMinSize(BSize(w, B_SIZE_UNSET));
+            perm_status_field_->SetExplicitMaxSize(BSize(w, B_SIZE_UNSET));
+        }
+    }
 }
 
 void

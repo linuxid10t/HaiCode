@@ -89,6 +89,8 @@ private:
     void _HandlePermissionWindowClosed(BMessage* msg);
     void _HandlePermStatus(BMessage* msg);
     void _UpdatePermissionStatus();
+    // Width to pin the permission field to for a given status word.
+    float _PermFieldWidth(const std::string& status) const;
     // Rebuilds the permission dropdown's item set for perm_mode_ (Build:
     // presets + read toggle; Plan: read toggle; Chat: empty — field hidden).
     void _RebuildPermMenu();
