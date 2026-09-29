@@ -11,7 +11,7 @@ A native coding-agent app for **Haiku R1** — a native GUI (BeAPI) frontend bac
 - **Native GUI** — `haicode-gui`, a Haiku BeAPI frontend.
 - **Nineteen built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `ls`, `find`, `symbols`, `diff`, `git`, `process`, `external_terminal`, `todo_write`, `propose_plan`, `discard_plan`, `write_agents_md`, plus `web_search` and `web_extract` — each with safe argument handling and a 100 KB output cap. The `symbols` tool does heuristic C/C++ symbol search (definitions + classified references), skipping comments and string literals for less noise than `grep`.
 - **Multi-provider** — any number of Anthropic and OpenAI-compatible endpoints (proxies, Ollama, LM Studio, …) in `config.json`, with message-format translation between them.
-- **Permissions** — fnmatch rules per session, with an interactive Ask → Allow / Deny / Allow-Always flow.
+- **Permissions** — fnmatch rules per session plus literal session grants, with a structured approval flow (Deny / Allow Once / Allow this target for this session), a Permissions center for inspecting pending requests, revoking grants, editing global/project policy, and tracing why any operation was allowed or denied. Approval waits are cancellable: interrupting a session or closing the window denies it, and no Allow action is ever the default.
 - **SQLite session history** — every user prompt, assistant message, tool call, and tool result is stored and reloadable. WAL mode + cascading deletes.
 - **Project + global config** — global config in `B_USER_SETTINGS_DIRECTORY/haicode/config.json`, project config in `<project>/.haicode/config.json`.
 
@@ -110,6 +110,19 @@ no special action is needed.
 If no project directory is given, the GUI opens the last-used project from global config.
 
 **Single instance only.** Do not run two HaiCode GUI instances at once: both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db`, and concurrent access fails on SQLite database locking. Close one before starting another.
+
+## Permissions
+
+Authorization is layered, evaluated per session in this order (first decisive layer wins):
+
+1. **Exact temporary grants** — literal (category, target) pairs approved via "Allow this target for this session". They match the displayed text exactly, never glob-expand, and last until revoked or HaiCode exits.
+2. **Session pattern grants** — legacy pattern grants created by older "Allow Always" flows.
+3. **Session toggles** — the Permissions center's per-session switches: *Automatically allow writes*, *Allow reads outside trusted roots*, and *Bypass permission prompts* (confirmed, not a sandbox; mode and offline restrictions still apply). Persisted per session, restored on reopen.
+4. **Configured rules** — `permissions` arrays in the global (`~/config/settings/haicode/config.json`) and project (`<project>/.haicode/config.json`) config files, editable in the Permissions center's Policies tab. Within one source the last matching rule wins; an `Ask` rule falls through to prompting.
+
+Read-only tools inside the project directory (and Haiku's system header/doc roots) bypass all of this — opening a project is taken as trust in its tree.
+
+The approval window explains the operation in plain language (tool, category, full selectable target, tool-specific previews, outside-project and build-hook warnings). Deny is always the default: Enter, Escape, and closing the window all deny. Interrupting a session denies its pending approvals, so a wait can never hang the engine. The Permissions center (Settings → Permissions…, or the status button by the prompt) shows pending requests, every temporary grant with revoke, the rule editors, an operation inspector that reports the real decision path without executing, and a per-session activity log of authorization outcomes since launch.
 
 ## Architecture
 
