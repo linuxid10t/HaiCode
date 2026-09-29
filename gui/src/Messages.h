@@ -93,6 +93,7 @@ static const uint32 MSG_PERM_REFRESH          = 'PMrf';  // be_app → center: r
 static const uint32 MSG_PERM_ACTIVATE         = 'PMac';  // be_app → center: Activate()
 static const uint32 MSG_PERM_STATUS           = 'PMst';  // be_app → MainWindow: "status" string + repeated "pend_session" strings
 static const uint32 MSG_PERM_SYNC             = 'PMsy';  // any thread → be_app: recompute permission status + badges
+static const uint32 MSG_PERM_PRESET           = 'PMpr';  // MainWindow dropdown → MainWindow: "preset" string (standard/auto-write/unrestricted)
 
 // PermissionRuleEditWindow → PermissionsCenterWindow
 static const uint32 MSG_PERM_RULE_DONE = 'PRrd';  // "action"/"resource"/"effect" strings + "index" int32

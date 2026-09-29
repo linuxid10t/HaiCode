@@ -177,8 +177,13 @@ private:
     BPopUpMenu*    mode_menu_       = nullptr;
     BMenuField*    mode_field_      = nullptr;
     BButton*       compact_btn_     = nullptr;
-    // Compact permission status ("Permissions: Standard"); opens the center.
-    BButton*       perm_status_btn_ = nullptr;
+    // Quick permission selector (prompt row): presets + read toggle + entry
+    // to the Permissions center. Marked state mirrors be_app's session flags
+    // via MSG_PERM_STATUS; edits post the same toggle/preset messages the
+    // center uses.
+    BPopUpMenu*    perm_menu_         = nullptr;
+    BMenuField*    perm_status_field_ = nullptr;
+    BMenuItem*     perm_read_item_    = nullptr;
     std::string    perm_status_     = "Standard";
     // Sessions with approval requests waiting (drives list badges);
     // value = number of unresolved requests for that session.

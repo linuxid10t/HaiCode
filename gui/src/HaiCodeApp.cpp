@@ -843,11 +843,13 @@ HaiCodeApp::_NotifyPermissionUiChanged()
         active = main_window_->active_session_id();
         main_window_->Unlock();
     }
+    bool read_on = false;
     if (!active.empty()) {
         auto it = session_flags_.find(active);
         if (it != session_flags_.end()) {
             if (it->second.yolo)          status = "Unrestricted";
             else if (it->second.auto_edits) status = "Auto-write";
+            read_on = it->second.read_everywhere;
         }
     }
     size_t pending = perm_broker_ ? perm_broker_->pending_count() : 0;
@@ -856,6 +858,7 @@ HaiCodeApp::_NotifyPermissionUiChanged()
 
     BMessage m(MSG_PERM_STATUS);
     m.AddString("status", status.c_str());
+    m.AddBool("read_everywhere", read_on);
     if (perm_broker_) {
         for (const auto& req : perm_broker_->pending_requests())
             m.AddString("pend_session", req.session_id.c_str());

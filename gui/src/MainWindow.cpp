@@ -347,11 +347,38 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     if (BMenuItem* it = mode_menu_->ItemAt(0)) it->SetMarked(true);
     mode_field_ = new BMenuField("mode_field", "", mode_menu_);
 
-    // Compact permission status; opens the Permissions center. Kept beside
-    // the mode selector: modes govern tool availability, permissions govern
-    // authorization of available tools.
-    perm_status_btn_ = new BButton("perm_status", "Permissions: Standard",
-                                   new BMessage(MSG_SHOW_PERMISSIONS));
+    // Compact permission selector. A dropdown, not a button: quick access to
+    // the common permission presets without opening the full Permissions
+    // center. The presets map onto the same session flags the center edits
+    // (be_app owns the state), so the two can never disagree. Not radio mode:
+    // the read toggle marks independently of the presets, so marks are
+    // managed by hand and the field label set explicitly.
+    perm_menu_ = new BPopUpMenu("Perms");
+    // BPopUpMenu defaults to radio mode; off — the read toggle keeps its
+    // mark independently of the presets, and marks are managed by hand
+    // (selection alone doesn't move them in non-radio mode).
+    perm_menu_->SetRadioMode(false);
+    const struct { const char* label; const char* value; } kPermItems[] = {
+        { "Standard",     "standard"     },
+        { "Auto-write",   "auto-write"   },
+        { "Unrestricted", "unrestricted" },
+    };
+    for (auto& item : kPermItems) {
+        BMessage* pm = new BMessage(MSG_PERM_PRESET);
+        pm->AddString("preset", item.value);
+        perm_menu_->AddItem(new BMenuItem(item.label, pm));
+    }
+    if (BMenuItem* std_it = perm_menu_->ItemAt(0)) std_it->SetMarked(true);
+    perm_menu_->AddSeparatorItem();
+    perm_read_item_ = new BMenuItem("Allow reads outside trusted roots",
+                                    new BMessage(MSG_PERM_TOGGLE_READ));
+    perm_menu_->AddItem(perm_read_item_);
+    perm_menu_->AddSeparatorItem();
+    perm_menu_->AddItem(new BMenuItem("Permissions" B_UTF8_ELLIPSIS,
+                                      new BMessage(MSG_SHOW_PERMISSIONS)));
+    perm_status_field_ = new BMenuField("perm_status", "Permissions:", perm_menu_);
+    if (BMenuItem* bar = perm_status_field_->MenuItem())
+        bar->SetLabel("Standard");
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -539,7 +566,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                         .Add(prompt_label)
                         .Add(attach_row_)
                         .AddGlue()
-                        .Add(perm_status_btn_)
+                        .Add(perm_status_field_)
                     .End()
                     .Add(input_group)
                 .End()
@@ -873,6 +900,50 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_SHOW_PERMISSIONS:
             be_app->PostMessage(msg);
             break;
+        case MSG_PERM_PRESET: {
+            // Quick preset picked in the prompt-row dropdown. Translate to
+            // the same flag transitions be_app already handles; be_app's
+            // MSG_PERM_STATUS echo re-marks the menu. Cancelling the
+            // confirmation posts nothing, so the mark stays put.
+            const char* preset = nullptr;
+            if (msg->FindString("preset", &preset) != B_OK || !preset) break;
+            std::string p = preset;
+            bool auto_w = (p == "auto-write"), yolo = (p == "unrestricted");
+            if (yolo) {
+                BAlert* confirm = new BAlert("Unrestricted",
+                    "Allow every tool call in this session without asking?\n"
+                    "This is not a sandbox: mode and offline restrictions "
+                    "still apply, and file writes, shell commands, and "
+                    "network access will all run unprompted.",
+                    "Cancel", "Enable", nullptr, B_WIDTH_AS_USUAL,
+                    B_WARNING_ALERT);
+                confirm->SetShortcut(0, B_ESCAPE);
+                if (confirm->Go() == 0) break;
+            }
+            auto post = [&](uint32 what, bool on) {
+                BMessage m(what);
+                m.AddInt32("be:value", on ? B_CONTROL_ON : B_CONTROL_OFF);
+                m.AddString("session_id", active_session_id_.c_str());
+                be_app->PostMessage(&m);
+            };
+            post(MSG_AUTO_ALLOW_EDITS, auto_w);
+            post(MSG_YOLO, yolo);
+            break;
+        }
+        case MSG_PERM_TOGGLE_READ: {
+            // Non-radio menus don't toggle marks on selection: flip it here,
+            // send the new value; be_app's echo confirms the final state.
+            bool on = true;
+            if (perm_read_item_) {
+                on = !perm_read_item_->IsMarked();
+                perm_read_item_->SetMarked(on);
+            }
+            BMessage m(MSG_READ_EVERYWHERE);
+            m.AddInt32("be:value", on ? B_CONTROL_ON : B_CONTROL_OFF);
+            m.AddString("session_id", active_session_id_.c_str());
+            be_app->PostMessage(&m);
+            break;
+        }
         case MSG_AUTO_ALLOW_EDITS:
         case MSG_YOLO:
         case MSG_READ_EVERYWHERE:
@@ -1865,6 +1936,14 @@ MainWindow::_HandlePermStatus(BMessage* msg)
         if (sid && *sid)
             perm_pending_sessions_[sid] += 1;
     }
+
+    // Mirror the active session's flags into the dropdown marks. The status
+    // string is derived from the same flags in HaiCodeApp, so parsing it back
+    // keeps this dropdown and the Permissions center consistent.
+    bool read_on = false;
+    if (msg->FindBool("read_everywhere", &read_on) == B_OK && perm_read_item_)
+        perm_read_item_->SetMarked(read_on);
+
     _UpdatePermissionStatus();
     _RefreshSessionBadges();
 }
@@ -1872,9 +1951,20 @@ MainWindow::_HandlePermStatus(BMessage* msg)
 void
 MainWindow::_UpdatePermissionStatus()
 {
-    if (!perm_status_btn_) return;
-    perm_status_btn_->SetLabel(
-        (std::string("Permissions: ") + perm_status_).c_str());
+    if (!perm_status_field_) return;
+    // Preset mark follows the derived status word. A pending count ("N
+    // waiting") says nothing about the preset — keep the existing mark.
+    int preset_idx = -1;
+    if (perm_status_ == "Standard")     preset_idx = 0;
+    if (perm_status_ == "Auto-write")   preset_idx = 1;
+    if (perm_status_ == "Unrestricted") preset_idx = 2;
+    if (preset_idx >= 0 && perm_menu_) {
+        for (int i = 0; i < 3; ++i)
+            if (BMenuItem* it = perm_menu_->ItemAt(i))
+                it->SetMarked(i == preset_idx);
+    }
+    if (BMenuItem* bar = perm_status_field_->MenuItem())
+        bar->SetLabel(perm_status_.c_str());
 }
 
 void
