@@ -185,6 +185,11 @@ private:
     BMenuField*    perm_status_field_ = nullptr;
     BMenuItem*     perm_read_item_    = nullptr;
     std::string    perm_status_     = "Standard";
+    // Mode + preset of the active session, from MSG_PERM_STATUS. The preset
+    // string is authoritative ("" outside Build) — the status word can be
+    // overridden by pending counts.
+    std::string    perm_mode_       = "build";
+    std::string    perm_preset_     = "standard";
     // Sessions with approval requests waiting (drives list badges);
     // value = number of unresolved requests for that session.
     std::map<std::string, int> perm_pending_sessions_;

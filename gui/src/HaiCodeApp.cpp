@@ -836,6 +836,10 @@ void
 HaiCodeApp::_NotifyPermissionUiChanged()
 {
     // Status summary for the active session + per-session pending counts.
+    // Mode-scoped: write presets surface only in Build (Plan is
+    // non-destructive, Chat has no local access); Plan reports its read
+    // scope instead. The hard boundary is the engine's tool allowlist —
+    // this only keeps the summary honest about it.
     std::string status = "Standard";
     std::string active;
     if (main_window_) {
@@ -843,15 +847,38 @@ HaiCodeApp::_NotifyPermissionUiChanged()
         active = main_window_->active_session_id();
         main_window_->Unlock();
     }
+    haicode::SessionMode mode = haicode::SessionMode::Build;
+    if (engine_ && !active.empty()) mode = engine_->get_mode(active);
+    // Convergence point: every flag/mode/session change funnels through
+    // here, so re-derive the active session's armed rules from flags + the
+    // CURRENT mode. _ApplySessionRules is mode-gated and idempotent — this
+    // is what disarms dormant write rules when a session leaves Build and
+    // re-arms them when it returns.
+    if (!active.empty()) _ApplySessionRules(active);
     bool read_on = false;
+    // Write presets exist only in Build; "" outside Build converges the
+    // dropdown's mark to Standard regardless of the flag entry.
+    std::string preset = (mode == haicode::SessionMode::Build) ? "standard" : "";
     if (!active.empty()) {
         auto it = session_flags_.find(active);
         if (it != session_flags_.end()) {
-            if (it->second.yolo)          status = "Unrestricted";
-            else if (it->second.auto_edits) status = "Auto-write";
             read_on = it->second.read_everywhere;
+            if (mode == haicode::SessionMode::Build) {
+                if (it->second.yolo) {
+                    status = "Unrestricted";
+                    preset = "unrestricted";
+                } else if (it->second.auto_edits) {
+                    status = "Auto-write";
+                    preset = "auto-write";
+                }
+            }
         }
     }
+    if (mode == haicode::SessionMode::Plan)
+        status = read_on ? "Plan reads: everywhere" : "Plan reads: project";
+    else if (mode == haicode::SessionMode::Chat)
+        status = "No local access";
+
     size_t pending = perm_broker_ ? perm_broker_->pending_count() : 0;
     if (pending > 0)
         status = std::to_string(pending) + " waiting";
@@ -859,6 +886,9 @@ HaiCodeApp::_NotifyPermissionUiChanged()
     BMessage m(MSG_PERM_STATUS);
     m.AddString("status", status.c_str());
     m.AddBool("read_everywhere", read_on);
+    m.AddString("preset", preset.c_str());
+    m.AddString("mode", mode == haicode::SessionMode::Plan ? "plan"
+              : mode == haicode::SessionMode::Chat ? "chat" : "build");
     if (perm_broker_) {
         for (const auto& req : perm_broker_->pending_requests())
             m.AddString("pend_session", req.session_id.c_str());
@@ -870,14 +900,24 @@ HaiCodeApp::_NotifyPermissionUiChanged()
 void
 HaiCodeApp::_ApplySessionRules(const std::string& session_id)
 {
+    // Permissions are mode-scoped, mirroring the engine's tool allowlist
+    // (ToolRegistry::evaluate checks tool_allowed_in_mode before any gate
+    // rule, so this is consistency, not the security boundary): write/bypass
+    // rules arm only in Build — Plan is non-destructive and Chat has no
+    // local access — and the reads-outside rule is Plan-only.
+    haicode::SessionMode mode = haicode::SessionMode::Build;
+    if (engine_) mode = engine_->get_mode(session_id);
+    bool build = (mode == haicode::SessionMode::Build);
+    bool plan  = (mode == haicode::SessionMode::Plan);
+
     std::vector<haicode::PermissionRule> rules;
     auto it = session_flags_.find(session_id);
     if (it != session_flags_.end()) {
-        if (it->second.auto_edits)
+        if (build && it->second.auto_edits)
             rules.push_back({"write", "*", haicode::PermissionEffect::Allow});
-        if (it->second.yolo)
+        if (build && it->second.yolo)
             rules.push_back({"*", "*", haicode::PermissionEffect::Allow});
-        if (it->second.read_everywhere)
+        if (plan && it->second.read_everywhere)
             rules.push_back({"read", "*", haicode::PermissionEffect::Allow});
     }
     perm_gate_->set_session_rules(session_id, rules);

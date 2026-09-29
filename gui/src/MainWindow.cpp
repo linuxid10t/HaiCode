@@ -908,6 +908,13 @@ MainWindow::MessageReceived(BMessage* msg)
             const char* preset = nullptr;
             if (msg->FindString("preset", &preset) != B_OK || !preset) break;
             std::string p = preset;
+            // Mode guard: write presets are Build-only. Items are disabled
+            // per mode, but perm_mode_ updates asynchronously — a stale menu
+            // selection must not arm a dormant flag.
+            if (p != "standard" && perm_mode_ != "build") {
+                be_app->PostMessage(MSG_PERM_SYNC);
+                break;
+            }
             bool auto_w = (p == "auto-write"), yolo = (p == "unrestricted");
             if (yolo) {
                 BAlert* confirm = new BAlert("Unrestricted",
@@ -933,6 +940,11 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_PERM_TOGGLE_READ: {
             // Non-radio menus don't toggle marks on selection: flip it here,
             // send the new value; be_app's echo confirms the final state.
+            // Plan-only (Build resets it, Chat has no read tool at all).
+            if (perm_mode_ != "plan") {
+                be_app->PostMessage(MSG_PERM_SYNC);
+                break;
+            }
             bool on = true;
             if (perm_read_item_) {
                 on = !perm_read_item_->IsMarked();
@@ -1944,6 +1956,13 @@ MainWindow::_HandlePermStatus(BMessage* msg)
     if (msg->FindBool("read_everywhere", &read_on) == B_OK && perm_read_item_)
         perm_read_item_->SetMarked(read_on);
 
+    const char* mode_s = nullptr;
+    if (msg->FindString("mode", &mode_s) == B_OK && mode_s)
+        perm_mode_ = mode_s;
+    const char* preset_s = nullptr;
+    if (msg->FindString("preset", &preset_s) == B_OK && preset_s)
+        perm_preset_ = preset_s;
+
     _UpdatePermissionStatus();
     _RefreshSessionBadges();
 }
@@ -1952,17 +1971,30 @@ void
 MainWindow::_UpdatePermissionStatus()
 {
     if (!perm_status_field_) return;
-    // Preset mark follows the derived status word. A pending count ("N
-    // waiting") says nothing about the preset — keep the existing mark.
-    int preset_idx = -1;
-    if (perm_status_ == "Standard")     preset_idx = 0;
-    if (perm_status_ == "Auto-write")   preset_idx = 1;
-    if (perm_status_ == "Unrestricted") preset_idx = 2;
-    if (preset_idx >= 0 && perm_menu_) {
+    // Preset mark from the authoritative preset string. Outside Build it is
+    // empty (write presets don't exist there), which converges the mark to
+    // Standard — accurate, since no write grant applies. A pending count
+    // ("N waiting") only changes the label, not the marks.
+    std::string p = perm_preset_.empty() ? "standard" : perm_preset_;
+    int preset_idx = 0;
+    if (p == "auto-write")   preset_idx = 1;
+    if (p == "unrestricted") preset_idx = 2;
+    if (perm_menu_) {
         for (int i = 0; i < 3; ++i)
             if (BMenuItem* it = perm_menu_->ItemAt(i))
                 it->SetMarked(i == preset_idx);
     }
+    // Mode scoping, mirroring the Permissions center: write presets are
+    // Build-only (Plan is non-destructive, Chat has no local access) and
+    // the reads-outside toggle is Plan-only. The engine's tool allowlist is
+    // the hard boundary; this keeps the quick control from offering no-ops.
+    bool build = (perm_mode_ == "build");
+    bool plan  = (perm_mode_ == "plan");
+    if (perm_menu_) {
+        if (BMenuItem* it = perm_menu_->ItemAt(1)) it->SetEnabled(build);
+        if (BMenuItem* it = perm_menu_->ItemAt(2)) it->SetEnabled(build);
+    }
+    if (perm_read_item_) perm_read_item_->SetEnabled(plan);
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel(perm_status_.c_str());
 }
@@ -2289,6 +2321,10 @@ MainWindow::_SetMode(haicode::SessionMode next)
 
     engine_->set_mode(active_session_id_, next);
     _ResetModeInapplicableToggles();
+    // Mode change re-scopes permissions (write presets Build-only, reads
+    // Plan-only): force the be_app echo so the dropdown's enabled items and
+    // marks follow the new mode even when no flag actually changed.
+    be_app->PostMessage(MSG_PERM_SYNC);
     // No injected message here: set_mode queues a notice that rides out with
     // the next submitted prompt (only the last flip survives).
     _RefreshModeButton();
