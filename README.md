@@ -122,7 +122,7 @@ Authorization is layered, evaluated per session in this order (first decisive la
 
 Read-only tools inside the project directory (and Haiku's system header/doc roots) bypass all of this — opening a project is taken as trust in its tree.
 
-The approval window explains the operation in plain language (tool, category, full selectable target, tool-specific previews, outside-project and build-hook warnings). Deny is always the default: Enter, Escape, and closing the window all deny. Interrupting a session denies its pending approvals, so a wait can never hang the engine. The Permissions center (Settings → Permissions…, or the status button by the prompt) shows pending requests, every temporary grant with revoke, the rule editors, an operation inspector that reports the real decision path without executing, and a per-session activity log of authorization outcomes since launch.
+The approval window explains the operation in plain language (tool, category, full selectable target, tool-specific previews, outside-project and build-hook warnings). Deny is always the default: Enter, Escape, and closing the window all deny. Interrupting a session denies its pending approvals, so a wait can never hang the engine. The Permissions center (Settings → Permissions…, or the Permissions dropdown by the prompt) shows pending requests, every temporary grant with revoke, the rule editors, an operation inspector that reports the real decision path without executing, and a per-session activity log of authorization outcomes since launch. For quick changes, the prompt-row Permissions dropdown offers the common presets — Standard, Auto-write, Unrestricted — and the allow-reads-outside toggle without opening the center.
 
 ## Architecture
 
