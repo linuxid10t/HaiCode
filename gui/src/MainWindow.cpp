@@ -291,7 +291,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // Slot container that always stays in the toolbar flow. When Chat mode
     // hides the button, _SetDirBtnVisible() pins this slot's width so the
-    // Provider:/Model:/Mode: fields don't shift left.
+    // Provider:/Model: fields don't shift left.
     dir_slot_ = new BGroupView(B_HORIZONTAL, 0);
     BLayoutBuilder::Group<>(dir_slot_)
         .Add(dir_btn_)
@@ -411,12 +411,6 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
         .Add(dir_slot_, 0.f)
         .Add(provider_field_)
         .Add(model_field_)
-        .Add(inf_effort_field_, 0.f)
-        // Weight 0: BMenuField is horizontally stretchy, and a third
-        // stretchy field was redistributing the toolbar's surplus space,
-        // shrinking the Provider/Model dropdowns. Keep it at preferred
-        // width like the buttons.
-        .Add(mode_field_, 0.f)
         .Add(interrupt_btn_)
         .AddGlue()
     .End();
@@ -536,6 +530,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                         .Add(auto_edits_chk_)
                         .Add(yolo_chk_)
                         .Add(read_everywhere_chk_)
+                        .Add(inf_effort_field_, 0.f)
+                        .Add(mode_field_, 0.f)
                     .End()
                     .Add(input_group)
                 .End()
