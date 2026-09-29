@@ -347,13 +347,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     if (BMenuItem* it = mode_menu_->ItemAt(0)) it->SetMarked(true);
     mode_field_ = new BMenuField("mode_field", "", mode_menu_);
 
-    auto_edits_chk_ = new BCheckBox("auto_edits", "Auto-allow edits",
-                                    new BMessage(MSG_AUTO_ALLOW_EDITS));
-    yolo_chk_       = new BCheckBox("yolo", "YOLO", new BMessage(MSG_YOLO));
-    read_everywhere_chk_ = new BCheckBox("read_everywhere",
-                                         "Allow Read Everywhere",
-                                         new BMessage(MSG_READ_EVERYWHERE));
-    read_everywhere_chk_->Hide();
+    // Compact permission status; opens the Permissions center. Kept beside
+    // the mode selector: modes govern tool availability, permissions govern
+    // authorization of available tools.
+    perm_status_btn_ = new BButton("perm_status", "Permissions: Standard",
+                                   new BMessage(MSG_SHOW_PERMISSIONS));
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -541,9 +539,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                         .Add(prompt_label)
                         .Add(attach_row_)
                         .AddGlue()
-                        .Add(auto_edits_chk_)
-                        .Add(yolo_chk_)
-                        .Add(read_everywhere_chk_)
+                        .Add(perm_status_btn_)
                     .End()
                     .Add(input_group)
                 .End()
@@ -880,29 +876,8 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_AUTO_ALLOW_EDITS:
         case MSG_YOLO:
         case MSG_READ_EVERYWHERE:
-            // Persist toggle states to the active session's model_json so
-            // they survive session switches and app restart. The toggled value
-            // comes from the message; the others are read from their checkboxes.
-            if (!active_session_id_.empty()) {
-                int32 ae = (auto_edits_chk_ ? auto_edits_chk_->Value()
-                                            : B_CONTROL_OFF);
-                int32 yo = (yolo_chk_ ? yolo_chk_->Value() : B_CONTROL_OFF);
-                int32 re = (read_everywhere_chk_ ? read_everywhere_chk_->Value()
-                                                 : B_CONTROL_OFF);
-                if (msg->what == MSG_AUTO_ALLOW_EDITS)
-                    msg->FindInt32("be:value", &ae);
-                else if (msg->what == MSG_YOLO)
-                    msg->FindInt32("be:value", &yo);
-                else
-                    msg->FindInt32("be:value", &re);
-                store_.update_permission_flags(
-                    active_session_id_,
-                    ae == B_CONTROL_ON,
-                    yo == B_CONTROL_ON,
-                    re == B_CONTROL_ON);
-            }
-            // Tag with the session so be_app scopes the rule change to it —
-            // a background session's rules must not follow the selection.
+            // Forward to be_app tagged with the active session; it owns the
+            // flag state, gate rules, and persistence now.
             msg->AddString("session_id", active_session_id_.c_str());
             be_app->PostMessage(msg);
             break;
@@ -1059,6 +1034,11 @@ MainWindow::MessageReceived(BMessage* msg)
         }
         case MSG_PERMISSION_WINDOW_CLOSED:
             _HandlePermissionWindowClosed(msg);
+            // A resolution changed pending counts; refresh status + badges.
+            be_app->PostMessage(MSG_PERM_SYNC);
+            break;
+        case MSG_PERM_STATUS:
+            _HandlePermStatus(msg);
             break;
         default:
             BWindow::MessageReceived(msg);
@@ -1072,6 +1052,7 @@ MainWindow::_RefreshSessionList()
     // Remove old items
     session_list_->MakeEmpty();
     session_ids_.clear();
+    session_labels_.clear();
 
     auto sessions = store_.list(50);
     for (auto& si : sessions) {
@@ -1096,9 +1077,11 @@ MainWindow::_RefreshSessionList()
         } else {
             title = si.id;
         }
+        session_labels_.push_back(title);
         session_list_->AddItem(new BStringItem(title.c_str()));
         session_ids_.push_back(si.id);
     }
+    _RefreshSessionBadges();
 }
 
 void
@@ -1146,31 +1129,9 @@ MainWindow::_NewSession()
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 
-    // Reset permission checkboxes. SetValue() changes the visual state but
-    // does NOT invoke the message, so post explicit resets tagged with the
-    // new session's id so be_app scopes them via _ApplySessionRules(sid).
-    if (auto_edits_chk_) auto_edits_chk_->SetValue(B_CONTROL_OFF);
-    if (yolo_chk_)       yolo_chk_->SetValue(B_CONTROL_OFF);
-    if (read_everywhere_chk_) read_everywhere_chk_->SetValue(B_CONTROL_OFF);
-    be_app->PostMessage(MSG_NEW_SESSION);
-    {
-        BMessage m(MSG_AUTO_ALLOW_EDITS);
-        m.AddInt32("be:value", B_CONTROL_OFF);
-        m.AddString("session_id", sid.c_str());
-        be_app->PostMessage(&m);
-    }
-    {
-        BMessage m(MSG_YOLO);
-        m.AddInt32("be:value", B_CONTROL_OFF);
-        m.AddString("session_id", sid.c_str());
-        be_app->PostMessage(&m);
-    }
-    {
-        BMessage m(MSG_READ_EVERYWHERE);
-        m.AddInt32("be:value", B_CONTROL_OFF);
-        m.AddString("session_id", sid.c_str());
-        be_app->PostMessage(&m);
-    }
+    // Flag state now lives in be_app (synced via MSG_ACTIVE_SESSION); the
+    // Permissions center is where it is inspected and changed.
+    be_app->PostMessage(MSG_PERM_SYNC);
 }
 
 void
@@ -1190,9 +1151,6 @@ MainWindow::_SelectSession(int idx)
     be_app->PostMessage(&notify);
 
     // Sync toolbar to session's stored provider/model/directory
-    bool restore_auto_edits = false;
-    bool restore_yolo = false;
-    bool restore_read_everywhere = false;
     auto si = store_.get(active_session_id_);
     if (si) {
         // Restore working directory
@@ -1208,9 +1166,6 @@ MainWindow::_SelectSession(int idx)
             auto mj = nlohmann::json::parse(si->model_json);
             provider_id = mj.value("provider_id", "");
             model_id    = mj.value("id", "");
-            restore_auto_edits = mj.value("auto_edits", false);
-            restore_yolo       = mj.value("yolo", false);
-            restore_read_everywhere = mj.value("allow_read_everywhere", false);
         } catch (...) {}
 
         if (!provider_id.empty())
@@ -1272,34 +1227,9 @@ MainWindow::_SelectSession(int idx)
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 
-    // Restore permission checkboxes from the session's model_json. SetValue()
-    // changes the visual state but does NOT invoke the message, so post the
-    // restored values — tagged with this session's id — to be_app so it
-    // reapplies that session's rules; other sessions are untouched.
-    if (auto_edits_chk_) auto_edits_chk_->SetValue(
-        restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
-    if (yolo_chk_)       yolo_chk_->SetValue(
-        restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
-    if (read_everywhere_chk_) read_everywhere_chk_->SetValue(
-        restore_read_everywhere ? B_CONTROL_ON : B_CONTROL_OFF);
-    {
-        BMessage m(MSG_AUTO_ALLOW_EDITS);
-        m.AddInt32("be:value", restore_auto_edits ? B_CONTROL_ON : B_CONTROL_OFF);
-        m.AddString("session_id", active_session_id_.c_str());
-        be_app->PostMessage(&m);
-    }
-    {
-        BMessage m(MSG_YOLO);
-        m.AddInt32("be:value", restore_yolo ? B_CONTROL_ON : B_CONTROL_OFF);
-        m.AddString("session_id", active_session_id_.c_str());
-        be_app->PostMessage(&m);
-    }
-    {
-        BMessage m(MSG_READ_EVERYWHERE);
-        m.AddInt32("be:value", restore_read_everywhere ? B_CONTROL_ON : B_CONTROL_OFF);
-        m.AddString("session_id", active_session_id_.c_str());
-        be_app->PostMessage(&m);
-    }
+    // Flag state now lives in be_app (synced on MSG_ACTIVE_SESSION); the
+    // status control just needs a refresh for the newly selected session.
+    be_app->PostMessage(MSG_PERM_SYNC);
     _RefreshModeButton();
 }
 
@@ -1852,8 +1782,11 @@ MainWindow::_HandlePermissionReq(BMessage* msg)
 
     // One review window per session; extra requests queue behind it.
     pending_perm_queue_[req.session_id].push_back(req);
-    if (open_perm_sessions_.count(req.session_id)) return;
-    _ShowNextPermissionRequest(req.session_id);
+    if (!open_perm_sessions_.count(req.session_id)) {
+        _ShowNextPermissionRequest(req.session_id);
+    }
+    // Status control + session badges must reflect the new pending request.
+    be_app->PostMessage(MSG_PERM_SYNC);
 }
 
 void
@@ -1862,6 +1795,7 @@ MainWindow::_ShowNextPermissionRequest(const std::string& session_id)
     auto it = pending_perm_queue_.find(session_id);
     if (it == pending_perm_queue_.end() || it->second.empty()) return;
     haicode::PermissionRequest req = it->second.front();
+    it->second.erase(it->second.begin());
 
     // Display label: the session title when known, else the id's tail —
     // same fallback formatting _RefreshSessionList uses.
@@ -1915,6 +1849,50 @@ MainWindow::PostPermissionRequest(const haicode::PermissionRequest& req)
     msg.AddInt64("created_ms",  req.created_ms);
     msg.AddString("input_json", input_json.c_str());
     PostMessage(&msg);
+}
+
+void
+MainWindow::_HandlePermStatus(BMessage* msg)
+{
+    const char* status = nullptr;
+    if (msg->FindString("status", &status) == B_OK && status)
+        perm_status_ = status;
+
+    // Rebuild pending counts from the broker snapshot.
+    perm_pending_sessions_.clear();
+    const char* sid = nullptr;
+    for (int32 i = 0; msg->FindString("pend_session", i, &sid) == B_OK; ++i) {
+        if (sid && *sid)
+            perm_pending_sessions_[sid] += 1;
+    }
+    _UpdatePermissionStatus();
+    _RefreshSessionBadges();
+}
+
+void
+MainWindow::_UpdatePermissionStatus()
+{
+    if (!perm_status_btn_) return;
+    perm_status_btn_->SetLabel(
+        (std::string("Permissions: ") + perm_status_).c_str());
+}
+
+void
+MainWindow::_RefreshSessionBadges()
+{
+    // Compose "[n] title" for sessions with unresolved approvals so
+    // background requests are visible without switching sessions.
+    for (int i = 0; i < (int)session_ids_.size(); ++i) {
+        BStringItem* item = dynamic_cast<BStringItem*>(
+            session_list_->ItemAt(i));
+        if (!item) continue;
+        std::string label = session_labels_[size_t(i)];
+        auto it = perm_pending_sessions_.find(session_ids_[size_t(i)]);
+        if (it != perm_pending_sessions_.end() && it->second > 0)
+            label = "[" + std::to_string(it->second) + "] " + label;
+        item->SetText(label.c_str());
+    }
+    session_list_->Invalidate();
 }
 
 void
@@ -2220,7 +2198,7 @@ MainWindow::_SetMode(haicode::SessionMode next)
     }
 
     engine_->set_mode(active_session_id_, next);
-    _ApplyModeCheckboxVisibility(true);
+    _ResetModeInapplicableToggles();
     // No injected message here: set_mode queues a notice that rides out with
     // the next submitted prompt (only the last flip survives).
     _RefreshModeButton();
@@ -2238,15 +2216,7 @@ MainWindow::_RefreshModeButton()
               : (m == haicode::SessionMode::Chat) ? 2 : 0;
     }
     if (BMenuItem* it = mode_menu_->ItemAt(index)) it->SetMarked(true);
-    _ApplyModeCheckboxVisibility(false);
-}
-
-void
-MainWindow::_SetWidgetVisible(BView* v, bool& tracked, bool visible)
-{
-    if (!v || tracked == visible) return;
-    tracked = visible;
-    if (visible) v->Show(); else v->Hide();
+    _ApplyModeUi();
 }
 
 void
@@ -2270,77 +2240,48 @@ MainWindow::_SetDirBtnVisible(bool visible)
 }
 
 void
-MainWindow::_ApplyModeCheckboxVisibility(bool reset_hidden)
+MainWindow::_ResetModeInapplicableToggles()
 {
-    if (!auto_edits_chk_ || !yolo_chk_ || !read_everywhere_chk_) return;
+    // Entering Plan/Chat turns write/bypass toggles off (they are meaningless
+    // without write tools); Build turns the read toggle off (Plan-only).
+    // be_app owns the state and persists the result.
+    if (active_session_id_.empty() || !engine_) return;
+    auto mode = engine_->get_mode(active_session_id_);
+    bool restricted = (mode != haicode::SessionMode::Build);
+    if (!restricted) {
+        BMessage m(MSG_READ_EVERYWHERE);
+        m.AddInt32("be:value", B_CONTROL_OFF);
+        m.AddString("session_id", active_session_id_.c_str());
+        be_app->PostMessage(&m);
+        return;
+    }
+    BMessage m1(MSG_AUTO_ALLOW_EDITS);
+    m1.AddInt32("be:value", B_CONTROL_OFF);
+    m1.AddString("session_id", active_session_id_.c_str());
+    be_app->PostMessage(&m1);
+    BMessage m2(MSG_YOLO);
+    m2.AddInt32("be:value", B_CONTROL_OFF);
+    m2.AddString("session_id", active_session_id_.c_str());
+    be_app->PostMessage(&m2);
+    if (mode == haicode::SessionMode::Chat) {
+        // Chat has no read tool at all; reset the Plan-only toggle.
+        BMessage m3(MSG_READ_EVERYWHERE);
+        m3.AddInt32("be:value", B_CONTROL_OFF);
+        m3.AddString("session_id", active_session_id_.c_str());
+        be_app->PostMessage(&m3);
+    }
+}
+
+void
+MainWindow::_ApplyModeUi()
+{
+    // Chat has no local access at all, so the working-directory picker is
+    // meaningless there. The slot keeps its width so the toolbar doesn't
+    // shift. Other permission controls now live in the Permissions center.
     haicode::SessionMode cur_mode = haicode::SessionMode::Build;
     if (!active_session_id_.empty() && engine_)
         cur_mode = engine_->get_mode(active_session_id_);
-    bool plan = (cur_mode == haicode::SessionMode::Plan);
-    bool chat = (cur_mode == haicode::SessionMode::Chat);
-
-    // BView::Hide()/Show() maintain a nestable counter, so they must only be
-    // called on an actual state change — and the change signal must be our
-    // tracked bools, not IsHidden() (which is true for every view while the
-    // window is not yet shown, silently skipping the startup restore's hides).
-    if (plan || chat) {
-        if (reset_hidden) {
-            // Hidden toggles must not stay live behind the restricted-mode UI.
-            auto_edits_chk_->SetValue(B_CONTROL_OFF);
-            yolo_chk_->SetValue(B_CONTROL_OFF);
-            {
-                BMessage m(MSG_AUTO_ALLOW_EDITS);
-                m.AddInt32("be:value", B_CONTROL_OFF);
-                m.AddString("session_id", active_session_id_.c_str());
-                be_app->PostMessage(&m);
-            }
-            {
-                BMessage m(MSG_YOLO);
-                m.AddInt32("be:value", B_CONTROL_OFF);
-                m.AddString("session_id", active_session_id_.c_str());
-                be_app->PostMessage(&m);
-            }
-            if (chat) {
-                // Chat has no read tool at all; reset the Plan-only toggle.
-                read_everywhere_chk_->SetValue(B_CONTROL_OFF);
-                BMessage m(MSG_READ_EVERYWHERE);
-                m.AddInt32("be:value", B_CONTROL_OFF);
-                m.AddString("session_id", active_session_id_.c_str());
-                be_app->PostMessage(&m);
-            }
-            if (!active_session_id_.empty())
-                store_.update_permission_flags(
-                    active_session_id_, false, false,
-                    plan && read_everywhere_chk_->Value() == B_CONTROL_ON);
-        }
-        _SetWidgetVisible(auto_edits_chk_, auto_edits_chk_visible_, false);
-        _SetWidgetVisible(yolo_chk_, yolo_chk_visible_, false);
-        _SetWidgetVisible(read_everywhere_chk_, read_everywhere_chk_visible_, plan);
-        // Chat has no local access at all, so the working-directory picker
-        // is meaningless there. The slot keeps its width so the rest of the
-        // toolbar doesn't shift left.
-        _SetDirBtnVisible(!chat);
-    } else {
-        if (reset_hidden) {
-            read_everywhere_chk_->SetValue(B_CONTROL_OFF);
-            {
-                BMessage m(MSG_READ_EVERYWHERE);
-                m.AddInt32("be:value", B_CONTROL_OFF);
-                m.AddString("session_id", active_session_id_.c_str());
-                be_app->PostMessage(&m);
-            }
-            if (!active_session_id_.empty())
-                store_.update_permission_flags(
-                    active_session_id_,
-                    auto_edits_chk_->Value() == B_CONTROL_ON,
-                    yolo_chk_->Value() == B_CONTROL_ON,
-                    false);
-        }
-        _SetWidgetVisible(read_everywhere_chk_, read_everywhere_chk_visible_, false);
-        _SetWidgetVisible(auto_edits_chk_, auto_edits_chk_visible_, true);
-        _SetWidgetVisible(yolo_chk_, yolo_chk_visible_, true);
-        _SetDirBtnVisible(true);
-    }
+    _SetDirBtnVisible(cur_mode != haicode::SessionMode::Chat);
 }
 
 std::string

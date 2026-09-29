@@ -91,6 +91,8 @@ static const uint32 MSG_PERM_REVOKE           = 'PMrv';  // revoke selected gran
 static const uint32 MSG_PERM_REVOKE_ALL       = 'PMra';  // revoke all grants (selected session)
 static const uint32 MSG_PERM_REFRESH          = 'PMrf';  // be_app → center: re-read state
 static const uint32 MSG_PERM_ACTIVATE         = 'PMac';  // be_app → center: Activate()
+static const uint32 MSG_PERM_STATUS           = 'PMst';  // be_app → MainWindow: "status" string + repeated "pend_session" strings
+static const uint32 MSG_PERM_SYNC             = 'PMsy';  // any thread → be_app: recompute permission status + badges
 
 // PermissionRuleEditWindow → PermissionsCenterWindow
 static const uint32 MSG_PERM_RULE_DONE = 'PRrd';  // "action"/"resource"/"effect" strings + "index" int32

@@ -287,6 +287,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             std::string sid = _TargetSession(msg);
             session_flags_[sid].auto_edits = (value == B_CONTROL_ON);
             _ApplySessionRules(sid);
+            _PersistSessionFlags(sid);
+            _NotifyPermissionUiChanged();
             break;
         }
         case MSG_YOLO: {
@@ -295,6 +297,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             std::string sid = _TargetSession(msg);
             session_flags_[sid].yolo = (value == B_CONTROL_ON);
             _ApplySessionRules(sid);
+            _PersistSessionFlags(sid);
+            _NotifyPermissionUiChanged();
             break;
         }
         case MSG_READ_EVERYWHERE: {
@@ -303,6 +307,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             std::string sid = _TargetSession(msg);
             session_flags_[sid].read_everywhere = (value == B_CONTROL_ON);
             _ApplySessionRules(sid);
+            _PersistSessionFlags(sid);
+            _NotifyPermissionUiChanged();
             break;
         }
         case MSG_PERSIST_PM: {
@@ -367,8 +373,17 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             const char* sid = nullptr;
             if (msg->FindString("session_id", &sid) == B_OK && sid && relay_)
                 relay_->set_active_session(sid);
+            // Session switch: pull that session's persisted flags into the
+            // gate (the old toolbar-checkbox restore path, minus the widgets).
+            if (sid && *sid) {
+                _SyncSessionFlags(sid);
+                _NotifyPermissionUiChanged();
+            }
             break;
         }
+        case MSG_PERM_SYNC:
+            _NotifyPermissionUiChanged();
+            break;
         case MSG_FETCH_MODELS: {
             const char* pid = nullptr;
             msg->FindString("provider_id", &pid);
@@ -785,6 +800,68 @@ HaiCodeApp::_RefreshPermissionsCenter()
     // PostMessage is thread-safe and runs Refresh() on the center's loop;
     // Lock() from here could deadlock against the center posting back.
     if (perm_center_) perm_center_->PostMessage(MSG_PERM_REFRESH);
+}
+
+void
+HaiCodeApp::_SyncSessionFlags(const std::string& session_id)
+{
+    if (session_id.empty() || !store_) return;
+    auto si = store_->get(session_id);
+    if (!si) return;
+    bool auto_edits = false, yolo = false, read_everywhere = false;
+    try {
+        auto mj = nlohmann::json::parse(si->model_json, nullptr, false);
+        if (!mj.is_discarded() && mj.is_object()) {
+            auto_edits = mj.value("auto_edits", false);
+            yolo = mj.value("yolo", false);
+            read_everywhere = mj.value("allow_read_everywhere", false);
+        }
+    } catch (...) {}
+    session_flags_[session_id] = {auto_edits, yolo, read_everywhere};
+    _ApplySessionRules(session_id);
+}
+
+void
+HaiCodeApp::_PersistSessionFlags(const std::string& session_id)
+{
+    if (session_id.empty() || !store_) return;
+    auto it = session_flags_.find(session_id);
+    if (it == session_flags_.end()) return;
+    store_->update_permission_flags(session_id, it->second.auto_edits,
+                                    it->second.yolo,
+                                    it->second.read_everywhere);
+}
+
+void
+HaiCodeApp::_NotifyPermissionUiChanged()
+{
+    // Status summary for the active session + per-session pending counts.
+    std::string status = "Standard";
+    std::string active;
+    if (main_window_) {
+        main_window_->Lock();
+        active = main_window_->active_session_id();
+        main_window_->Unlock();
+    }
+    if (!active.empty()) {
+        auto it = session_flags_.find(active);
+        if (it != session_flags_.end()) {
+            if (it->second.yolo)          status = "Unrestricted";
+            else if (it->second.auto_edits) status = "Auto-write";
+        }
+    }
+    size_t pending = perm_broker_ ? perm_broker_->pending_count() : 0;
+    if (pending > 0)
+        status = std::to_string(pending) + " waiting";
+
+    BMessage m(MSG_PERM_STATUS);
+    m.AddString("status", status.c_str());
+    if (perm_broker_) {
+        for (const auto& req : perm_broker_->pending_requests())
+            m.AddString("pend_session", req.session_id.c_str());
+    }
+    if (main_window_) main_window_->PostMessage(&m);
+    _RefreshPermissionsCenter();
 }
 
 void

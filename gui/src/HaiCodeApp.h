@@ -68,6 +68,15 @@ private:
     // "session_id" when present, else the currently selected session.
     std::string _TargetSession(const BMessage* msg) const;
     void _ApplySessionRules(const std::string& session_id);
+    // Load a session's persisted toggle flags into session_flags_ and apply
+    // them (used on session switch; replaces the checkbox-restore posts).
+    void _SyncSessionFlags(const std::string& session_id);
+    // Mirror a session's toggle flags into its model_json so they survive
+    // restarts (same format the old toolbar checkboxes wrote).
+    void _PersistSessionFlags(const std::string& session_id);
+    // Push permission status (flags + pending counts) to MainWindow and
+    // refresh an open Permissions center.
+    void _NotifyPermissionUiChanged();
     void _ShowPermissionsCenter();
     void _RefreshPermissionsCenter();
     bool _ApplyProviders(const BMessage* msg);

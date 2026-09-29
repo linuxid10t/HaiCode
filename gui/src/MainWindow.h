@@ -87,6 +87,13 @@ private:
     void _HandlePermissionReq(BMessage* msg);
     void _ShowNextPermissionRequest(const std::string& session_id);
     void _HandlePermissionWindowClosed(BMessage* msg);
+    void _HandlePermStatus(BMessage* msg);
+    void _UpdatePermissionStatus();
+    void _RefreshSessionBadges();
+    // Entering a restricted mode must turn session toggles off (writes and
+    // bypass are meaningless there); be_app persists the result.
+    void _ResetModeInapplicableToggles();
+    void _ApplyModeUi();
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);
     void _HandleAskUserReq(BMessage* msg);
@@ -99,7 +106,6 @@ private:
     void _RefreshTodosFromEngine();
 
     void _SetMode(haicode::SessionMode next);
-    void _ApplyModeCheckboxVisibility(bool reset_hidden);
     void _UpdateStatusStrip();
     void _UpdateMaxContext();
     // Push config_.thinking_display (via the engine) into ChatView.
@@ -155,6 +161,7 @@ private:
 
     // Session list (parallel to UI list)
     std::vector<std::string> session_ids_;  // indexed to match BListView
+    std::vector<std::string> session_labels_;  // base titles, pre-badge
 
     // UI widgets (owned by BLooper)
     BListView*     session_list_    = nullptr;
@@ -170,18 +177,17 @@ private:
     BPopUpMenu*    mode_menu_       = nullptr;
     BMenuField*    mode_field_      = nullptr;
     BButton*       compact_btn_     = nullptr;
-    BCheckBox*     auto_edits_chk_  = nullptr;
-    BCheckBox*     yolo_chk_        = nullptr;
-    BCheckBox*     read_everywhere_chk_ = nullptr;
+    // Compact permission status ("Permissions: Standard"); opens the center.
+    BButton*       perm_status_btn_ = nullptr;
+    std::string    perm_status_     = "Standard";
+    // Sessions with approval requests waiting (drives list badges);
+    // value = number of unresolved requests for that session.
+    std::map<std::string, int> perm_pending_sessions_;
     // Desired-visibility mirror for mode-dependent widgets. BView::IsHidden()
     // is true for every view while the window is not yet shown, so it cannot
     // gate Hide()/Show() during the pre-Show() startup mode restore; these
     // tracked bools can. Must match the constructor's initial Hide() calls.
     bool dir_btn_visible_             = true;
-    bool auto_edits_chk_visible_      = true;
-    bool yolo_chk_visible_            = true;
-    bool read_everywhere_chk_visible_ = false;
-    void _SetWidgetVisible(BView* v, bool& tracked, bool visible);
     // Hides/shows dir_btn_ while pinning its slot's width so the rest of the
     // toolbar (Provider:/Model:/Mode:) never shifts when it disappears.
     void _SetDirBtnVisible(bool visible);
