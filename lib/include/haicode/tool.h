@@ -83,6 +83,10 @@ public:
         const std::string& action, const std::string& resource);
     bool revoke_exact_allow(const std::string& session_id,
         const std::string& action, const std::string& resource);
+    // Remove one legacy pattern grant created by add_allow() (the old
+    // "Allow Always"); returns false when no such grant exists.
+    bool revoke_pattern_allow(const std::string& session_id,
+        const std::string& action, const std::string& resource);
     void revoke_temporary_allows(const std::string& session_id);
     // session_id is the id of the session the check runs for ("" = unscoped,
     // used by tests and legacy callers).

@@ -13,6 +13,7 @@
 
 #include "MainWindow.h"
 #include "GuiEventRelay.h"
+#include "PermissionsCenterWindow.h"
 
 #include <string>
 #include <map>
@@ -40,6 +41,10 @@ private:
 
     // Not owned (owned by BLooper after Show())
     MainWindow* main_window_ = nullptr;
+    // One reusable Permissions center; pointer cleared on close.
+    PermissionsCenterWindow* perm_center_ = nullptr;
+    // Authorization outcomes since launch (bounded, in-memory).
+    PermissionActivityLog perm_activity_;
 
     haicode::AppConfig config_;
     std::string project_dir_;
@@ -63,6 +68,8 @@ private:
     // "session_id" when present, else the currently selected session.
     std::string _TargetSession(const BMessage* msg) const;
     void _ApplySessionRules(const std::string& session_id);
+    void _ShowPermissionsCenter();
+    void _RefreshPermissionsCenter();
     bool _ApplyProviders(const BMessage* msg);
     void _RefreshProviders();
 

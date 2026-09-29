@@ -162,6 +162,21 @@ bool PermissionGate::revoke_exact_allow(const std::string& session_id,
     return false;
 }
 
+bool PermissionGate::revoke_pattern_allow(const std::string& session_id,
+    const std::string& action, const std::string& resource) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    auto found = session_allows_.find(session_id);
+    if (found == session_allows_.end()) return false;
+    auto& grants = found->second;
+    for (auto it = grants.begin(); it != grants.end(); ++it) {
+        if (it->action == action && it->resource == resource) {
+            grants.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
 void PermissionGate::revoke_temporary_allows(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(*mu_);
     exact_allows_.erase(session_id);

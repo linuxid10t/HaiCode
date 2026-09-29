@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -190,6 +191,30 @@ HaiCodeApp::ReadyToRun()
                 if (!win) return false;
                 win->PostPermissionRequest(req);
                 return true;
+            });
+    }
+    // Every resolved/cancelled approval lands in the activity log (bounded,
+    // in-memory) and nudges an open Permissions center to refresh. The
+    // callbacks run on engine threads; be_app->PostMessage is thread-safe.
+    {
+        using clock = std::chrono::system_clock;
+        perm_broker_->set_notify_callback(
+            [this](const haicode::PermissionRequest& req,
+                   const haicode::PermissionOutcome& out) {
+                PermissionActivityEntry e;
+                e.timestamp_ms = std::chrono::duration_cast<
+                    std::chrono::milliseconds>(
+                        clock::now().time_since_epoch()).count();
+                e.session_id = req.session_id;
+                e.tool_name  = req.tool_name;
+                e.target     = req.resource;
+                e.result = out.user_decided
+                    ? (out.effect == haicode::PermissionEffect::Allow
+                           ? "allowed" : "denied")
+                    : "cancelled";
+                e.reason = out.reason;
+                perm_activity_.add(e);
+                be_app->PostMessage(MSG_PERM_REFRESH);
             });
     }
 
@@ -415,6 +440,25 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 if (f.is_open()) f << j.dump(2);
             }
             _RefreshProviders();
+            break;
+        }
+        case MSG_SHOW_PERMISSIONS:
+            _ShowPermissionsCenter();
+            break;
+        case MSG_PERMISSION_CENTER_CLOSED:
+            perm_center_ = nullptr;
+            break;
+        case MSG_PERM_REFRESH:
+            _RefreshPermissionsCenter();
+            break;
+        case MSG_PERM_POLICY_SAVED: {
+            // A policy file was written from the Permissions center: reload
+            // the effective configuration and refresh the gate's configured
+            // rules. Session layers (toggles, grants) are untouched.
+            haicode::ConfigLoader loader;
+            config_ = loader.load(project_dir_);
+            perm_gate_->set_rules(config_.permissions);
+            _RefreshPermissionsCenter();
             break;
         }
         case MSG_SETTINGS_SAVED: {
@@ -708,6 +752,39 @@ HaiCodeApp::_TargetSession(const BMessage* msg) const
     if (main_window_)
         return main_window_->active_session_id();
     return "";
+}
+
+void
+HaiCodeApp::_ShowPermissionsCenter()
+{
+    if (perm_center_) {
+        // Activate() must run on the center's own loop.
+        perm_center_->PostMessage(MSG_PERM_ACTIVATE);
+        return;
+    }
+    std::string initial_session;
+    if (main_window_) {
+        main_window_->Lock();
+        initial_session = main_window_->active_session_id();
+        main_window_->Unlock();
+    }
+    perm_center_ = new PermissionsCenterWindow(
+        *perm_gate_, *perm_broker_, *tools_, *store_, perm_activity_,
+        [this]() -> haicode::SessionEngine* { return engine_.get(); },
+        initial_session,
+        haicode::global_config_path(),
+        haicode::project_config_path(project_dir_),
+        project_dir_,
+        BMessenger(this));
+    perm_center_->Show();
+}
+
+void
+HaiCodeApp::_RefreshPermissionsCenter()
+{
+    // PostMessage is thread-safe and runs Refresh() on the center's loop;
+    // Lock() from here could deadlock against the center posting back.
+    if (perm_center_) perm_center_->PostMessage(MSG_PERM_REFRESH);
 }
 
 void

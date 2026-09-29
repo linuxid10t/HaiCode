@@ -278,6 +278,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     BMenu* settings_menu = new BMenu("Settings");
     settings_menu->AddItem(new BMenuItem("Preferences" B_UTF8_ELLIPSIS,
                                          new BMessage(MSG_SHOW_SETTINGS), ','));
+    settings_menu->AddItem(new BMenuItem("Permissions" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_SHOW_PERMISSIONS)));
     menu_bar_->AddItem(settings_menu);
 
     // ---- Toolbar: New Session, Dir picker, Model selector, Interrupt ----
@@ -870,6 +872,9 @@ MainWindow::MessageReceived(BMessage* msg)
             _ApplyThinkingDisplay();
             break;
         case MSG_SHOW_SETTINGS:
+            be_app->PostMessage(msg);
+            break;
+        case MSG_SHOW_PERMISSIONS:
             be_app->PostMessage(msg);
             break;
         case MSG_AUTO_ALLOW_EDITS:

@@ -77,6 +77,26 @@ static const uint32 MSG_REMOVE_ATTACHMENT = 'RMat'; // chip "×" pressed; "index
 static const uint32 MSG_AUTO_ALLOW_EDITS = 'AAed'; // checkbox → be_app; "be:value" int32
 static const uint32 MSG_YOLO             = 'YOLO'; // checkbox → be_app; "be:value" int32
 static const uint32 MSG_READ_EVERYWHERE  = 'RDew'; // plan-mode checkbox → be_app; "be:value" int32
+static const uint32 MSG_SHOW_PERMISSIONS = 'PMct'; // MainWindow → be_app: open the Permissions center
+static const uint32 MSG_PERMISSION_CENTER_CLOSED = 'PMcc'; // center → be_app (clear the stored messenger)
+
+// Permissions center internal
+static const uint32 MSG_PERM_SESSION_SELECTED = 'PSsl';  // session dropdown; "session_id" string
+static const uint32 MSG_PERM_TOGGLE_AUTO      = 'PTaw';  // auto-writes checkbox (center-local)
+static const uint32 MSG_PERM_TOGGLE_READ      = 'PTrd';  // read-outside checkbox (center-local)
+static const uint32 MSG_PERM_TOGGLE_BYPASS    = 'PTbp';  // bypass checkbox (center-local, confirmed)
+static const uint32 MSG_PERM_PENDING_ALLOW    = 'PPal';  // approve selected pending row (once)
+static const uint32 MSG_PERM_PENDING_DENY     = 'PPdn';  // deny selected pending row
+static const uint32 MSG_PERM_REVOKE           = 'PMrv';  // revoke selected grant row
+static const uint32 MSG_PERM_REVOKE_ALL       = 'PMra';  // revoke all grants (selected session)
+static const uint32 MSG_PERM_REFRESH          = 'PMrf';  // be_app → center: re-read state
+static const uint32 MSG_PERM_ACTIVATE         = 'PMac';  // be_app → center: Activate()
+
+// PermissionRuleEditWindow → PermissionsCenterWindow
+static const uint32 MSG_PERM_RULE_DONE = 'PRrd';  // "action"/"resource"/"effect" strings + "index" int32
+
+// PermissionsCenterWindow → be_app
+static const uint32 MSG_PERM_POLICY_SAVED = 'PMsv';  // policy file written; reload config + gate rules
 
 // Provider/model persistence — MainWindow → be_app; "provider"+"model" strings
 static const uint32 MSG_PERSIST_PM      = 'PMps';
