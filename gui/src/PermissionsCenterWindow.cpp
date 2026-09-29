@@ -413,12 +413,12 @@ PermissionsCenterWindow::_RefreshSessionTab()
     bool plan = mode_str == "plan";
     bool chat = mode_str == "chat";
     auto_writes_chk_->SetEnabled(!plan && !chat);
-    read_outside_chk_->SetEnabled(plan);
+    read_outside_chk_->SetEnabled(!chat);
     bypass_chk_->SetEnabled(!plan && !chat);
     auto_writes_chk_->SetToolTip((plan || chat)
         ? "Writes are unavailable in this mode" : "");
-    read_outside_chk_->SetToolTip(!plan
-        ? "Applies to Plan mode sessions" : "");
+    read_outside_chk_->SetToolTip(chat
+        ? "Reads are unavailable in Chat mode" : "");
     bypass_chk_->SetToolTip((plan || chat)
         ? "Writes are unavailable in this mode" : "");
 

@@ -904,7 +904,9 @@ HaiCodeApp::_ApplySessionRules(const std::string& session_id)
     // (ToolRegistry::evaluate checks tool_allowed_in_mode before any gate
     // rule, so this is consistency, not the security boundary): write/bypass
     // rules arm only in Build — Plan is non-destructive and Chat has no
-    // local access — and the reads-outside rule is Plan-only.
+    // local access — and the reads-everywhere rule arms in Build and Plan
+    // (outside-project reads gate and prompt in both; Chat has no read
+    // tool).
     haicode::SessionMode mode = haicode::SessionMode::Build;
     if (engine_) mode = engine_->get_mode(session_id);
     bool build = (mode == haicode::SessionMode::Build);
@@ -917,7 +919,7 @@ HaiCodeApp::_ApplySessionRules(const std::string& session_id)
             rules.push_back({"write", "*", haicode::PermissionEffect::Allow});
         if (build && it->second.yolo)
             rules.push_back({"*", "*", haicode::PermissionEffect::Allow});
-        if (plan && it->second.read_everywhere)
+        if ((build || plan) && it->second.read_everywhere)
             rules.push_back({"read", "*", haicode::PermissionEffect::Allow});
     }
     perm_gate_->set_session_rules(session_id, rules);

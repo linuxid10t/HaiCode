@@ -57,6 +57,7 @@
 #include <climits>
 #include <cctype>
 #include <cstdio>
+#include <cmath>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
@@ -348,35 +349,39 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     mode_field_ = new BMenuField("mode_field", "", mode_menu_);
 
     // Compact permission selector. A dropdown, not a button: quick access to
-    // the common permission presets without opening the full Permissions
-    // center (which lives under Settings). The presets map onto the same
-    // session flags the center edits (be_app owns the state), so the two can
-    // never disagree. Not radio mode: the read toggle marks independently of
-    // the presets, so marks are managed by hand and the field label set
-    // explicitly. No field label — the status word alone is the label.
+    // the common permission controls without opening the Permissions center
+    // (which lives under Settings). Items map onto the same session flags
+    // the center edits (be_app owns the state), so the two can never
+    // disagree. The item set is rebuilt per mode (_RebuildPermMenu), so the
+    // open menu always matches the session's mode — no grayed-out cross-mode
+    // items. Not radio mode: the read toggle marks independently of the
+    // presets, so marks are managed by hand.
     perm_menu_ = new BPopUpMenu("Perms");
-    // BPopUpMenu defaults to radio mode; off — the read toggle keeps its
-    // mark independently of the presets, and marks are managed by hand
-    // (selection alone doesn't move them in non-radio mode).
     perm_menu_->SetRadioMode(false);
-    const struct { const char* label; const char* value; } kPermItems[] = {
-        { "Standard",     "standard"     },
-        { "Auto-write",   "auto-write"   },
-        { "YOLO",         "unrestricted" },
-    };
-    for (auto& item : kPermItems) {
-        BMessage* pm = new BMessage(MSG_PERM_PRESET);
-        pm->AddString("preset", item.value);
-        perm_menu_->AddItem(new BMenuItem(item.label, pm));
-    }
-    if (BMenuItem* std_it = perm_menu_->ItemAt(0)) std_it->SetMarked(true);
-    perm_menu_->AddSeparatorItem();
-    perm_read_item_ = new BMenuItem("Allow reads everywhere",
-                                    new BMessage(MSG_PERM_TOGGLE_READ));
-    perm_menu_->AddItem(perm_read_item_);
-    perm_status_field_ = new BMenuField("perm_status", "", perm_menu_);
+    perm_status_field_ = new BMenuField("perm_status", "Permissions:", perm_menu_);
+    _RebuildPermMenu();
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel("Standard");
+    // Pin the field to a fixed compact width: BMenuField's natural preferred
+    // width tracks the menu's widest item ("Allow reads everywhere"), which
+    // made the field huge. Sized to the longest status word instead, so the
+    // width never jitters as the status changes. Explicit min AND max — the
+    // group layout can never shrink a view below its min, and min defaults
+    // to the widest item too.
+    {
+        static const char* kStatusWords[] = {
+            "Standard", "Auto-write", "YOLO",
+            "Reads: project", "Reads: everywhere", "99 waiting",
+        };
+        float word = 0.f;
+        for (auto* s : kStatusWords)
+            word = std::max(word, ceilf(perm_status_field_->StringWidth(s)));
+        float w = ceilf(perm_status_field_->StringWidth("Permissions:"))
+                + 14.f   // divider/label spacing
+                + word + 36.f;  // bar margins + popup marker + slack
+        perm_status_field_->SetExplicitMinSize(BSize(w, B_SIZE_UNSET));
+        perm_status_field_->SetExplicitMaxSize(BSize(w, B_SIZE_UNSET));
+    }
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -938,18 +943,16 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_PERM_TOGGLE_READ: {
             // Non-radio menus don't toggle marks on selection: flip it here,
             // send the new value; be_app's echo confirms the final state.
-            // Plan-only (Build resets it, Chat has no read tool at all).
-            if (perm_mode_ != "plan") {
+            // Live in Build and Plan (outside-project reads gate and prompt
+            // in both); Chat has no read tool at all.
+            if (perm_mode_ != "build" && perm_mode_ != "plan") {
                 be_app->PostMessage(MSG_PERM_SYNC);
                 break;
             }
-            bool on = true;
-            if (perm_read_item_) {
-                on = !perm_read_item_->IsMarked();
-                perm_read_item_->SetMarked(on);
-            }
+            perm_read_on_ = !perm_read_on_;
+            if (perm_read_item_) perm_read_item_->SetMarked(perm_read_on_);
             BMessage m(MSG_READ_EVERYWHERE);
-            m.AddInt32("be:value", on ? B_CONTROL_ON : B_CONTROL_OFF);
+            m.AddInt32("be:value", perm_read_on_ ? B_CONTROL_ON : B_CONTROL_OFF);
             m.AddString("session_id", active_session_id_.c_str());
             be_app->PostMessage(&m);
             break;
@@ -1951,12 +1954,18 @@ MainWindow::_HandlePermStatus(BMessage* msg)
     // string is derived from the same flags in HaiCodeApp, so parsing it back
     // keeps this dropdown and the Permissions center consistent.
     bool read_on = false;
-    if (msg->FindBool("read_everywhere", &read_on) == B_OK && perm_read_item_)
-        perm_read_item_->SetMarked(read_on);
+    if (msg->FindBool("read_everywhere", &read_on) == B_OK)
+        perm_read_on_ = read_on;
 
     const char* mode_s = nullptr;
-    if (msg->FindString("mode", &mode_s) == B_OK && mode_s)
+    if (msg->FindString("mode", &mode_s) == B_OK && mode_s
+            && perm_mode_ != mode_s) {
+        // The item set is mode-specific; a mode change must rebuild it, not
+        // just re-mark it. _RebuildPermMenu re-derives marks from
+        // perm_preset_/perm_read_on_, so ordering below is safe.
         perm_mode_ = mode_s;
+        _RebuildPermMenu();
+    }
     const char* preset_s = nullptr;
     if (msg->FindString("preset", &preset_s) == B_OK && preset_s)
         perm_preset_ = preset_s;
@@ -1966,33 +1975,66 @@ MainWindow::_HandlePermStatus(BMessage* msg)
 }
 
 void
+MainWindow::_RebuildPermMenu()
+{
+    if (!perm_menu_) return;
+    // The menu offers only what the current mode can act on — no grayed-out
+    // cross-mode items. Build: write presets + the read toggle. Plan: the
+    // read toggle only. Chat: the field is hidden (_ApplyModeUi); build the
+    // empty menu anyway so a stale show can't offer anything.
+    perm_menu_->RemoveItems(0, perm_menu_->CountItems(), true);
+    perm_read_item_ = nullptr;
+
+    bool build = (perm_mode_ == "build");
+    bool plan  = (perm_mode_ == "plan");
+
+    if (build) {
+        static const struct {
+            const char* label; const char* value;
+        } kPresets[] = {
+            { "Standard",     "standard"     },
+            { "Auto-write",   "auto-write"   },
+            { "YOLO",         "unrestricted" },
+        };
+        std::string p = perm_preset_.empty() ? "standard" : perm_preset_;
+        for (auto& item : kPresets) {
+            BMessage* pm = new BMessage(MSG_PERM_PRESET);
+            pm->AddString("preset", item.value);
+            BMenuItem* mi = new BMenuItem(item.label, pm);
+            mi->SetMarked(p == item.value);
+            perm_menu_->AddItem(mi);
+        }
+        perm_menu_->AddSeparatorItem();
+    }
+
+    // Read toggle: live in Build and Plan — reads outside the project gate
+    // and prompt in both. Chat has no read tool at all.
+    if (build || plan) {
+        perm_read_item_ = new BMenuItem("Allow reads everywhere",
+                                        new BMessage(MSG_PERM_TOGGLE_READ));
+        perm_read_item_->SetMarked(perm_read_on_);
+        perm_menu_->AddItem(perm_read_item_);
+    }
+}
+
+void
 MainWindow::_UpdatePermissionStatus()
 {
     if (!perm_status_field_) return;
-    // Preset mark from the authoritative preset string. Outside Build it is
-    // empty (write presets don't exist there), which converges the mark to
-    // Standard — accurate, since no write grant applies. A pending count
-    // ("N waiting") only changes the label, not the marks.
-    std::string p = perm_preset_.empty() ? "standard" : perm_preset_;
-    int preset_idx = 0;
-    if (p == "auto-write")   preset_idx = 1;
-    if (p == "unrestricted") preset_idx = 2;
+    // Marks by carried preset value (menu may have been rebuilt); the read
+    // mark mirrors the session flag. A pending count ("N waiting") only
+    // changes the bar label, not the marks.
     if (perm_menu_) {
-        for (int i = 0; i < 3; ++i)
-            if (BMenuItem* it = perm_menu_->ItemAt(i))
-                it->SetMarked(i == preset_idx);
+        std::string p = perm_preset_.empty() ? "standard" : perm_preset_;
+        for (int32 i = 0; i < perm_menu_->CountItems(); ++i) {
+            BMenuItem* it = perm_menu_->ItemAt(i);
+            const char* v = nullptr;
+            if (it && it->Message()
+                    && it->Message()->FindString("preset", &v) == B_OK && v)
+                it->SetMarked(p == v);
+        }
     }
-    // Mode scoping, mirroring the Permissions center: write presets are
-    // Build-only (Plan is non-destructive, Chat has no local access) and
-    // the reads-outside toggle is Plan-only. The engine's tool allowlist is
-    // the hard boundary; this keeps the quick control from offering no-ops.
-    bool build = (perm_mode_ == "build");
-    bool plan  = (perm_mode_ == "plan");
-    if (perm_menu_) {
-        if (BMenuItem* it = perm_menu_->ItemAt(1)) it->SetEnabled(build);
-        if (BMenuItem* it = perm_menu_->ItemAt(2)) it->SetEnabled(build);
-    }
-    if (perm_read_item_) perm_read_item_->SetEnabled(plan);
+    if (perm_read_item_) perm_read_item_->SetMarked(perm_read_on_);
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel(perm_status_.c_str());
 }
@@ -2319,9 +2361,9 @@ MainWindow::_SetMode(haicode::SessionMode next)
 
     engine_->set_mode(active_session_id_, next);
     _ResetModeInapplicableToggles();
-    // Mode change re-scopes permissions (write presets Build-only, reads
-    // Plan-only): force the be_app echo so the dropdown's enabled items and
-    // marks follow the new mode even when no flag actually changed.
+    // Mode change re-scopes permissions (write presets Build-only): force
+    // the be_app echo so the rebuilt item set and marks follow the new mode
+    // even when no flag actually changed.
     be_app->PostMessage(MSG_PERM_SYNC);
     // No injected message here: set_mode queues a notice that rides out with
     // the next submitted prompt (only the last flip survives).
@@ -2391,16 +2433,16 @@ void
 MainWindow::_ResetModeInapplicableToggles()
 {
     // Entering Plan/Chat turns write/bypass toggles off (they are meaningless
-    // without write tools); Build turns the read toggle off (Plan-only).
+    // without write tools) and Chat additionally resets the read toggle (no
+    // read tool there). Entering Build resets nothing — write presets are
+    // Build-native and the read toggle is live in Build too.
     // be_app owns the state and persists the result.
     if (active_session_id_.empty() || !engine_) return;
     auto mode = engine_->get_mode(active_session_id_);
     bool restricted = (mode != haicode::SessionMode::Build);
     if (!restricted) {
-        BMessage m(MSG_READ_EVERYWHERE);
-        m.AddInt32("be:value", B_CONTROL_OFF);
-        m.AddString("session_id", active_session_id_.c_str());
-        be_app->PostMessage(&m);
+        // Entering Build: nothing to reset — write presets are Build-native,
+        // and the read toggle is live in Build too.
         return;
     }
     BMessage m1(MSG_AUTO_ALLOW_EDITS);
@@ -2412,7 +2454,7 @@ MainWindow::_ResetModeInapplicableToggles()
     m2.AddString("session_id", active_session_id_.c_str());
     be_app->PostMessage(&m2);
     if (mode == haicode::SessionMode::Chat) {
-        // Chat has no read tool at all; reset the Plan-only toggle.
+        // Chat has no read tool at all; reset the read toggle.
         BMessage m3(MSG_READ_EVERYWHERE);
         m3.AddInt32("be:value", B_CONTROL_OFF);
         m3.AddString("session_id", active_session_id_.c_str());

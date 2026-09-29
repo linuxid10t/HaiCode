@@ -89,6 +89,9 @@ private:
     void _HandlePermissionWindowClosed(BMessage* msg);
     void _HandlePermStatus(BMessage* msg);
     void _UpdatePermissionStatus();
+    // Rebuilds the permission dropdown's item set for perm_mode_ (Build:
+    // presets + read toggle; Plan: read toggle; Chat: empty — field hidden).
+    void _RebuildPermMenu();
     void _RefreshSessionBadges();
     // Entering a restricted mode must turn session toggles off (writes and
     // bypass are meaningless there); be_app persists the result.
@@ -184,6 +187,9 @@ private:
     BPopUpMenu*    perm_menu_         = nullptr;
     BMenuField*    perm_status_field_ = nullptr;
     BMenuItem*     perm_read_item_    = nullptr;
+    // Read-toggle state mirror (from MSG_PERM_STATUS); the item is rebuilt
+    // per mode, so the mark lives here and is applied on rebuild.
+    bool           perm_read_on_      = false;
     std::string    perm_status_     = "Standard";
     // Mode + preset of the active session, from MSG_PERM_STATUS. The preset
     // string is authoritative ("" outside Build) — the status word can be
