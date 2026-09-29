@@ -349,10 +349,11 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // Compact permission selector. A dropdown, not a button: quick access to
     // the common permission presets without opening the full Permissions
-    // center. The presets map onto the same session flags the center edits
-    // (be_app owns the state), so the two can never disagree. Not radio mode:
-    // the read toggle marks independently of the presets, so marks are
-    // managed by hand and the field label set explicitly.
+    // center (which lives under Settings). The presets map onto the same
+    // session flags the center edits (be_app owns the state), so the two can
+    // never disagree. Not radio mode: the read toggle marks independently of
+    // the presets, so marks are managed by hand and the field label set
+    // explicitly. No field label — the status word alone is the label.
     perm_menu_ = new BPopUpMenu("Perms");
     // BPopUpMenu defaults to radio mode; off — the read toggle keeps its
     // mark independently of the presets, and marks are managed by hand
@@ -361,7 +362,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     const struct { const char* label; const char* value; } kPermItems[] = {
         { "Standard",     "standard"     },
         { "Auto-write",   "auto-write"   },
-        { "Unrestricted", "unrestricted" },
+        { "YOLO",         "unrestricted" },
     };
     for (auto& item : kPermItems) {
         BMessage* pm = new BMessage(MSG_PERM_PRESET);
@@ -370,13 +371,10 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     }
     if (BMenuItem* std_it = perm_menu_->ItemAt(0)) std_it->SetMarked(true);
     perm_menu_->AddSeparatorItem();
-    perm_read_item_ = new BMenuItem("Allow reads outside trusted roots",
+    perm_read_item_ = new BMenuItem("Allow reads everywhere",
                                     new BMessage(MSG_PERM_TOGGLE_READ));
     perm_menu_->AddItem(perm_read_item_);
-    perm_menu_->AddSeparatorItem();
-    perm_menu_->AddItem(new BMenuItem("Permissions" B_UTF8_ELLIPSIS,
-                                      new BMessage(MSG_SHOW_PERMISSIONS)));
-    perm_status_field_ = new BMenuField("perm_status", "Permissions:", perm_menu_);
+    perm_status_field_ = new BMenuField("perm_status", "", perm_menu_);
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel("Standard");
 
@@ -917,7 +915,7 @@ MainWindow::MessageReceived(BMessage* msg)
             }
             bool auto_w = (p == "auto-write"), yolo = (p == "unrestricted");
             if (yolo) {
-                BAlert* confirm = new BAlert("Unrestricted",
+                BAlert* confirm = new BAlert("YOLO",
                     "Allow every tool call in this session without asking?\n"
                     "This is not a sandbox: mode and offline restrictions "
                     "still apply, and file writes, shell commands, and "
@@ -2336,12 +2334,22 @@ MainWindow::_RefreshModeButton()
 {
     if (!mode_menu_) return;
     int index = 0;
-    if (!active_session_id_.empty() && engine_) {
-        auto m = engine_->get_mode(active_session_id_);
-        index = (m == haicode::SessionMode::Plan) ? 1
-              : (m == haicode::SessionMode::Chat) ? 2 : 0;
-    }
+    haicode::SessionMode m = haicode::SessionMode::Build;
+    if (!active_session_id_.empty() && engine_)
+        m = engine_->get_mode(active_session_id_);
+    index = (m == haicode::SessionMode::Plan) ? 1
+          : (m == haicode::SessionMode::Chat) ? 2 : 0;
     if (BMenuItem* it = mode_menu_->ItemAt(index)) it->SetMarked(true);
+    // Convergence guard: the engine mode can change without _SetMode (plan
+    // approval flips Plan→Build directly), which would leave perm_mode_ —
+    // and with it the dropdown's enabled items and marks — stale. This runs
+    // on every mode-change path; a mismatch triggers the be_app echo that
+    // re-derives mode, preset, and armed rules.
+    std::string engine_mode = (m == haicode::SessionMode::Plan) ? "plan"
+                            : (m == haicode::SessionMode::Chat) ? "chat"
+                                                                : "build";
+    if (engine_mode != perm_mode_)
+        be_app->PostMessage(MSG_PERM_SYNC);
     _ApplyModeUi();
 }
 
@@ -2363,6 +2371,20 @@ MainWindow::_SetDirBtnVisible(bool visible)
         dir_slot_->SetExplicitMinSize(BSize(B_SIZE_UNSET, B_SIZE_UNSET));
         dir_btn_->Show();
     }
+}
+
+void
+MainWindow::_SetPermFieldVisible(bool visible)
+{
+    if (!perm_status_field_) return;
+    if (perm_field_visible_ == visible) return;
+    perm_field_visible_ = visible;
+    // No width pinning needed: AddGlue() in the prompt row absorbs the
+    // freed space, so hiding just tightens the row.
+    if (visible)
+        perm_status_field_->Show();
+    else
+        perm_status_field_->Hide();
 }
 
 void
@@ -2402,12 +2424,15 @@ void
 MainWindow::_ApplyModeUi()
 {
     // Chat has no local access at all, so the working-directory picker is
-    // meaningless there. The slot keeps its width so the toolbar doesn't
-    // shift. Other permission controls now live in the Permissions center.
+    // meaningless there. The dir slot keeps its width so the toolbar doesn't
+    // shift. The permission selector is equally meaningless in Chat — its
+    // only tools (web/todo/ask) all bypass the gate, so nothing can ever
+    // prompt — and hides outright (AddGlue absorbs the space).
     haicode::SessionMode cur_mode = haicode::SessionMode::Build;
     if (!active_session_id_.empty() && engine_)
         cur_mode = engine_->get_mode(active_session_id_);
     _SetDirBtnVisible(cur_mode != haicode::SessionMode::Chat);
+    _SetPermFieldVisible(cur_mode != haicode::SessionMode::Chat);
 }
 
 std::string

@@ -177,10 +177,10 @@ private:
     BPopUpMenu*    mode_menu_       = nullptr;
     BMenuField*    mode_field_      = nullptr;
     BButton*       compact_btn_     = nullptr;
-    // Quick permission selector (prompt row): presets + read toggle + entry
-    // to the Permissions center. Marked state mirrors be_app's session flags
-    // via MSG_PERM_STATUS; edits post the same toggle/preset messages the
-    // center uses.
+    // Quick permission selector (prompt row): presets + read toggle. Marked
+    // state mirrors be_app's session flags via MSG_PERM_STATUS; edits post
+    // the same toggle/preset messages the center uses. Hidden in Chat mode
+    // (nothing there can ever prompt). The center lives under Settings.
     BPopUpMenu*    perm_menu_         = nullptr;
     BMenuField*    perm_status_field_ = nullptr;
     BMenuItem*     perm_read_item_    = nullptr;
@@ -198,9 +198,13 @@ private:
     // gate Hide()/Show() during the pre-Show() startup mode restore; these
     // tracked bools can. Must match the constructor's initial Hide() calls.
     bool dir_btn_visible_             = true;
+    bool perm_field_visible_          = true;
     // Hides/shows dir_btn_ while pinning its slot's width so the rest of the
     // toolbar (Provider:/Model:/Mode:) never shifts when it disappears.
     void _SetDirBtnVisible(bool visible);
+    // Hides/shows the prompt-row permission selector (Chat mode). No width
+    // pinning: AddGlue() absorbs the space.
+    void _SetPermFieldVisible(bool visible);
     BFilePanel*    dir_panel_       = nullptr;
     BFilePanel*    attach_panel_    = nullptr;
     BGroupView*    attach_row_      = nullptr;   // removable attachment chips

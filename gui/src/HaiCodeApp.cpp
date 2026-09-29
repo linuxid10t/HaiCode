@@ -865,7 +865,7 @@ HaiCodeApp::_NotifyPermissionUiChanged()
             read_on = it->second.read_everywhere;
             if (mode == haicode::SessionMode::Build) {
                 if (it->second.yolo) {
-                    status = "Unrestricted";
+                    status = "YOLO";
                     preset = "unrestricted";
                 } else if (it->second.auto_edits) {
                     status = "Auto-write";
@@ -875,7 +875,7 @@ HaiCodeApp::_NotifyPermissionUiChanged()
         }
     }
     if (mode == haicode::SessionMode::Plan)
-        status = read_on ? "Plan reads: everywhere" : "Plan reads: project";
+        status = read_on ? "Reads: everywhere" : "Reads: project";
     else if (mode == haicode::SessionMode::Chat)
         status = "No local access";
 

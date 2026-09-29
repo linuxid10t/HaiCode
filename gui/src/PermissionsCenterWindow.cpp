@@ -123,7 +123,7 @@ PermissionsCenterWindow::PermissionsCenterWindow(
         "Automatically allow writes",
         new BMessage(MSG_PERM_TOGGLE_AUTO));
     read_outside_chk_ = new BCheckBox("read_outside",
-        "Allow reads outside trusted roots",
+        "Allow reads everywhere",
         new BMessage(MSG_PERM_TOGGLE_READ));
     bypass_chk_ = new BCheckBox("bypass",
         "Bypass permission prompts",
