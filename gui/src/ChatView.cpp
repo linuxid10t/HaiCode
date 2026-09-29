@@ -476,6 +476,8 @@ ChatView::SetCopyFeedback(int model_idx, bool visible)
     for (const auto& range : copy_ranges_) {
         if (range.model_idx != model_idx) continue;
         int32 start = range.feedback_start;
+        BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL);
+        float scroll_value = vsb ? vsb->Value() : 0;
         int32 selected_start, selected_end;
         text_view_->GetSelection(&selected_start, &selected_end);
         text_view_->MakeFocus(false);
@@ -486,6 +488,8 @@ ChatView::SetCopyFeedback(int model_idx, bool visible)
         rgb_color color = visible ? kColorCopyFeedback : kColorCopyControl;
         text_view_->SetFontAndColor(start, start + 3, &font, B_FONT_ALL, &color);
         text_view_->Select(selected_start, selected_end);
+        if (vsb)
+            vsb->SetValue(scroll_value);
         return;
     }
 }
