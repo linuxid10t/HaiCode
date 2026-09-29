@@ -875,7 +875,7 @@ HaiCodeApp::_NotifyPermissionUiChanged()
         }
     }
     if (mode == haicode::SessionMode::Plan)
-        status = read_on ? "Reads: everywhere" : "Reads: project";
+        status = read_on ? "All reads" : "Standard";
     else if (mode == haicode::SessionMode::Chat)
         status = "No local access";
 

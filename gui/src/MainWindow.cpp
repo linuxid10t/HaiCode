@@ -362,16 +362,18 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     _RebuildPermMenu();
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel("Standard");
-    // The closed field hugs the CURRENT status word: _UpdatePermissionStatus
-    // re-pins explicit min/max whenever the label changes. BMenuField's
-    // natural preferred width tracks the menu's widest ITEM ("Allow reads
-    // everywhere") and its MaxSize() width is unlimited, so without the pin
-    // the field bloats to the widest item and grows on window maximize. The
-    // OPEN popup is unaffected: it lives in its own BMenuWindow that sizes
-    // to fit its items, so the menu can be wider than the closed field.
-    perm_status_field_->SetExplicitMinSize(BSize(_PermFieldWidth("Standard"),
+    // Fixed width, pinned once to the largest Build-mode status word
+    // ("Auto-write") — no dynamic resizing. BMenuField's natural preferred
+    // width tracks the menu's widest ITEM ("Allow reads everywhere") and its
+    // MaxSize() width is unlimited, so without the pin the field bloats to
+    // the widest item and grows on window maximize; re-pinning per word
+    // instead overflowed the prompt row's right inset at small window
+    // sizes. "Auto-write" also covers Plan's "All reads". The OPEN popup is
+    // unaffected: it lives in its own BMenuWindow that sizes to fit its
+    // items, so the menu can be wider than the closed field.
+    perm_status_field_->SetExplicitMinSize(BSize(_PermFieldWidth("Auto-write"),
                                                  B_SIZE_UNSET));
-    perm_status_field_->SetExplicitMaxSize(BSize(_PermFieldWidth("Standard"),
+    perm_status_field_->SetExplicitMaxSize(BSize(_PermFieldWidth("Auto-write"),
                                                  B_SIZE_UNSET));
 
     // ---- Session list (left sidebar) ----
@@ -2007,6 +2009,19 @@ MainWindow::_RebuildPermMenu()
         perm_read_item_->SetMarked(perm_read_on_);
         perm_menu_->AddItem(perm_read_item_);
     }
+
+    // Both the popup's item layout (BMenu's fUseCachedMenuLayout) and the
+    // field's bar-size cache (BMenuField's fLayoutData->valid) survive an
+    // item rebuild; stale caches can produce a zero-sized popup that never
+    // opens (seen in Plan mode after the Build→Plan rebuild). Invalidate
+    // both so the next open recomputes from the new item set. The field is
+    // enabled only when it has something to offer — Chat's empty menu can't
+    // be interacted with even if a stale Show() leaves it visible.
+    perm_menu_->InvalidateLayout();
+    if (perm_status_field_) {
+        perm_status_field_->InvalidateLayout();
+        perm_status_field_->SetEnabled(perm_menu_->CountItems() > 0);
+    }
 }
 
 // Width to pin the permission field to for a status word: label + divider
@@ -2042,24 +2057,11 @@ MainWindow::_UpdatePermissionStatus()
     if (perm_read_item_) perm_read_item_->SetMarked(perm_read_on_);
     // YOLO ({*,*} allow-all) subsumes the read toggle — gray it out so the
     // menu doesn't imply a second, narrower grant on top of allow-all.
-    // BMenuItem has no tooltips; the label states the dependency.
-    if (perm_read_item_) {
-        bool yolo = (perm_preset_ == "unrestricted");
-        perm_read_item_->SetEnabled(!yolo);
-        perm_read_item_->SetLabel(yolo
-            ? "Allow reads everywhere (already allowed by YOLO)"
-            : "Allow reads everywhere");
-    }
-    if (BMenuItem* bar = perm_status_field_->MenuItem()) {
-        // Re-pin whenever the word changes so the closed field hugs it.
-        std::string prev = bar->Label() ? bar->Label() : "";
-        if (prev != perm_status_) {
-            bar->SetLabel(perm_status_.c_str());
-            float w = _PermFieldWidth(perm_status_);
-            perm_status_field_->SetExplicitMinSize(BSize(w, B_SIZE_UNSET));
-            perm_status_field_->SetExplicitMaxSize(BSize(w, B_SIZE_UNSET));
-        }
-    }
+    // BMenuItem has no tooltips; the disabled state alone carries it.
+    if (perm_read_item_)
+        perm_read_item_->SetEnabled(perm_preset_ != "unrestricted");
+    if (BMenuItem* bar = perm_status_field_->MenuItem())
+        bar->SetLabel(perm_status_.c_str());
 }
 
 void
