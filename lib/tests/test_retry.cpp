@@ -148,13 +148,13 @@ static void test_store_delete_after() {
 class FakeProvider : public haicode::Provider {
 public:
     std::string id() const override { return "fake"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"fake-model"};
     }
     int get_model_context(const std::string&) const override { return 0; }
     void stream(const haicode::LLMRequest& req,
-                haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+                haicode::StreamCallbacks cb, const std::string& = "") override {
         ++calls;
         last_chat_request = req;
         cb.on_text_delta("t", "ok");
@@ -176,13 +176,13 @@ public:
 class GatedProvider : public haicode::Provider {
 public:
     std::string id() const override { return "gated"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"gated-model"};
     }
     int get_model_context(const std::string&) const override { return 0; }
     void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb,
-                const std::string& stream_token = "") override {
+                const std::string& = "") override {
         {
             std::lock_guard<std::mutex> g(m);
             ++entered;

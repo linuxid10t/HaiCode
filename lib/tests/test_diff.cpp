@@ -2,13 +2,13 @@
 #include <haicode/tool.h>
 #include <iostream>
 #include <fstream>
-#include <cassert>
+#include "test_check.h"
 #include <cstdio>
 #include <string>
 
 static void write_file(const std::string& path, const std::string& content) {
     std::ofstream f(path, std::ios::binary);
-    assert(f.is_open());
+    TEST_REQUIRE(f.is_open(), "failed to open " + path);
     f << content;
 }
 
@@ -26,7 +26,7 @@ static std::shared_ptr<haicode::Tool> get_diff_tool() {
         registered = true;
     }
     auto tool = registry.get("diff");
-    assert(tool && "diff tool not registered");
+    TEST_REQUIRE(tool, "diff tool not registered");
     return tool;
 }
 

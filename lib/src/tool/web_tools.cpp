@@ -212,11 +212,11 @@ static std::string extract_main_if_present(const std::string& html) {
 
     size_t start = std::string::npos;
     // <main or <article (followed by space, >, or attribute).
-    for (const std::string& tag : {"<main", "<article"}) {
+    for (const char* tag : {"<main", "<article"}) {
         size_t p = find_ci(lower, 0, tag);
         // Make sure it's a real tag boundary, not "<mainly" etc.
         if (p != std::string::npos) {
-            char after = lower[p + tag.size()];
+            char after = lower[p + strlen(tag)];
             if (after == ' ' || after == '>' || after == '\t' || after == '\n') {
                 start = p;
                 break;

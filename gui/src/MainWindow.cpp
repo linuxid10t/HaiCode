@@ -2727,7 +2727,7 @@ MainWindow::_UpdateStatusStrip()
         glyph = "\xe2\x9c\x8e";  // LOWER RIGHT PENCIL
         label = "compacting context\xe2\x80\xa6";
         if (compaction_progress_ >= 0) {
-            char pct[8];
+            char pct[16];
             snprintf(pct, sizeof(pct), " %d%%", compaction_progress_);
             label += pct;
         }
@@ -2767,7 +2767,7 @@ MainWindow::_UpdateStatusStrip()
             int pct = (max_context_ > 0)
                       ? std::min(100, (int)(current_context_tokens_ * 100LL / max_context_))
                       : 0;
-            char pctbuf[8];
+            char pctbuf[16];
             snprintf(pctbuf, sizeof(pctbuf), "%d%%", pct);
             s += " / " + format_tokens(max_context_) + " (" + pctbuf + ")";
         }

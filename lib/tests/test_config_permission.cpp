@@ -3,7 +3,7 @@
 #include <haicode/haicode.h>
 #include <iostream>
 #include <fstream>
-#include <cassert>
+#include "test_check.h"
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -15,7 +15,7 @@
 
 static void write_file(const std::string& path, const std::string& content) {
     std::ofstream f(path);
-    assert(f.is_open());
+    TEST_REQUIRE(f.is_open(), "failed to open " + path);
     f << content;
 }
 
@@ -233,8 +233,8 @@ static bool merge_build_command_base_preserved() {
 
 static bool merge_providers_merged() {
     haicode::AppConfig base, overlay;
-    base.providers["anthropic"]  = {"anthropic", "key-a", ""};
-    overlay.providers["openai"]  = {"openai",    "key-b", ""};
+    base.providers["anthropic"]  = {"anthropic", "key-a", "", "", {}};
+    overlay.providers["openai"]  = {"openai",    "key-b", "", "", {}};
     haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
     CHECK(result.providers.count("anthropic") == 1, "anthropic should survive");
     CHECK(result.providers.count("openai")    == 1, "openai should be added");
@@ -368,9 +368,9 @@ static bool perm_ask_callback_invoked() {
                               const std::string& resource,
                               const nlohmann::json&) -> haicode::PermissionEffect {
         called = true;
-        assert(session_id == "sess1" && "callback session mismatch");
-        assert(action   == "bash"    && "callback action mismatch");
-        assert(resource == "/my/cmd" && "callback resource mismatch");
+        TEST_REQUIRE(session_id == "sess1", "callback session mismatch");
+        TEST_REQUIRE(action   == "bash", "callback action mismatch");
+        TEST_REQUIRE(resource == "/my/cmd", "callback resource mismatch");
         return haicode::PermissionEffect::Allow;
     });
     auto r = gate.check("sess1", "bash", "/my/cmd", nlohmann::json::object());

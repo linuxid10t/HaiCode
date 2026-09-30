@@ -1,7 +1,7 @@
 #include <haicode/db.h>
 #include <haicode/util.h>
 #include <iostream>
-#include <cassert>
+#include "test_check.h"
 #include <cstdio>
 
 int main() {
@@ -20,12 +20,12 @@ int main() {
 
     // Create a session
     auto session = store.create("/boot/home", "default", "{\"id\":\"claude-opus-4-5\",\"provider_id\":\"anthropic\"}");
-    assert(!session.id.empty());
+    TEST_REQUIRE(!session.id.empty(), "session id empty");
     std::cout << "[OK] Session created: " << session.id << std::endl;
 
     // List sessions
     auto sessions = store.list();
-    assert(sessions.size() == 1);
+    TEST_REQUIRE(sessions.size() == 1, "expected exactly 1 session, got " + std::to_string(sessions.size()));
     std::cout << "[OK] Listed " << sessions.size() << " session(s)" << std::endl;
 
     // Append a message
@@ -35,13 +35,13 @@ int main() {
 
     // Reload messages
     auto messages = store.load_messages(session.id);
-    assert(messages.size() == 1);
+    TEST_REQUIRE(messages.size() == 1, "expected exactly 1 message, got " + std::to_string(messages.size()));
     std::cout << "[OK] Loaded " << messages.size() << " message(s)" << std::endl;
 
     // Get by ID
     auto got = store.get(session.id);
-    assert(got.has_value());
-    assert(got->id == session.id);
+    TEST_REQUIRE(got.has_value(), "get() returned nothing");
+    TEST_REQUIRE(got->id == session.id, "get() id mismatch");
     std::cout << "[OK] Retrieved session by ID" << std::endl;
 
     std::cout << std::endl << "All Phase 1 tests passed!" << std::endl;

@@ -1952,7 +1952,7 @@ public:
         return action;
     }
 
-    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
+    ToolResult execute(const nlohmann::json& input, const ToolContext&) override {
         std::string action = input.value("action", "");
         if (action.empty())
             return {false, "", missing_field("process", "action", input)};

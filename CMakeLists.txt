@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 project(haicode CXX)
 
+enable_testing()
+
+# Default to an optimized build with debug info when none was specified
+# (an empty CMAKE_BUILD_TYPE means no optimization flags at all).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
+add_compile_options(-Wall -Wextra)
+
 # Require a C++20-capable compiler. On an x86_gcc2 hybrid this catches the
 # default gcc2 (GCC 2.95.3) toolchain before we try to probe libraries —
 # HaiCode cannot build without the secondary-arch (GCC 13) toolchain.
@@ -77,13 +87,13 @@ find_library(BE_LIB be HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 find_library(ROOT_LIB root HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS})
 
 if(NOT SQLITE3_LIB)
-    message(WARNING "sqlite3 not found — run: pkgman install sqlite_devel")
+    message(FATAL_ERROR "sqlite3 not found — run: pkgman install sqlite_devel")
 endif()
 if(NOT CURL_LIB)
-    message(WARNING "curl not found — run: pkgman install curl_devel")
+    message(FATAL_ERROR "curl not found — run: pkgman install curl_devel")
 endif()
 if(NOT CRYPTO_LIB)
-    message(WARNING "libcrypto not found — run: pkgman install openssl32_devel")
+    message(FATAL_ERROR "libcrypto not found — run: pkgman install openssl3_devel")
 endif()
 
 add_subdirectory(lib)

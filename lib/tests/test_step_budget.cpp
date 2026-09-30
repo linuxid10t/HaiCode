@@ -139,11 +139,11 @@ static bool test_placeholder_substitution() {
 class BlockingProvider : public haicode::Provider {
 public:
     std::string id() const override { return "blocking"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"blocking-model"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& = "") override {
         {
             std::lock_guard<std::mutex> g(m);
             ++entered;
@@ -237,11 +237,11 @@ static bool test_destructor_joins_running_loop() {
 class ToolCallProvider : public haicode::Provider {
 public:
     std::string id() const override { return "toolcall"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"tc-model"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& = "") override {
         ++calls;
         if (calls == 1) {
             std::vector<haicode::ToolCall> tcs{pending};
@@ -441,11 +441,11 @@ static bool test_bash_failure_output_persisted_e2e() {
 class SwitchingProvider : public haicode::Provider {
 public:
     std::string id() const override { return "prov-a"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"model-a"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& = "") override {
         ++calls;
         if (calls == 1) {
             store->update_provider_model(sid, "prov-b", "model-b");
@@ -469,12 +469,12 @@ public:
 class RecordingProvider : public haicode::Provider {
 public:
     std::string id() const override { return "prov-b"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"model-b"};
     }
     void stream(const haicode::LLMRequest& req,
-                haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+                haicode::StreamCallbacks cb, const std::string& = "") override {
         ++calls;
         last_model = req.model_id;
         cb.on_text_delta("t", "b-done");
@@ -1070,11 +1070,11 @@ public:
     using Script = std::function<std::vector<haicode::ToolCall>(int)>;
     explicit ScriptedProvider(Script s) : script_(std::move(s)) {}
     std::string id() const override { return "scripted"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"sc-model"};
     }
-    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+    void stream(const haicode::LLMRequest&, haicode::StreamCallbacks cb, const std::string& = "") override {
         int idx = calls++;
         auto tcs = script_(idx);
         if (tcs.empty()) {

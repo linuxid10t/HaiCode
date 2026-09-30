@@ -8,13 +8,12 @@ tools with per-action permissions, and persists every session to SQLite.
 # Build & run
 
 ```bash
-cmake -B build -S .            # re-run after adding a new .cpp source
+cmake -B build -S .            # only needed once
 make -C build -j4              # builds lib + gui + tests
+ctest --test-dir build         # runs all 20 test binaries
 
 ./build/gui/haicode-gui [project_dir]
 ```
-
-CMake uses `GLOB_RECURSE`; new source files require a re-configure.
 
 Build hook for this project: `make -C build 2>&1`.
 

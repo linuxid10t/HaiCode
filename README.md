@@ -27,6 +27,7 @@ Install these via `pkgman`:
 | `nlohmann_json` | `nlohmann/json.hpp` (header-only) | `lib`, `gui` (config, provider payloads, events) |
 | `sqlite_devel` | `sqlite3.h` + `libsqlite3` | `lib` (session persistence) |
 | `curl_devel` | `curl/curl.h` + `libcurl` | `lib` (LLM HTTP) |
+| `openssl3_devel` | `openssl/sha.h` + `libcrypto` | `lib` (ChatGPT OAuth PKCE flow) |
 | `cmake` | build configuration | all |
 | `make` | build runner | all |
 
@@ -38,7 +39,7 @@ separate `tracker_devel`.
 Install everything in one line:
 
 ```bash
-pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel cmake make
+pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel openssl3_devel cmake make
 ```
 
 ### Optional
@@ -61,18 +62,21 @@ export OPENAI_API_KEY=sk-...        # for the default OpenAI provider
 ## Build
 
 ```bash
-# Configure (only needed once, or when adding new source files)
+# Configure (only needed once)
 cmake -B build -S .
 
 # Build everything
 make -C build -j4
+
+# Run the test suite
+ctest --test-dir build --output-on-failure
 
 # Or build targets individually
 make -C build haicode-gui
 make -C build test_db
 ```
 
-CMake uses `GLOB_RECURSE` to collect sources at configure time. After adding a new `.cpp` file, re-run `cmake -B build -S .` before `make`.
+The build type defaults to `RelWithDebInfo` when none is specified.
 
 ### Hybrid (x86_gcc2) systems
 

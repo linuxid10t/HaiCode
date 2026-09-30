@@ -1,7 +1,7 @@
 #include <haicode/haicode.h>
 #include <haicode/tool.h>
 #include <iostream>
-#include <cassert>
+#include "test_check.h"
 #include <cstdlib>
 #include <string>
 #include <unistd.h>
@@ -21,7 +21,7 @@ static std::shared_ptr<haicode::Tool> get_process_tool() {
         registered = true;
     }
     auto t = registry.get("process");
-    assert(t && "process tool not registered");
+    TEST_REQUIRE(t, "process tool not registered");
     return t;
 }
 
@@ -74,7 +74,7 @@ static bool test_kill_self_with_zero() {
         ::sleep(60);
         _exit(0);
     }
-    assert(pid > 0);
+    TEST_REQUIRE(pid > 0, "fork() failed");
 
     auto result = tool->execute(
         {{"action", "kill"}, {"pid", (int)pid}, {"signal", "TERM"}},

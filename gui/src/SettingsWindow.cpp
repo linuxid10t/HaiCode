@@ -305,8 +305,8 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
               B_TITLED_WINDOW,
               B_AUTO_UPDATE_SIZE_LIMITS | B_CLOSE_ON_ESCAPE)
     , config_(config)
-    , target_(target)
     , project_dir_(project_dir)
+    , target_(target)
 {
     // ---- Providers tab ----
     list_ = new BListView("providers_list", B_SINGLE_SELECTION_LIST);

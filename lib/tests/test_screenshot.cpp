@@ -8,7 +8,6 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <iostream>
-#include <cassert>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)

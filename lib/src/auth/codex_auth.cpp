@@ -141,7 +141,7 @@ void respond(int fd, int status, const std::string& status_text,
     snprintf(header, sizeof(header),
              "HTTP/1.1 %d %s\r\nContent-Type: text/html; charset=utf-8\r\n"
              "Content-Length: %zu\r\nConnection: close\r\n\r\n",
-             status, status_text, body.size());
+             status, status_text.c_str(), body.size());
     send_all(fd, std::string(header) + body);
 }
 

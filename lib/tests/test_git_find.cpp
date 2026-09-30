@@ -2,7 +2,7 @@
 #include <haicode/tool.h>
 #include <iostream>
 #include <fstream>
-#include <cassert>
+#include "test_check.h"
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -25,7 +25,7 @@ static haicode::ToolRegistry& registry() {
 
 static std::shared_ptr<haicode::Tool> get_tool(const std::string& name) {
     auto t = registry().get(name);
-    assert(t && ("tool not registered: " + name).c_str());
+    TEST_REQUIRE(t, "tool not registered: " + name);
     return t;
 }
 

@@ -1,6 +1,5 @@
 #include <haicode/model_context_parse.h>
 #include <iostream>
-#include <cassert>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)

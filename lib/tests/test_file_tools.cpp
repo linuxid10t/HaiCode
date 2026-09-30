@@ -3,7 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <cassert>
+#include "test_check.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -21,7 +21,7 @@ static haicode::ToolRegistry& reg() {
 
 static std::shared_ptr<haicode::Tool> tool(const std::string& name) {
     auto t = reg().get(name);
-    assert(t && ("tool not found: " + name).c_str());
+    TEST_REQUIRE(t, "tool not found: " + name);
     return t;
 }
 
@@ -33,7 +33,7 @@ static haicode::ToolContext ctx(const std::string& dir = "/tmp") {
 
 static void write_file(const std::string& path, const std::string& content) {
     std::ofstream f(path, std::ios::binary);
-    assert(f.is_open());
+    TEST_REQUIRE(f.is_open(), "failed to open " + path);
     f.write(content.data(), static_cast<std::streamsize>(content.size()));
 }
 
@@ -42,11 +42,6 @@ static std::string read_file(const std::string& path) {
     std::ostringstream ss;
     ss << f.rdbuf();
     return ss.str();
-}
-
-static bool file_exists(const std::string& path) {
-    struct stat st{};
-    return stat(path.c_str(), &st) == 0;
 }
 
 // Count entries in `dir` whose name starts with `prefix`. Temp names are

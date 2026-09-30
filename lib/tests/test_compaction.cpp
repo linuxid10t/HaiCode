@@ -23,7 +23,7 @@ static const char* kDbPath = "/tmp/haicode_test_compaction.db";
 class FakeProvider : public haicode::Provider {
 public:
     std::string id() const override { return "fake"; }
-    void cancel(const std::string& stream_token = "") override {}
+    void cancel(const std::string& = "") override {}
     std::vector<std::string> list_models(std::string&) override {
         return {"fake-model"};
     }
@@ -32,7 +32,7 @@ public:
         return it == context_override.end() ? 0 : it->second;
     }
     std::map<std::string, int> context_override;
-    void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb, const std::string& stream_token = "") override {
+    void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb, const std::string& = "") override {
         ++calls;
         if (req.system == "You are a precise conversation summarizer.") {
             summary_requests.push_back(req);

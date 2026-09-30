@@ -1,7 +1,6 @@
 #include <haicode/codex_auth.h>
 #include <haicode/util.h>
 #include <iostream>
-#include <cassert>
 #include <cstdio>
 #include <string>
 #include <unistd.h>

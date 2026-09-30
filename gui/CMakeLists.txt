@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-file(GLOB_RECURSE GUI_SOURCES "src/*.cpp")
+file(GLOB_RECURSE GUI_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
 add_executable(haicode-gui ${GUI_SOURCES})
 
