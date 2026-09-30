@@ -10,7 +10,7 @@ tools with per-action permissions, and persists every session to SQLite.
 ```bash
 cmake -B build -S .            # only needed once
 make -C build -j4              # builds lib + gui + tests
-ctest --test-dir build         # runs all 21 test binaries
+ctest --test-dir build         # runs all 22 test binaries
 
 ./build/gui/haicode-gui [project_dir]
 ```

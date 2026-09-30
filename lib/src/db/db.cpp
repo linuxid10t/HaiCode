@@ -179,6 +179,7 @@ SessionInfo SessionStore::create(const std::string& project_dir,
     s.time_created = util::now_ms();
     s.time_updated = s.time_created;
 
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "INSERT INTO session (id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
@@ -198,6 +199,7 @@ SessionInfo SessionStore::create(const std::string& project_dir,
 }
 
 std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
@@ -226,6 +228,7 @@ std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
 }
 
 std::vector<SessionInfo> SessionStore::list(int limit) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
@@ -257,6 +260,7 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
 }
 
 void SessionStore::update_directory(const std::string& session_id, const std::string& directory) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE session SET directory=?, project_id=?, time_updated=? WHERE id=?");
     stmt.bind(1, directory)
@@ -267,6 +271,7 @@ void SessionStore::update_directory(const std::string& session_id, const std::st
 }
 
 void SessionStore::update_title(const std::string& session_id, const std::string& title) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE session SET title=?, time_updated=? WHERE id=?");
     stmt.bind(1, title)
@@ -277,6 +282,7 @@ void SessionStore::update_title(const std::string& session_id, const std::string
 
 void SessionStore::update_cost(const std::string& session_id, double cost,
                                 const TokenUsage& tokens) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE session SET cost=cost+?, tok_input=tok_input+?, tok_output=tok_output+?,"
         " tok_reasoning=tok_reasoning+?, tok_cache_read=tok_cache_read+?,"
@@ -298,6 +304,7 @@ void SessionStore::update_cost(const std::string& session_id, double cost,
 
 void SessionStore::update_last_input_tokens(const std::string& session_id,
                                             int tokens) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE session SET tok_last_input=?, time_updated=? WHERE id=?");
     stmt.bind(1, tokens)
@@ -307,12 +314,14 @@ void SessionStore::update_last_input_tokens(const std::string& session_id,
 }
 
 void SessionStore::delete_session(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(), "DELETE FROM session WHERE id=?");
     stmt.bind(1, session_id).expect_done();
 }
 
 void SessionStore::update_mode(const std::string& session_id, const std::string& mode_str) {
     // Read current model_json, patch the "mode" field, write it back.
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(), "SELECT model_json FROM session WHERE id=?");
     sel.bind(1, session_id);
     if (!sel.expect_row()) return;
@@ -340,6 +349,7 @@ void SessionStore::update_permission_flags(const std::string& session_id,
                                            bool auto_edits, bool yolo,
                                            bool read_everywhere) {
     // Read current model_json, patch the flag fields, write it back.
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(), "SELECT model_json FROM session WHERE id=?");
     sel.bind(1, session_id);
     if (!sel.expect_row()) return;
@@ -368,6 +378,7 @@ void SessionStore::update_permission_flags(const std::string& session_id,
 void SessionStore::update_skills(const std::string& session_id,
                                  const std::vector<std::string>& skills) {
     // Read current model_json, replace the "skills" array, write it back.
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(), "SELECT model_json FROM session WHERE id=?");
     sel.bind(1, session_id);
     if (!sel.expect_row()) return;
@@ -395,6 +406,7 @@ void SessionStore::update_provider_model(const std::string& session_id,
                                           const std::string& provider_id,
                                           const std::string& model_id) {
     // Read current model_json, patch the "id"/"provider_id" fields, write back.
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(), "SELECT model_json FROM session WHERE id=?");
     sel.bind(1, session_id);
     if (!sel.expect_row()) return;
@@ -421,6 +433,7 @@ void SessionStore::update_provider_model(const std::string& session_id,
 void SessionStore::update_inference(const std::string& session_id,
                                     const InferenceParams& params) {
     // Read current model_json, patch the inference fields, write back.
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(), "SELECT model_json FROM session WHERE id=?");
     sel.bind(1, session_id);
     if (!sel.expect_row()) return;
@@ -452,31 +465,30 @@ void SessionStore::update_inference(const std::string& session_id,
        .expect_done();
 }
 
-int SessionStore::next_seq(const std::string& session_id) {
-    DbStmt stmt(db_.handle(),
-        "SELECT COALESCE(MAX(seq),0)+1 FROM session_message WHERE session_id=?");
-    stmt.bind(1, session_id);
-    if (!stmt.expect_row()) return 1;
-    return stmt.int_col(0);
-}
-
 void SessionStore::append_message(const std::string& session_id,
                                    const std::string& type,
                                    const std::string& data_json) {
-    int seq = next_seq(session_id);
+    // Single atomic statement: the next seq is computed inside the INSERT,
+    // so two concurrent writers can never allocate the same seq — the
+    // UNIQUE(session_id, seq) constraint turns a collision into a thrown
+    // DbError instead of a silently lost row. MAX over an empty set is
+    // NULL, so the first message gets seq 1.
     int64_t now = util::now_ms();
     std::string id = util::make_id("msg");
 
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
-        "INSERT INTO session_message (id, session_id, type, seq, data_json, time_created, time_updated)"
-        " VALUES (?,?,?,?,?,?,?)");
+        "INSERT INTO session_message"
+        " (id, session_id, type, seq, data_json, time_created, time_updated)"
+        " SELECT ?, ?, ?, COALESCE(MAX(seq),0)+1, ?, ?, ?"
+        " FROM session_message WHERE session_id=?");
     stmt.bind(1, id)
         .bind(2, session_id)
         .bind(3, type)
-        .bind(4, seq)
-        .bind(5, data_json)
+        .bind(4, data_json)
+        .bind(5, now)
         .bind(6, now)
-        .bind(7, now)
+        .bind(7, session_id)
         .expect_done();
 
     // Update session's time_updated
@@ -489,6 +501,7 @@ void SessionStore::append_message(const std::string& session_id,
 void SessionStore::update_message_data(const std::string& session_id,
                                        int seq,
                                        const std::string& data_json) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE session_message SET data_json=?, time_updated=?"
         " WHERE session_id=? AND seq=?");
@@ -500,6 +513,7 @@ void SessionStore::update_message_data(const std::string& session_id,
 }
 
 void SessionStore::delete_messages_after(const std::string& session_id, int seq) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     {
         DbStmt stmt(db_.handle(),
             "DELETE FROM session_message WHERE session_id=? AND seq>?");
@@ -514,6 +528,7 @@ void SessionStore::delete_messages_after(const std::string& session_id, int seq)
 }
 
 std::vector<SessionMessage> SessionStore::load_messages(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "SELECT id, session_id, type, seq, data_json, time_created, time_updated"
         " FROM session_message WHERE session_id=? ORDER BY seq ASC");
@@ -540,6 +555,7 @@ std::string SessionStore::insert_checkpoint(const std::string& session_id,
                                             const std::string& previous_checkpoint_id) {
     int64_t now = util::now_ms();
     std::string id = util::make_id("ckpt");
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "INSERT INTO compaction_checkpoint (id, session_id, through_seq,"
         " summary, recent_context, previous_checkpoint_id, status,"
@@ -559,6 +575,7 @@ std::string SessionStore::insert_checkpoint(const std::string& session_id,
 
 void SessionStore::complete_checkpoint(const std::string& checkpoint_id,
                                        const std::string& summary) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE compaction_checkpoint SET summary=?, status='complete',"
         " time_updated=? WHERE id=?");
@@ -569,6 +586,7 @@ void SessionStore::complete_checkpoint(const std::string& checkpoint_id,
 }
 
 void SessionStore::fail_checkpoint(const std::string& checkpoint_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "UPDATE compaction_checkpoint SET status='failed', time_updated=?"
         " WHERE id=?");
@@ -579,6 +597,7 @@ void SessionStore::fail_checkpoint(const std::string& checkpoint_id) {
 
 std::optional<CompactionCheckpoint> SessionStore::latest_complete_checkpoint(
     const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "SELECT id, session_id, through_seq, summary, recent_context,"
         " previous_checkpoint_id, status, time_created, time_updated"
@@ -601,6 +620,7 @@ std::optional<CompactionCheckpoint> SessionStore::latest_complete_checkpoint(
 
 std::vector<CompactionCheckpoint> SessionStore::list_complete_checkpoints(
     const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "SELECT id, session_id, through_seq, summary, recent_context,"
         " previous_checkpoint_id, status, time_created, time_updated"
@@ -628,7 +648,11 @@ void SessionStore::replace_todos(const std::string& session_id,
                                  const std::vector<Todo>& todos) {
     // Atomic whole-list replace: DELETE then INSERT each row inside one
     // transaction. Matches the todo_write tool's whole-list semantics.
-    db_.exec("BEGIN;");
+    // conn_mu_ is held across the entire transaction: all sessions share
+    // one sqlite connection, so without the store-level lock a concurrent
+    // writer's BEGIN would fail and its writes would get absorbed here.
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbTxn txn(db_.handle());
 
     {
         DbStmt stmt(db_.handle(), "DELETE FROM session_todo WHERE session_id=?");
@@ -655,10 +679,11 @@ void SessionStore::replace_todos(const std::string& session_id,
         }
     }
 
-    db_.exec("COMMIT;");
+    txn.commit();
 }
 
 std::vector<Todo> SessionStore::load_todos(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
         "SELECT content, active_form, status"
         " FROM session_todo WHERE session_id=? ORDER BY position ASC");
@@ -680,6 +705,7 @@ void SessionStore::update_tool_result_by_call_id(const std::string& call_id,
     // Find the tool_result message whose data_json contains this call_id,
     // then update its data_json with the new output. The data_json is a JSON
     // object with at least {call_id, output}. We replace the 'output' field.
+    std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(),
         "SELECT id, data_json FROM session_message"
         " WHERE type='tool_result' AND data_json LIKE ?");

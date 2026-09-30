@@ -5,6 +5,7 @@
 #include <optional>
 #include <functional>
 #include <stdexcept>
+#include <mutex>
 #include <sqlite3.h>
 
 namespace haicode {
@@ -90,6 +91,44 @@ private:
 
     sqlite3* db_;
     sqlite3_stmt* stmt_ = nullptr;
+};
+
+// RAII transaction on a raw connection: BEGIN is checked (throws DbError),
+// COMMIT runs in commit() and is checked, and any outstanding transaction is
+// rolled back on destruction — including when an exception unwinds through
+// the guard or COMMIT itself fails.
+class DbTxn {
+public:
+    explicit DbTxn(sqlite3* db) : db_(db) {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "BEGIN;", nullptr, nullptr, &err) != SQLITE_OK) {
+            std::string msg = err ? err : "unknown";
+            sqlite3_free(err);
+            throw DbError("BEGIN failed: " + msg);
+        }
+        open_ = true;
+    }
+    ~DbTxn() {
+        if (open_) sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, nullptr);
+    }
+    DbTxn(const DbTxn&) = delete;
+    DbTxn& operator=(const DbTxn&) = delete;
+
+    void commit() {
+        char* err = nullptr;
+        if (sqlite3_exec(db_, "COMMIT;", nullptr, nullptr, &err) != SQLITE_OK) {
+            std::string msg = err ? err : "unknown";
+            sqlite3_free(err);
+            // Leave open_ set so the destructor rolls back whatever the
+            // failed commit left behind.
+            throw DbError("COMMIT failed: " + msg);
+        }
+        open_ = false;
+    }
+
+private:
+    sqlite3* db_;
+    bool open_ = false;
 };
 
 class Database {
@@ -262,7 +301,12 @@ public:
 
 private:
     Database& db_;
-    int next_seq(const std::string& session_id);
+    // All sessions share one sqlite connection; this serializes every store
+    // operation in-process. It is the boundary that keeps a replace_todos
+    // transaction from absorbing another thread's writes and stops reads
+    // from observing mid-transaction state. No public method may call
+    // another public method (would self-deadlock on this mutex).
+    std::mutex conn_mu_;
 };
 
 } // namespace haicode
