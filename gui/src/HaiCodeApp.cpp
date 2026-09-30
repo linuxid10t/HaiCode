@@ -285,6 +285,11 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             int32 value = B_CONTROL_OFF;
             msg->FindInt32("be:value", &value);
             std::string sid = _TargetSession(msg);
+            // A session never activated this run (e.g. picked in the
+            // Permissions center) has no entry yet: load its persisted flags
+            // first, or the other two would default to off and the persist
+            // below would overwrite them.
+            if (!session_flags_.count(sid)) _SyncSessionFlags(sid);
             session_flags_[sid].auto_edits = (value == B_CONTROL_ON);
             _ApplySessionRules(sid);
             _PersistSessionFlags(sid);
@@ -295,6 +300,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             int32 value = B_CONTROL_OFF;
             msg->FindInt32("be:value", &value);
             std::string sid = _TargetSession(msg);
+            if (!session_flags_.count(sid)) _SyncSessionFlags(sid);
             session_flags_[sid].yolo = (value == B_CONTROL_ON);
             _ApplySessionRules(sid);
             _PersistSessionFlags(sid);
@@ -305,6 +311,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             int32 value = B_CONTROL_OFF;
             msg->FindInt32("be:value", &value);
             std::string sid = _TargetSession(msg);
+            if (!session_flags_.count(sid)) _SyncSessionFlags(sid);
             session_flags_[sid].read_everywhere = (value == B_CONTROL_ON);
             _ApplySessionRules(sid);
             _PersistSessionFlags(sid);
