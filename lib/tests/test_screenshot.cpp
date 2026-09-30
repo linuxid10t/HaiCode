@@ -58,7 +58,15 @@ static bool test_config_vision_parse_merge() {
     base.vision_fallback_model = "claude-sonnet-4-5";
     AppConfig overlay;
     overlay.model_vision = {{"x", false}, {"y", true}};
-    AppConfig merged = loader.merge(base, overlay);
+
+    ConfigLayer base_layer;
+    base_layer.values = base;
+    base_layer.present = {"vision/x", "vision_fallback/provider",
+                          "vision_fallback/model"};
+    ConfigLayer overlay_layer;
+    overlay_layer.values = overlay;
+    overlay_layer.present = {"vision/x", "vision/y"};
+    AppConfig merged = merge(base_layer, overlay_layer);
     CHECK(merged.model_vision["x"] == false, "overlay false must win per key");
     CHECK(merged.model_vision["y"] == true, "overlay adds new keys");
     CHECK(merged.vision_fallback_provider == "anthropic" && merged.vision_fallback_model == "claude-sonnet-4-5",
@@ -67,7 +75,10 @@ static bool test_config_vision_parse_merge() {
     AppConfig overlay2;
     overlay2.vision_fallback_provider = "openai";
     overlay2.vision_fallback_model = "gpt-4o";
-    AppConfig merged2 = loader.merge(base, overlay2);
+    ConfigLayer overlay2_layer;
+    overlay2_layer.values = overlay2;
+    overlay2_layer.present = {"vision_fallback/provider", "vision_fallback/model"};
+    AppConfig merged2 = merge(base_layer, overlay2_layer);
     CHECK(merged2.vision_fallback_provider == "openai" && merged2.vision_fallback_model == "gpt-4o",
           "non-empty overlay wins for fallback pair");
 

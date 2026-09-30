@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 #include <optional>
+#include <set>
 #include <functional>
 #include <nlohmann/json.hpp>
 
@@ -15,17 +16,6 @@ struct ProviderConfig {
     std::string type;  // "anthropic" or "openai"; inferred from id if empty
     std::string api_key;
     std::string base_url;
-    std::map<std::string, std::string> env;
-};
-
-struct MCPServerConfig {
-    enum class Type { Local, Remote };
-    Type type = Type::Local;
-    std::vector<std::string> command;
-    std::string url;
-    std::map<std::string, std::string> environment;
-    bool disabled = false;
-    int timeout_ms = 30000;
 };
 
 struct AgentConfig {
@@ -42,7 +32,6 @@ struct AppConfig {
     std::string provider;
     std::string agent;
     std::map<std::string, ProviderConfig> providers;
-    std::map<std::string, MCPServerConfig> mcp;
     std::map<std::string, AgentConfig> agents;
     std::vector<PermissionRule> permissions;
     std::vector<std::string> instructions;
@@ -72,9 +61,6 @@ struct AppConfig {
     std::map<std::string, ModelPricing> pricing;
     // web_search tool config. engine = "" (unset; the runtime falls back to
     // "ddg_lite"), or one of "ddg_lite", "ddg_html", "exa", "zai".
-    // Must default to empty: merge() treats any non-empty overlay value as
-    // authoritative, so a non-empty default would clobber the global config
-    // whenever the project config file is absent.
     // Exa and Z.ai are API-key services; keys resolve at execute time from
     // web_search_api_keys (config) with an $EXA_API_KEY / $ZAI_API_KEY fallback.
     std::string web_search_engine;
@@ -91,9 +77,7 @@ struct AppConfig {
     std::string default_mode = "plan";
     // Thinking-block display in the chat view: "off" (always collapsed),
     // "on" (always expanded), or "on_while_thinking" (expanded while
-    // streaming, collapsed after). Empty = "on_while_thinking"; must default
-    // to empty so merge() doesn't let the project layer clobber the global
-    // config when the project config file is absent.
+    // streaming, collapsed after). Empty = "on_while_thinking".
     std::string thinking_display;
     // Skill ids (filenames, e.g. "git-commit.md") enabled by default for
     // newly created sessions. Parsed from the top-level "skills" array in
@@ -107,7 +91,6 @@ struct AppConfig {
     // entirely when the model's context window is unknown (0).
     bool   auto_compact          = true;
     double auto_compact_threshold = 0.80; // 0.0–1.0 fraction of the window
-    int    auto_compact_reserve   = 8192; // tokens reserved for summary + output
 
     // Checkpoint compaction tuning (lib/src/compaction/compaction.cpp).
     int compaction_buffer            = 8192;  // safety margin off the window
@@ -127,13 +110,33 @@ public:
     // Load and merge global + project config
     AppConfig load(const std::string& project_dir);
 
-    // Load a single JSON file (returns empty config on missing file)
+    // Load a single JSON file (returns empty config on missing file).
+    // Thin wrapper over load_layer() for callers that don't care about key
+    // presence (tests, tooling).
     AppConfig load_file(const std::string& path);
-
-    // Merge two configs: overlay values win over base for scalars; collections
-    // (permissions, instructions, providers) are merged/appended.
-    AppConfig merge(const AppConfig& base, const AppConfig& overlay);
 };
+
+// One config file's parse result: the values plus WHICH keys were present in
+// the file. Presence — not comparison against struct defaults — drives
+// merging: an absent project key must never clobber the global layer, and a
+// project key whose value happens to equal the struct default (e.g.
+// "auto_compact": true) must still count as an explicit override.
+struct ConfigLayer {
+    AppConfig values;               // struct defaults for absent keys
+    std::set<std::string> present;  // "default_mode", "web_search/max_results",
+                                    // "providers/<id>/api_key", ...
+    bool has(const std::string& key) const { return present.count(key) != 0; }
+};
+
+// Parse one file into a layer. A missing or invalid file yields an empty
+// layer (nothing present), so it can never clobber the other layer.
+ConfigLayer load_layer(const std::string& path);
+
+// Presence-based merge: the overlay wins exactly for keys present in the
+// overlay layer (per subkey for provider entries); collections (permissions,
+// instructions, skills) keep append semantics and per-key maps (models,
+// vision, pricing, search api keys) keep per-key overlay semantics.
+AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay);
 
 // One configurable permission source (global or project file), kept
 // un-merged so the policy editor can show and edit each independently.

@@ -154,6 +154,13 @@ ChatGPT OAuth token store are written owner-only (`0600`), and existing
 secret files are tightened at startup if another editor left them
 group-readable.
 
+Merging is presence-based: a project config key overrides the global value
+only when the project file actually sets it. An absent project key never
+resets a global setting (a missing `default_mode` no longer wipes a global
+`"build"`), an explicit value equal to the default still counts (booleans
+can be turned back *on*), and provider entries merge field by field — a
+project `base_url` no longer drops the global `api_key`.
+
 ### Providers
 
 The `"providers"` object maps arbitrary ids to provider configs. Each entry has
@@ -208,8 +215,7 @@ on a context-overflow rejection. The current user turn is always kept intact.
 ```json
 {
   "auto_compact": true,
-  "auto_compact_threshold": 0.80,
-  "auto_compact_reserve": 8192
+  "auto_compact_threshold": 0.80
 }
 ```
 
@@ -217,7 +223,6 @@ on a context-overflow rejection. The current user turn is always kept intact.
 |-----|---------|---------|
 | `auto_compact` | `true` | Master switch. |
 | `auto_compact_threshold` | `0.80` | Fraction (0.0–1.0) of the window at which compaction triggers. |
-| `auto_compact_reserve` | `8192` | Tokens subtracted from the window before computing the threshold, leaving room for the summary + the model's reply. |
 
 Compaction is **disabled when the model's context window is unknown** (`window == 0`),
 since the threshold cannot be sized safely. Set the window explicitly via the

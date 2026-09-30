@@ -43,16 +43,16 @@ static void append_permission(std::vector<PermissionRule>& out,
 AppConfig ConfigLoader::load(const std::string& project_dir) {
     // Global config: B_USER_SETTINGS_DIRECTORY/haicode/config.json
     BPath settings_path;
-    AppConfig global_cfg;
+    ConfigLayer global_layer;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
         std::string global_path = std::string(settings_path.Path()) + "/haicode/config.json";
-        global_cfg = load_file(global_path);
+        global_layer = load_layer(global_path);
     }
 
     // Project config
-    AppConfig project_cfg = load_file(project_dir + "/.haicode/config.json");
+    ConfigLayer project_layer = load_layer(project_dir + "/.haicode/config.json");
 
-    AppConfig result = merge(global_cfg, project_cfg);
+    AppConfig result = merge(global_layer, project_layer);
 
     // Project-only: read agents.md, falling back to claude.md. If both exist,
     // agents.md wins. Empty content is treated as absent (no block emitted by
@@ -84,38 +84,55 @@ AppConfig ConfigLoader::load(const std::string& project_dir) {
     return result;
 }
 
-AppConfig ConfigLoader::load_file(const std::string& path) {
+ConfigLayer load_layer(const std::string& path) {
     std::string content = read_file(path);
-    AppConfig cfg;
-    if (content.empty()) return cfg;
+    ConfigLayer layer;
+    AppConfig& cfg = layer.values;
+    if (content.empty()) return layer;
 
     try {
         auto j = nlohmann::json::parse(content, nullptr, false);
-        if (j.is_discarded()) return cfg;
+        if (j.is_discarded()) return layer;
 
-        if (j.contains("model") && j["model"].is_string())
+        // Scalar keys record presence only when a valid value was accepted:
+        // an ignored/invalid value must not let the layer clobber the other
+        // one with a struct default (that was the old merge bug).
+        if (j.contains("model") && j["model"].is_string()) {
             cfg.model = j["model"].get<std::string>();
-        if (j.contains("provider") && j["provider"].is_string())
+            layer.present.insert("model");
+        }
+        if (j.contains("provider") && j["provider"].is_string()) {
             cfg.provider = j["provider"].get<std::string>();
-        if (j.contains("agent") && j["agent"].is_string())
+            layer.present.insert("provider");
+        }
+        if (j.contains("agent") && j["agent"].is_string()) {
             cfg.agent = j["agent"].get<std::string>();
+            layer.present.insert("agent");
+        }
 
         if (j.contains("providers") && j["providers"].is_object()) {
             for (auto& [k, v] : j["providers"].items()) {
                 ProviderConfig p;
                 p.id = k;
-                if (v.contains("type") && v["type"].is_string())
+                std::string pk = "providers/" + k + "/";
+                if (v.contains("type") && v["type"].is_string()) {
                     p.type = v["type"].get<std::string>();
+                    layer.present.insert(pk + "type");
+                }
                 // Default type: "anthropic" id → anthropic, "chatgpt" id →
                 // chatgpt (Codex OAuth), else openai.
                 if (p.type.empty())
                     p.type = (k == "anthropic") ? "anthropic"
                           : (k == "chatgpt")   ? "chatgpt"
                                                : "openai";
-                if (v.contains("api_key") && v["api_key"].is_string())
+                if (v.contains("api_key") && v["api_key"].is_string()) {
                     p.api_key = v["api_key"].get<std::string>();
-                if (v.contains("base_url") && v["base_url"].is_string())
+                    layer.present.insert(pk + "api_key");
+                }
+                if (v.contains("base_url") && v["base_url"].is_string()) {
                     p.base_url = v["base_url"].get<std::string>();
+                    layer.present.insert(pk + "base_url");
+                }
                 cfg.providers[k] = p;
             }
         }
@@ -141,18 +158,21 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 }
                 cfg.agents[k] = std::move(a);
             }
+            layer.present.insert("agents");
         }
 
         if (j.contains("permissions") && j["permissions"].is_array()) {
             for (auto& p : j["permissions"])
                 if (p.is_object())
                     append_permission(cfg.permissions, p);
+            layer.present.insert("permissions");
         }
 
         if (j.contains("instructions") && j["instructions"].is_array()) {
             for (auto& s : j["instructions"])
                 if (s.is_string())
                     cfg.instructions.push_back(s.get<std::string>());
+            layer.present.insert("instructions");
         }
 
         // Default-enabled skills for new sessions: ["git-commit.md", ...]
@@ -160,13 +180,16 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
             for (auto& s : j["skills"])
                 if (s.is_string())
                     cfg.default_skills.push_back(s.get<std::string>());
+            layer.present.insert("skills");
         }
 
         // Per-model context-window overrides: {"models": {"foo": 128000, ...}}
         if (j.contains("models") && j["models"].is_object()) {
             for (auto& [k, v] : j["models"].items()) {
-                if (v.is_number_integer())
+                if (v.is_number_integer()) {
                     cfg.model_contexts[k] = v.get<int>();
+                    layer.present.insert("models/" + k);
+                }
             }
         }
 
@@ -174,20 +197,28 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
         // {"vision": {"claude-sonnet-4": true, "some-text-only-model": false}}
         if (j.contains("vision") && j["vision"].is_object()) {
             for (auto& [k, v] : j["vision"].items()) {
-                if (v.is_boolean())
+                if (v.is_boolean()) {
                     cfg.model_vision[k] = v.get<bool>();
+                    layer.present.insert("vision/" + k);
+                }
             }
         }
 
         // Vision fallback pair:
         // {"vision_fallback": {"provider": "openai", "model": "gpt-4o-mini"}}
         // Describes images via this model when the primary is text-only.
+        // Per-subkey presence: an overlay naming only the provider keeps the
+        // base layer's model.
         if (j.contains("vision_fallback") && j["vision_fallback"].is_object()) {
             const auto& vf = j["vision_fallback"];
-            if (vf.contains("provider") && vf["provider"].is_string())
+            if (vf.contains("provider") && vf["provider"].is_string()) {
                 cfg.vision_fallback_provider = vf["provider"].get<std::string>();
-            if (vf.contains("model") && vf["model"].is_string())
+                layer.present.insert("vision_fallback/provider");
+            }
+            if (vf.contains("model") && vf["model"].is_string()) {
                 cfg.vision_fallback_model = vf["model"].get<std::string>();
+                layer.present.insert("vision_fallback/model");
+            }
         }
 
         // Per-model token-price overrides:
@@ -203,148 +234,209 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
                 p.cache_read  = v.value("cache_read",  0.0);
                 p.cache_write = v.value("cache_write", 0.0);
                 cfg.pricing[k] = p;
+                layer.present.insert("pricing/" + k);
             }
         }
 
-        if (j.contains("build_command") && j["build_command"].is_string())
+        if (j.contains("build_command") && j["build_command"].is_string()) {
             cfg.build_command = j["build_command"].get<std::string>();
+            layer.present.insert("build_command");
+        }
 
         // Default session mode: "plan", "chat", or "build". Unrecognized
-        // values are ignored so the struct default ("build") stands.
+        // values are ignored so the struct default stands.
         if (j.contains("default_mode") && j["default_mode"].is_string()) {
             std::string dm = j["default_mode"].get<std::string>();
-            if (dm == "plan" || dm == "chat" || dm == "build")
+            if (dm == "plan" || dm == "chat" || dm == "build") {
                 cfg.default_mode = dm;
+                layer.present.insert("default_mode");
+            }
         }
 
         // Thinking-block display: "off", "on", or "on_while_thinking".
         // Unrecognized values are ignored so the struct default stands.
         if (j.contains("thinking_display") && j["thinking_display"].is_string()) {
             std::string td = j["thinking_display"].get<std::string>();
-            if (td == "off" || td == "on" || td == "on_while_thinking")
+            if (td == "off" || td == "on" || td == "on_while_thinking") {
                 cfg.thinking_display = td;
+                layer.present.insert("thinking_display");
+            }
         }
 
-        // Auto-compaction tuning.
-        if (j.contains("auto_compact") && j["auto_compact"].is_boolean())
+        // Auto-compaction tuning. Presence is recorded even when the value
+        // equals the struct default: an explicit "auto_compact": true in the
+        // project layer must re-enable what the global layer turned off.
+        if (j.contains("auto_compact") && j["auto_compact"].is_boolean()) {
             cfg.auto_compact = j["auto_compact"].get<bool>();
+            layer.present.insert("auto_compact");
+        }
         if (j.contains("auto_compact_threshold") && j["auto_compact_threshold"].is_number()) {
             double t = j["auto_compact_threshold"].get<double>();
-            if (t > 0.0 && t < 1.0) cfg.auto_compact_threshold = t;
-        }
-        if (j.contains("auto_compact_reserve") && j["auto_compact_reserve"].is_number_integer()) {
-            int r = j["auto_compact_reserve"].get<int>();
-            if (r > 0) cfg.auto_compact_reserve = r;
+            if (t > 0.0 && t < 1.0) {
+                cfg.auto_compact_threshold = t;
+                layer.present.insert("auto_compact_threshold");
+            }
         }
         if (j.contains("compaction_buffer") && j["compaction_buffer"].is_number_integer()) {
             int v = j["compaction_buffer"].get<int>();
-            if (v > 0) cfg.compaction_buffer = v;
+            if (v > 0) {
+                cfg.compaction_buffer = v;
+                layer.present.insert("compaction_buffer");
+            }
         }
         if (j.contains("compaction_recent_context") && j["compaction_recent_context"].is_number_integer()) {
             int v = j["compaction_recent_context"].get<int>();
-            if (v > 0) cfg.compaction_recent_context = v;
+            if (v > 0) {
+                cfg.compaction_recent_context = v;
+                layer.present.insert("compaction_recent_context");
+            }
         }
         if (j.contains("compaction_summary_max_tokens") && j["compaction_summary_max_tokens"].is_number_integer()) {
             int v = j["compaction_summary_max_tokens"].get<int>();
-            if (v > 0) cfg.compaction_summary_max_tokens = v;
+            if (v > 0) {
+                cfg.compaction_summary_max_tokens = v;
+                layer.present.insert("compaction_summary_max_tokens");
+            }
         }
 
         // Session autonaming: master toggle + LLM refine sub-flag.
-        if (j.contains("autoname_sessions") && j["autoname_sessions"].is_boolean())
+        if (j.contains("autoname_sessions") && j["autoname_sessions"].is_boolean()) {
             cfg.autoname_sessions = j["autoname_sessions"].get<bool>();
-        if (j.contains("autoname_llm_refine") && j["autoname_llm_refine"].is_boolean())
+            layer.present.insert("autoname_sessions");
+        }
+        if (j.contains("autoname_llm_refine") && j["autoname_llm_refine"].is_boolean()) {
             cfg.autoname_llm_refine = j["autoname_llm_refine"].get<bool>();
+            layer.present.insert("autoname_llm_refine");
+        }
 
         // web_search tool config: {"web_search": {"engine": "ddg_lite", "max_results": 5}}
         if (j.contains("web_search") && j["web_search"].is_object()) {
             auto& ws = j["web_search"];
-            if (ws.contains("engine") && ws["engine"].is_string())
+            if (ws.contains("engine") && ws["engine"].is_string()) {
                 cfg.web_search_engine = ws["engine"].get<std::string>();
+                layer.present.insert("web_search/engine");
+            }
             if (ws.contains("max_results") && ws["max_results"].is_number_integer()) {
                 int n = ws["max_results"].get<int>();
-                if (n > 0) cfg.web_search_max_results = n;
+                if (n > 0) {
+                    cfg.web_search_max_results = n;
+                    layer.present.insert("web_search/max_results");
+                }
             }
             if (ws.contains("api_keys") && ws["api_keys"].is_object()) {
                 for (auto& [engine, key] : ws["api_keys"].items())
-                    if (key.is_string())
+                    if (key.is_string()) {
                         cfg.web_search_api_keys[engine] = key.get<std::string>();
+                        layer.present.insert("web_search/api_keys/" + engine);
+                    }
             }
         }
     } catch (...) {}
 
-    return cfg;
+    return layer;
 }
 
-AppConfig ConfigLoader::merge(const AppConfig& base, const AppConfig& overlay) {
-    AppConfig result = base;
-    if (!overlay.model.empty()) result.model = overlay.model;
-    if (!overlay.provider.empty()) result.provider = overlay.provider;
-    if (!overlay.agent.empty()) result.agent = overlay.agent;
-    for (auto& [k, v] : overlay.providers)
-        result.providers[k] = v;
-    for (auto& [id, ov] : overlay.agents) {
+AppConfig ConfigLoader::load_file(const std::string& path) {
+    return load_layer(path).values;
+}
+
+// Presence-based merge: the overlay wins exactly for keys its layer
+// recorded as present. Struct defaults never participate, so an absent
+// project key can't clobber the global layer and a project key whose value
+// equals a struct default still counts as an explicit override.
+AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay) {
+    AppConfig result = base.values;
+    const AppConfig& ov = overlay.values;
+
+    if (overlay.has("model"))            result.model            = ov.model;
+    if (overlay.has("provider"))         result.provider         = ov.provider;
+    if (overlay.has("agent"))            result.agent            = ov.agent;
+    if (overlay.has("build_command"))    result.build_command    = ov.build_command;
+    if (overlay.has("default_mode"))     result.default_mode     = ov.default_mode;
+    if (overlay.has("thinking_display")) result.thinking_display = ov.thinking_display;
+
+    // Tuning scalars: presence-driven, so an explicit "auto_compact": true
+    // in the project layer re-enables what the global layer turned off (the
+    // old default-comparison merge could only ever turn booleans off).
+    if (overlay.has("auto_compact"))
+        result.auto_compact = ov.auto_compact;
+    if (overlay.has("auto_compact_threshold"))
+        result.auto_compact_threshold = ov.auto_compact_threshold;
+    if (overlay.has("compaction_buffer"))
+        result.compaction_buffer = ov.compaction_buffer;
+    if (overlay.has("compaction_recent_context"))
+        result.compaction_recent_context = ov.compaction_recent_context;
+    if (overlay.has("compaction_summary_max_tokens"))
+        result.compaction_summary_max_tokens = ov.compaction_summary_max_tokens;
+    if (overlay.has("autoname_sessions"))
+        result.autoname_sessions = ov.autoname_sessions;
+    if (overlay.has("autoname_llm_refine"))
+        result.autoname_llm_refine = ov.autoname_llm_refine;
+
+    // Providers: PER-SUBKEY merge. An overlay entry naming only base_url
+    // keeps the base entry's api_key/type — the old wholesale replacement
+    // dropped credentials whenever a project config touched an entry.
+    for (auto& [id, op] : ov.providers) {
+        auto it = result.providers.find(id);
+        if (it == result.providers.end()) {
+            result.providers[id] = op;
+            continue;
+        }
+        ProviderConfig& dst = it->second;
+        std::string pk = "providers/" + id + "/";
+        if (overlay.has(pk + "type"))    dst.type     = op.type;
+        if (overlay.has(pk + "api_key")) dst.api_key  = op.api_key;
+        if (overlay.has(pk + "base_url")) dst.base_url = op.base_url;
+    }
+
+    // Agents: fields are optional/empty-means-absent, so the existing
+    // per-field overlay semantics already encode presence.
+    for (auto& [id, oag] : ov.agents) {
         AgentConfig& dst = result.agents[id];
         dst.id = id;
-        if (ov.model)         dst.model         = *ov.model;
-        if (ov.system_prompt) dst.system_prompt = *ov.system_prompt;
-        if (ov.max_steps)     dst.max_steps     = *ov.max_steps;
-        if (!ov.color.empty()) dst.color        = ov.color;
-        if (!ov.permissions.empty()) dst.permissions = ov.permissions;
+        if (oag.model)         dst.model         = *oag.model;
+        if (oag.system_prompt) dst.system_prompt = *oag.system_prompt;
+        if (oag.max_steps)     dst.max_steps     = *oag.max_steps;
+        if (!oag.color.empty()) dst.color        = oag.color;
+        if (!oag.permissions.empty()) dst.permissions = oag.permissions;
     }
-    for (auto& r : overlay.permissions)
+
+    // Ordered collections: overlay entries append after base entries.
+    for (auto& r : ov.permissions)
         result.permissions.push_back(r);
-    for (auto& s : overlay.instructions)
+    for (auto& s : ov.instructions)
         result.instructions.push_back(s);
     // Append-with-dedup: a project config listing an already-default skill
     // must not enable it twice (the prompt block would embed it twice).
-    for (auto& s : overlay.default_skills) {
+    for (auto& s : ov.default_skills) {
         if (std::find(result.default_skills.begin(),
                       result.default_skills.end(), s)
                 == result.default_skills.end())
             result.default_skills.push_back(s);
     }
-    for (auto& [k, v] : overlay.model_contexts)
-        result.model_contexts[k] = v;
-    for (auto& [k, v] : overlay.model_vision)
-        result.model_vision[k] = v;
-    if (!overlay.vision_fallback_provider.empty())
-        result.vision_fallback_provider = overlay.vision_fallback_provider;
-    if (!overlay.vision_fallback_model.empty())
-        result.vision_fallback_model = overlay.vision_fallback_model;
-    for (auto& [k, v] : overlay.pricing)
-        result.pricing[k] = v;
-    if (!overlay.web_search_engine.empty())
-        result.web_search_engine = overlay.web_search_engine;
-    if (overlay.web_search_max_results > 0)
-        result.web_search_max_results = overlay.web_search_max_results;
-    for (auto& [k, v] : overlay.web_search_api_keys)
-        result.web_search_api_keys[k] = v;
-    if (!overlay.build_command.empty())
-        result.build_command = overlay.build_command;
-    if (!overlay.default_mode.empty())
-        result.default_mode = overlay.default_mode;
-    if (!overlay.thinking_display.empty())
-        result.thinking_display = overlay.thinking_display;
-    if (!overlay.auto_compact)
-        result.auto_compact = false;
-    if (overlay.auto_compact_threshold != 0.80)
-        result.auto_compact_threshold = overlay.auto_compact_threshold;
-    if (overlay.auto_compact_reserve != 8192)
-        result.auto_compact_reserve = overlay.auto_compact_reserve;
-    if (overlay.compaction_buffer != 8192)
-        result.compaction_buffer = overlay.compaction_buffer;
-    if (overlay.compaction_recent_context != 10240)
-        result.compaction_recent_context = overlay.compaction_recent_context;
-    if (overlay.compaction_summary_max_tokens != 4096)
-        result.compaction_summary_max_tokens = overlay.compaction_summary_max_tokens;
 
-    // Booleans: overlay only wins if it explicitly disables (false). A missing
-    // key parses to the struct default (true), so we must not let it clobber a
-    // base value that the user set to false in a more specific config layer.
-    if (!overlay.autoname_sessions)
-        result.autoname_sessions = false;
-    if (!overlay.autoname_llm_refine)
-        result.autoname_llm_refine = false;
+    // Per-key maps: overlay wins per key, base keys survive.
+    for (auto& [k, v] : ov.model_contexts)
+        result.model_contexts[k] = v;
+    for (auto& [k, v] : ov.model_vision)
+        result.model_vision[k] = v;
+    for (auto& [k, v] : ov.pricing)
+        result.pricing[k] = v;
+
+    // Vision fallback: per-subkey presence.
+    if (overlay.has("vision_fallback/provider"))
+        result.vision_fallback_provider = ov.vision_fallback_provider;
+    if (overlay.has("vision_fallback/model"))
+        result.vision_fallback_model = ov.vision_fallback_model;
+
+    // web_search: per-subkey presence; api_keys per-engine.
+    if (overlay.has("web_search/engine"))
+        result.web_search_engine = ov.web_search_engine;
+    if (overlay.has("web_search/max_results"))
+        result.web_search_max_results = ov.web_search_max_results;
+    for (auto& [k, v] : ov.web_search_api_keys)
+        result.web_search_api_keys[k] = v;
+
     return result;
 }
 

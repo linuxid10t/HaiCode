@@ -160,15 +160,24 @@ static bool cfg_model_contexts() {
 }
 
 // ============================================================
-// ConfigLoader::merge
+// merge (ConfigLayer, presence-based)
 // ============================================================
 
+static haicode::ConfigLayer make_layer(const haicode::AppConfig& vals,
+                                       std::initializer_list<std::string> keys) {
+    haicode::ConfigLayer l;
+    l.values = vals;
+    for (auto& k : keys) l.present.insert(k);
+    return l;
+}
+
 static bool merge_scalar_overlay() {
-    haicode::AppConfig base, overlay;
-    base.model    = "base-model";
-    base.provider = "base-provider";
-    overlay.model = "overlay-model";
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b, o;
+    b.model    = "base-model";
+    b.provider = "base-provider";
+    o.model    = "overlay-model";
+    auto result = haicode::merge(make_layer(b, {"model", "provider"}),
+                                 make_layer(o, {"model"}));
     CHECK(result.model    == "overlay-model",   "overlay model should win");
     CHECK(result.provider == "base-provider",   "base provider should survive");
     std::cout << "[OK] merge scalar overlay wins\n";
@@ -176,11 +185,12 @@ static bool merge_scalar_overlay() {
 }
 
 static bool merge_empty_overlay_does_not_clear() {
-    haicode::AppConfig base, overlay;
-    base.model    = "keep-me";
-    base.provider = "keep-me-too";
-    // overlay has empty strings — should not clear base values
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b;
+    b.model    = "keep-me";
+    b.provider = "keep-me-too";
+    // Empty layer: nothing present — should not clear base values
+    auto result = haicode::merge(make_layer(b, {"model", "provider"}),
+                                 haicode::ConfigLayer{});
     CHECK(result.model    == "keep-me",     "empty overlay should not clear model");
     CHECK(result.provider == "keep-me-too", "empty overlay should not clear provider");
     std::cout << "[OK] merge empty overlay preserves base\n";
@@ -188,10 +198,11 @@ static bool merge_empty_overlay_does_not_clear() {
 }
 
 static bool merge_permissions_appended() {
-    haicode::AppConfig base, overlay;
-    base.permissions.push_back({"bash", "*", haicode::PermissionEffect::Deny});
-    overlay.permissions.push_back({"write", "/tmp/*", haicode::PermissionEffect::Allow});
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b, o;
+    b.permissions.push_back({"bash", "*", haicode::PermissionEffect::Deny});
+    o.permissions.push_back({"write", "/tmp/*", haicode::PermissionEffect::Allow});
+    auto result = haicode::merge(make_layer(b, {"permissions"}),
+                                 make_layer(o, {"permissions"}));
     CHECK(result.permissions.size() == 2, "expected 2 permissions after merge");
     CHECK(result.permissions[0].action == "bash",  "base permission should be first");
     CHECK(result.permissions[1].action == "write", "overlay permission should be appended");
@@ -200,10 +211,11 @@ static bool merge_permissions_appended() {
 }
 
 static bool merge_instructions_appended() {
-    haicode::AppConfig base, overlay;
-    base.instructions    = {"base instruction"};
-    overlay.instructions = {"overlay instruction"};
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b, o;
+    b.instructions = {"base instruction"};
+    o.instructions = {"overlay instruction"};
+    auto result = haicode::merge(make_layer(b, {"instructions"}),
+                                 make_layer(o, {"instructions"}));
     CHECK(result.instructions.size() == 2,                     "expected 2 instructions");
     CHECK(result.instructions[0] == "base instruction",    "base first");
     CHECK(result.instructions[1] == "overlay instruction", "overlay appended");
@@ -212,46 +224,81 @@ static bool merge_instructions_appended() {
 }
 
 static bool merge_build_command_overlay() {
-    haicode::AppConfig base, overlay;
-    base.build_command    = "make base";
-    overlay.build_command = "make overlay";
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b, o;
+    b.build_command = "make base";
+    o.build_command = "make overlay";
+    auto result = haicode::merge(make_layer(b, {"build_command"}),
+                                 make_layer(o, {"build_command"}));
     CHECK(result.build_command == "make overlay", "overlay build_command should win");
     std::cout << "[OK] merge build_command overlay wins\n";
     return true;
 }
 
 static bool merge_build_command_base_preserved() {
-    haicode::AppConfig base, overlay;
-    base.build_command = "make base";
-    // overlay has no build_command
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b;
+    b.build_command = "make base";
+    // overlay layer has no build_command present
+    auto result = haicode::merge(make_layer(b, {"build_command"}),
+                                 haicode::ConfigLayer{});
     CHECK(result.build_command == "make base", "base build_command should be preserved");
     std::cout << "[OK] merge build_command base preserved when overlay empty\n";
     return true;
 }
 
 static bool merge_providers_merged() {
-    haicode::AppConfig base, overlay;
-    base.providers["anthropic"]  = {"anthropic", "key-a", "", "", {}};
-    overlay.providers["openai"]  = {"openai",    "key-b", "", "", {}};
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b, o;
+    haicode::ProviderConfig anthropic;
+    anthropic.id = "anthropic";
+    anthropic.type = "anthropic";
+    anthropic.api_key = "key-a";
+    b.providers["anthropic"] = anthropic;
+    haicode::ProviderConfig openai;
+    openai.id = "openai";
+    openai.type = "openai";
+    openai.api_key = "key-b";
+    o.providers["openai"] = openai;
+    auto result = haicode::merge(make_layer(b, {"providers/anthropic/api_key"}),
+                                 make_layer(o, {"providers/openai/api_key"}));
     CHECK(result.providers.count("anthropic") == 1, "anthropic should survive");
     CHECK(result.providers.count("openai")    == 1, "openai should be added");
     std::cout << "[OK] merge providers merged\n";
     return true;
 }
 
+// Task 7 regression: a project providers entry used to be replaced
+// wholesale, dropping the global api_key. Per-subkey merge keeps absent
+// subkeys from the base entry.
+static bool merge_providers_per_subkey() {
+    const std::string gp = "/tmp/tfc_merge_global.json";
+    const std::string pp = "/tmp/tfc_merge_project.json";
+    write_file(gp, R"({"providers":{"anthropic":{"type":"anthropic","api_key":"sk-global"}}})");
+    write_file(pp, R"({"providers":{"anthropic":{"base_url":"https://proxy.example/v1"}}})");
+    auto result = haicode::merge(haicode::load_layer(gp), haicode::load_layer(pp));
+    CHECK(result.providers.count("anthropic") == 1, "entry present");
+    CHECK(result.providers["anthropic"].api_key == "sk-global",
+          "absent api_key subkey must keep the global key");
+    CHECK(result.providers["anthropic"].base_url == "https://proxy.example/v1",
+          "present base_url subkey must win");
+    std::remove(gp.c_str());
+    std::remove(pp.c_str());
+    std::cout << "[OK] merge providers per-subkey (no dropped api_key)\n";
+    return true;
+}
+
 static bool merge_web_search_overlay() {
-    haicode::AppConfig base, overlay;
-    base.web_search_engine      = "exa";
-    base.web_search_max_results = 5;
-    base.web_search_api_keys["exa"] = "base-exa";
-    base.web_search_api_keys["zai"] = "base-zai";
-    overlay.web_search_engine   = "ddg_lite";
-    overlay.web_search_max_results = 10;
-    overlay.web_search_api_keys["exa"] = "overlay-exa";
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    haicode::AppConfig b, o;
+    b.web_search_engine      = "exa";
+    b.web_search_max_results = 5;
+    b.web_search_api_keys["exa"] = "base-exa";
+    b.web_search_api_keys["zai"] = "base-zai";
+    o.web_search_engine      = "ddg_lite";
+    o.web_search_max_results = 10;
+    o.web_search_api_keys["exa"] = "overlay-exa";
+    auto result = haicode::merge(
+        make_layer(b, {"web_search/engine", "web_search/max_results",
+                       "web_search/api_keys/exa", "web_search/api_keys/zai"}),
+        make_layer(o, {"web_search/engine", "web_search/max_results",
+                       "web_search/api_keys/exa"}));
     CHECK(result.web_search_engine      == "ddg_lite", "engine overlay should win");
     CHECK(result.web_search_max_results == 10,          "max_results overlay should win");
     CHECK(result.web_search_api_keys.size() == 2,       "api_keys merge should keep base keys");
@@ -262,15 +309,58 @@ static bool merge_web_search_overlay() {
 }
 
 static bool merge_web_search_default_overlay_preserves_base() {
-    // Regression: a default-constructed overlay (project config file absent)
-    // must not clobber the base engine. The struct default used to be
-    // non-empty, which wiped the global config's engine on every load.
-    haicode::AppConfig base, overlay;
-    base.web_search_engine = "exa";
-    haicode::ConfigLoader loader_; auto result = loader_.merge(base, overlay);
+    // A default-constructed overlay (project config file absent) must not
+    // clobber the base engine. Presence tracking makes this structural: an
+    // empty layer records nothing present.
+    haicode::AppConfig b;
+    b.web_search_engine = "exa";
+    auto result = haicode::merge(make_layer(b, {"web_search/engine"}),
+                                 haicode::ConfigLayer{});
     CHECK(result.web_search_engine == "exa",
           "default overlay should not clobber base engine");
     std::cout << "[OK] merge default overlay preserves base engine\n";
+    return true;
+}
+
+// Task 7 regression: an absent project default_mode used to clobber a
+// global "build" — the struct default ("plan") participated in the merge
+// because "not specified" was represented as a default value.
+static bool merge_absent_project_keys_preserve_global() {
+    const std::string gp = "/tmp/tfc_absent_global.json";
+    const std::string pp = "/tmp/tfc_absent_project.json";
+    write_file(gp, R"({"default_mode":"build","web_search":{"max_results":10}})");
+    write_file(pp, R"({"model":"claude-sonnet-4"})");
+    auto result = haicode::merge(haicode::load_layer(gp), haicode::load_layer(pp));
+    CHECK(result.default_mode == "build",
+          "absent project default_mode must preserve global 'build'");
+    CHECK(result.web_search_max_results == 10,
+          "absent project max_results must preserve global 10");
+    CHECK(result.model == "claude-sonnet-4", "present project key still wins");
+    std::remove(gp.c_str());
+    std::remove(pp.c_str());
+    std::cout << "[OK] merge absent project keys preserve global\n";
+    return true;
+}
+
+// Task 7 regression: overlay values equal to a struct default were ignored
+// ("auto_compact" could be turned off but never back on; max_results == 5
+// never overrode). Presence now drives the merge, so an explicit value
+// always wins — in both directions.
+static bool merge_explicit_default_value_still_overrides() {
+    const std::string gp = "/tmp/tfc_bool_global.json";
+    const std::string pp = "/tmp/tfc_bool_project.json";
+    write_file(gp, R"({"auto_compact":false,"autoname_sessions":false,"web_search":{"max_results":10}})");
+    write_file(pp, R"({"auto_compact":true,"web_search":{"max_results":5}})");
+    auto result = haicode::merge(haicode::load_layer(gp), haicode::load_layer(pp));
+    CHECK(result.auto_compact == true,
+          "explicit project auto_compact:true must re-enable");
+    CHECK(result.web_search_max_results == 5,
+          "project max_results equal to the struct default must still override");
+    CHECK(result.autoname_sessions == false,
+          "absent project autoname_sessions must preserve global false");
+    std::remove(gp.c_str());
+    std::remove(pp.c_str());
+    std::cout << "[OK] merge explicit-default values still override\n";
     return true;
 }
 
@@ -1279,8 +1369,11 @@ int main() {
     ok &= merge_build_command_overlay();
     ok &= merge_build_command_base_preserved();
     ok &= merge_providers_merged();
+    ok &= merge_providers_per_subkey();
     ok &= merge_web_search_overlay();
     ok &= merge_web_search_default_overlay_preserves_base();
+    ok &= merge_absent_project_keys_preserve_global();
+    ok &= merge_explicit_default_value_still_overrides();
 
     std::cout << "\n-- PermissionGate --\n";
     ok &= perm_allow_rule();

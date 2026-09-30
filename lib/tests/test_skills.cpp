@@ -202,7 +202,11 @@ static void test_config() {
 
     haicode::AppConfig overlay;
     overlay.default_skills = {"b.md", "c.md"};
-    auto merged = loader.merge(cfg, overlay);
+    haicode::ConfigLayer base_layer = haicode::load_layer(path);
+    haicode::ConfigLayer overlay_layer;
+    overlay_layer.values = overlay;
+    overlay_layer.present = {"skills"};
+    auto merged = haicode::merge(base_layer, overlay_layer);
     CHECK(merged.default_skills.size() == 3);  // dedup on "b.md"
     CHECK(merged.default_skills[2] == "c.md");
 
