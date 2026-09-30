@@ -514,8 +514,8 @@ PermissionsCenterWindow::_OnToggle(uint32 what, bool on)
                                    read_everywhere);
 
     // Mirror to be_app on the toggle's own message constant (it applies the
-    // session rules); MainWindow's checkboxes pick the state up on the next
-    // session switch.
+    // session rules); its MSG_PERM_STATUS echo re-marks MainWindow's
+    // permission dropdown.
     uint32 app_msg = what == MSG_PERM_TOGGLE_AUTO  ? MSG_AUTO_ALLOW_EDITS
                    : what == MSG_PERM_TOGGLE_BYPASS ? MSG_YOLO
                                                     : MSG_READ_EVERYWHERE;

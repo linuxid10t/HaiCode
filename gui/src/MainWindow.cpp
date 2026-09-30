@@ -58,12 +58,15 @@
 #include <climits>
 #include <cctype>
 #include <cstdio>
-#include <cmath>
 #include <algorithm>
 #include <fstream>
 #include <sstream>
 
 using json = nlohmann::json;
+
+// ---------------------------------------------------------------------------
+// PermissionMenu — prompt-row permission popup anchored to the field border
+// ---------------------------------------------------------------------------
 
 class PermissionMenu : public BPopUpMenu {
 public:
@@ -78,23 +81,23 @@ protected:
     // already-laid-out menu does not fit below it.
     BPoint ScreenLocation() override
     {
-        BMenu* superMenu = Supermenu();
-        BMenuItem* superItem = Superitem();
-        BView* field = superMenu != NULL ? superMenu->Parent() : NULL;
-        if (superItem == NULL || field == NULL)
+        BMenu* super_menu = Supermenu();
+        BMenuItem* super_item = Superitem();
+        BView* field = super_menu ? super_menu->Parent() : nullptr;
+        if (!super_item || !field)
             return BMenu::ScreenLocation();
 
-        BPoint point = superItem->Frame().LeftBottom() + BPoint(1.0f, 1.0f);
-        superMenu->ConvertToScreen(&point);
+        BPoint point = super_item->Frame().LeftBottom() + BPoint(1.0f, 1.0f);
+        super_menu->ConvertToScreen(&point);
 
-        BRect fieldFrame = field->ConvertToScreen(field->Bounds());
-        point.y = fieldFrame.bottom + 1.0f;
+        BRect field_frame = field->ConvertToScreen(field->Bounds());
+        point.y = field_frame.bottom + 1.0f;
 
         float height = Bounds().Height();
         BRect screen = BScreen(field->Window()).Frame();
         if (point.y + height > screen.bottom
-                && fieldFrame.top - 1.0f - height >= screen.top)
-            point.y = fieldFrame.top - 1.0f - height;
+                && field_frame.top - 1.0f - height >= screen.top)
+            point.y = field_frame.top - 1.0f - height;
 
         return point;
     }
@@ -393,14 +396,14 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // items. Not radio mode: the read toggle marks independently of the
     // presets, so marks are managed by hand.
     perm_menu_ = new PermissionMenu();
-    perm_status_field_ = new BMenuField("perm_status", "Permissions:", perm_menu_, true);
+    perm_field_ = new BMenuField("perm_field", "Permissions:", perm_menu_, true);
     _RebuildPermMenu();
-    if (BMenuItem* bar = perm_status_field_->MenuItem())
+    if (BMenuItem* bar = perm_field_->MenuItem())
         bar->SetLabel("Standard");
     // Pin only the closed bar: the open menu keeps its natural item width.
     float perm_width = _PermFieldWidth();
-    perm_status_field_->SetExplicitMinSize(BSize(perm_width, B_SIZE_UNSET));
-    perm_status_field_->SetExplicitMaxSize(BSize(perm_width, B_SIZE_UNSET));
+    perm_field_->SetExplicitMinSize(BSize(perm_width, B_SIZE_UNSET));
+    perm_field_->SetExplicitMaxSize(BSize(perm_width, B_SIZE_UNSET));
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -588,7 +591,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                         .Add(prompt_label)
                         .Add(attach_row_)
                         .AddGlue()
-                        .Add(perm_status_field_)
+                        .Add(perm_field_)
                     .End()
                     .Add(input_group)
                 .End()
@@ -930,10 +933,10 @@ MainWindow::MessageReceived(BMessage* msg)
             const char* preset = nullptr;
             if (msg->FindString("preset", &preset) != B_OK || !preset) break;
             std::string p = preset;
-            // Mode guard: write presets are Build-only. Items are disabled
+            // Mode guard: write presets are Build-only. Items are rebuilt
             // per mode, but perm_mode_ updates asynchronously — a stale menu
             // selection must not arm a dormant flag.
-            if (p != "standard" && perm_mode_ != "build") {
+            if (p != "standard" && perm_mode_ != haicode::SessionMode::Build) {
                 be_app->PostMessage(MSG_PERM_SYNC);
                 break;
             }
@@ -949,14 +952,8 @@ MainWindow::MessageReceived(BMessage* msg)
                 confirm->SetShortcut(0, B_ESCAPE);
                 if (confirm->Go() == 0) break;
             }
-            auto post = [&](uint32 what, bool on) {
-                BMessage m(what);
-                m.AddInt32("be:value", on ? B_CONTROL_ON : B_CONTROL_OFF);
-                m.AddString("session_id", active_session_id_.c_str());
-                be_app->PostMessage(&m);
-            };
-            post(MSG_AUTO_ALLOW_EDITS, auto_w);
-            post(MSG_YOLO, yolo);
+            _PostPermFlag(MSG_AUTO_ALLOW_EDITS, auto_w);
+            _PostPermFlag(MSG_YOLO, yolo);
             break;
         }
         case MSG_PERM_TOGGLE_READ: {
@@ -964,27 +961,16 @@ MainWindow::MessageReceived(BMessage* msg)
             // send the new value; be_app's echo confirms the final state.
             // Live in Build and Plan (outside-project reads gate and prompt
             // in both); Chat has no read tool, and YOLO subsumes the grant.
-            if ((perm_mode_ != "build" && perm_mode_ != "plan")
+            if (perm_mode_ == haicode::SessionMode::Chat
                     || perm_preset_ == "unrestricted") {
                 be_app->PostMessage(MSG_PERM_SYNC);
                 break;
             }
             perm_read_on_ = !perm_read_on_;
             if (perm_read_item_) perm_read_item_->SetMarked(perm_read_on_);
-            BMessage m(MSG_READ_EVERYWHERE);
-            m.AddInt32("be:value", perm_read_on_ ? B_CONTROL_ON : B_CONTROL_OFF);
-            m.AddString("session_id", active_session_id_.c_str());
-            be_app->PostMessage(&m);
+            _PostPermFlag(MSG_READ_EVERYWHERE, perm_read_on_);
             break;
         }
-        case MSG_AUTO_ALLOW_EDITS:
-        case MSG_YOLO:
-        case MSG_READ_EVERYWHERE:
-            // Forward to be_app tagged with the active session; it owns the
-            // flag state, gate rules, and persistence now.
-            msg->AddString("session_id", active_session_id_.c_str());
-            be_app->PostMessage(msg);
-            break;
         case MSG_FETCH_MODELS: {
             // Provider changed (or initial fetch from be_app/HaiCodeApp).
             // The provider id is carried on the clicked item's message, not
@@ -1233,8 +1219,8 @@ MainWindow::_NewSession()
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 
-    // Flag state now lives in be_app (synced via MSG_ACTIVE_SESSION); the
-    // Permissions center is where it is inspected and changed.
+    // Flag state lives in be_app (synced via MSG_ACTIVE_SESSION); the echo
+    // re-marks the permission dropdown for the new session.
     be_app->PostMessage(MSG_PERM_SYNC);
 }
 
@@ -1331,8 +1317,8 @@ MainWindow::_SelectSession(int idx)
     _UpdateStatusStrip();
     if (input_view_->Window()) input_view_->MakeFocus(true);
 
-    // Flag state now lives in be_app (synced on MSG_ACTIVE_SESSION); the
-    // status control just needs a refresh for the newly selected session.
+    // Flag state lives in be_app (synced on MSG_ACTIVE_SESSION); the
+    // permission dropdown just needs a refresh for the newly selected session.
     be_app->PostMessage(MSG_PERM_SYNC);
     _RefreshModeButton();
 }
@@ -1970,25 +1956,30 @@ MainWindow::_HandlePermStatus(BMessage* msg)
             perm_pending_sessions_[sid] += 1;
     }
 
-    // Mirror the active session's flags into the dropdown marks. The status
-    // string is derived from the same flags in HaiCodeApp, so parsing it back
-    // keeps this dropdown and the Permissions center consistent.
+    // Mirror the active session's flags into the dropdown marks. HaiCodeApp
+    // derives read_everywhere/preset/mode from the same session flags the
+    // Permissions center edits, so the two can never disagree.
     bool read_on = false;
     if (msg->FindBool("read_everywhere", &read_on) == B_OK)
         perm_read_on_ = read_on;
-
-    const char* mode_s = nullptr;
-    if (msg->FindString("mode", &mode_s) == B_OK && mode_s
-            && perm_mode_ != mode_s) {
-        // The item set is mode-specific; a mode change must rebuild it, not
-        // just re-mark it. _RebuildPermMenu re-derives marks from
-        // perm_preset_/perm_read_on_, so ordering below is safe.
-        perm_mode_ = mode_s;
-        _RebuildPermMenu();
-    }
     const char* preset_s = nullptr;
     if (msg->FindString("preset", &preset_s) == B_OK && preset_s)
         perm_preset_ = preset_s;
+
+    // Same "mode" string encoding as MSG_MODE_SELECTED.
+    BString mode;
+    if (msg->FindString("mode", &mode) == B_OK) {
+        haicode::SessionMode next =
+            (mode == "plan") ? haicode::SessionMode::Plan
+          : (mode == "chat") ? haicode::SessionMode::Chat
+                             : haicode::SessionMode::Build;
+        if (next != perm_mode_) {
+            // The item set is mode-specific; a mode change must rebuild it,
+            // not just re-mark it.
+            perm_mode_ = next;
+            _RebuildPermMenu();
+        }
+    }
 
     _UpdatePermissionStatus();
     _RefreshSessionBadges();
@@ -2005,8 +1996,8 @@ MainWindow::_RebuildPermMenu()
     perm_menu_->RemoveItems(0, perm_menu_->CountItems(), true);
     perm_read_item_ = nullptr;
 
-    bool build = (perm_mode_ == "build");
-    bool plan  = (perm_mode_ == "plan");
+    bool build = (perm_mode_ == haicode::SessionMode::Build);
+    bool plan  = (perm_mode_ == haicode::SessionMode::Plan);
 
     if (build) {
         static const struct {
@@ -2044,32 +2035,32 @@ MainWindow::_RebuildPermMenu()
     // enabled only when it has something to offer — Chat's empty menu can't
     // be interacted with even if a stale Show() leaves it visible.
     perm_menu_->InvalidateLayout();
-    if (perm_status_field_) {
-        perm_status_field_->InvalidateLayout();
-        perm_status_field_->SetEnabled(perm_menu_->CountItems() > 0);
+    if (perm_field_) {
+        perm_field_->InvalidateLayout();
+        perm_field_->SetEnabled(perm_menu_->CountItems() > 0);
     }
 }
 
 float
 MainWindow::_PermFieldWidth()
 {
-    BMenuItem* bar = perm_status_field_->MenuItem();
+    BMenuItem* bar = perm_field_->MenuItem();
     bar->SetLabel("Auto-write");
-    BMenuBar* menu_bar = perm_status_field_->MenuBar();
+    BMenuBar* menu_bar = perm_field_->MenuBar();
     // Haiku's menu-bar MinSize adds the popup indicator a second time.
     menu_bar->SetExplicitMinSize(BSize(menu_bar->PreferredSize().width,
                                        B_SIZE_UNSET));
-    perm_status_field_->InvalidateLayout();
-    float width = perm_status_field_->MinSize().width;
+    perm_field_->InvalidateLayout();
+    float width = perm_field_->MinSize().width;
     bar->SetLabel("Standard");
-    perm_status_field_->InvalidateLayout();
+    perm_field_->InvalidateLayout();
     return width;
 }
 
 void
 MainWindow::_UpdatePermissionStatus()
 {
-    if (!perm_status_field_) return;
+    if (!perm_field_) return;
     // Marks by carried preset value (menu may have been rebuilt); the read
     // mark mirrors the session flag. A pending count ("N waiting") only
     // changes the bar label, not the marks.
@@ -2089,9 +2080,9 @@ MainWindow::_UpdatePermissionStatus()
     // BMenuItem has no tooltips; the disabled state alone carries it.
     if (perm_read_item_)
         perm_read_item_->SetEnabled(perm_preset_ != "unrestricted");
-    if (BMenuItem* bar = perm_status_field_->MenuItem()) {
+    if (BMenuItem* bar = perm_field_->MenuItem()) {
         BFont font;
-        perm_status_field_->MenuBar()->GetFont(&font);
+        perm_field_->MenuBar()->GetFont(&font);
         BString label(perm_status_.c_str());
         font.TruncateString(&label, B_TRUNCATE_END, font.StringWidth("Auto-write"));
         bar->SetLabel(label.String());
@@ -2443,13 +2434,10 @@ MainWindow::_RefreshModeButton()
     if (BMenuItem* it = mode_menu_->ItemAt(index)) it->SetMarked(true);
     // Convergence guard: the engine mode can change without _SetMode (plan
     // approval flips Plan→Build directly), which would leave perm_mode_ —
-    // and with it the dropdown's enabled items and marks — stale. This runs
-    // on every mode-change path; a mismatch triggers the be_app echo that
+    // and with it the dropdown's item set and marks — stale. This runs on
+    // every mode-change path; a mismatch triggers the be_app echo that
     // re-derives mode, preset, and armed rules.
-    std::string engine_mode = (m == haicode::SessionMode::Plan) ? "plan"
-                            : (m == haicode::SessionMode::Chat) ? "chat"
-                                                                : "build";
-    if (engine_mode != perm_mode_)
+    if (m != perm_mode_)
         be_app->PostMessage(MSG_PERM_SYNC);
     _ApplyModeUi();
 }
@@ -2477,15 +2465,15 @@ MainWindow::_SetDirBtnVisible(bool visible)
 void
 MainWindow::_SetPermFieldVisible(bool visible)
 {
-    if (!perm_status_field_) return;
+    if (!perm_field_) return;
     if (perm_field_visible_ == visible) return;
     perm_field_visible_ = visible;
     // No width pinning needed: AddGlue() in the prompt row absorbs the
     // freed space, so hiding just tightens the row.
     if (visible)
-        perm_status_field_->Show();
+        perm_field_->Show();
     else
-        perm_status_field_->Hide();
+        perm_field_->Hide();
 }
 
 void
@@ -2498,27 +2486,22 @@ MainWindow::_ResetModeInapplicableToggles()
     // be_app owns the state and persists the result.
     if (active_session_id_.empty() || !engine_) return;
     auto mode = engine_->get_mode(active_session_id_);
-    bool restricted = (mode != haicode::SessionMode::Build);
-    if (!restricted) {
-        // Entering Build: nothing to reset — write presets are Build-native,
-        // and the read toggle is live in Build too.
-        return;
-    }
-    BMessage m1(MSG_AUTO_ALLOW_EDITS);
-    m1.AddInt32("be:value", B_CONTROL_OFF);
-    m1.AddString("session_id", active_session_id_.c_str());
-    be_app->PostMessage(&m1);
-    BMessage m2(MSG_YOLO);
-    m2.AddInt32("be:value", B_CONTROL_OFF);
-    m2.AddString("session_id", active_session_id_.c_str());
-    be_app->PostMessage(&m2);
-    if (mode == haicode::SessionMode::Chat) {
-        // Chat has no read tool at all; reset the read toggle.
-        BMessage m3(MSG_READ_EVERYWHERE);
-        m3.AddInt32("be:value", B_CONTROL_OFF);
-        m3.AddString("session_id", active_session_id_.c_str());
-        be_app->PostMessage(&m3);
-    }
+    if (mode == haicode::SessionMode::Build) return;
+    _PostPermFlag(MSG_AUTO_ALLOW_EDITS, false);
+    _PostPermFlag(MSG_YOLO, false);
+    if (mode == haicode::SessionMode::Chat)
+        _PostPermFlag(MSG_READ_EVERYWHERE, false);
+}
+
+void
+MainWindow::_PostPermFlag(uint32 what, bool on)
+{
+    // Tagged with the session so be_app scopes the rule change to it — a
+    // background session's rules must not follow the selection.
+    BMessage m(what);
+    m.AddInt32("be:value", on ? B_CONTROL_ON : B_CONTROL_OFF);
+    m.AddString("session_id", active_session_id_.c_str());
+    be_app->PostMessage(&m);
 }
 
 void

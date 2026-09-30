@@ -98,6 +98,10 @@ private:
     // Entering a restricted mode must turn session toggles off (writes and
     // bypass are meaningless there); be_app persists the result.
     void _ResetModeInapplicableToggles();
+    // Posts a session flag change (MSG_AUTO_ALLOW_EDITS / MSG_YOLO /
+    // MSG_READ_EVERYWHERE) for the active session to be_app, which owns the
+    // flag state, gate rules, and persistence.
+    void _PostPermFlag(uint32 what, bool on);
     void _ApplyModeUi();
     void _HandlePlanProposed(BMessage* msg);
     void _HandlePlanDecision(BMessage* msg);
@@ -186,17 +190,17 @@ private:
     // state mirrors be_app's session flags via MSG_PERM_STATUS; edits post
     // the same toggle/preset messages the center uses. Hidden in Chat mode
     // (nothing there can ever prompt). The center lives under Settings.
-    BPopUpMenu*    perm_menu_         = nullptr;
-    BMenuField*    perm_status_field_ = nullptr;
-    BMenuItem*     perm_read_item_    = nullptr;
+    BPopUpMenu*    perm_menu_       = nullptr;
+    BMenuField*    perm_field_      = nullptr;
+    BMenuItem*     perm_read_item_  = nullptr;
     // Read-toggle state mirror (from MSG_PERM_STATUS); the item is rebuilt
     // per mode, so the mark lives here and is applied on rebuild.
-    bool           perm_read_on_      = false;
+    bool           perm_read_on_    = false;
     std::string    perm_status_     = "Standard";
     // Mode + preset of the active session, from MSG_PERM_STATUS. The preset
     // string is authoritative ("" outside Build) — the status word can be
     // overridden by pending counts.
-    std::string    perm_mode_       = "build";
+    haicode::SessionMode perm_mode_ = haicode::SessionMode::Build;
     std::string    perm_preset_     = "standard";
     // Sessions with approval requests waiting (drives list badges);
     // value = number of unresolved requests for that session.

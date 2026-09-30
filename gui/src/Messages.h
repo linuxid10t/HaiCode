@@ -74,16 +74,16 @@ static const uint32 MSG_ATTACH_REFS     = 'ATrf';  // refs forwarded from the at
 static const uint32 MSG_REMOVE_ATTACHMENT = 'RMat'; // chip "×" pressed; "index" int32
 
 // Permission management
-static const uint32 MSG_AUTO_ALLOW_EDITS = 'AAed'; // checkbox → be_app; "be:value" int32
-static const uint32 MSG_YOLO             = 'YOLO'; // checkbox → be_app; "be:value" int32
-static const uint32 MSG_READ_EVERYWHERE  = 'RDew'; // plan-mode checkbox → be_app; "be:value" int32
+static const uint32 MSG_AUTO_ALLOW_EDITS = 'AAed'; // session flag → be_app; "be:value" int32 + "session_id"
+static const uint32 MSG_YOLO             = 'YOLO'; // session flag → be_app; "be:value" int32 + "session_id"
+static const uint32 MSG_READ_EVERYWHERE  = 'RDew'; // session flag → be_app; "be:value" int32 + "session_id"
 static const uint32 MSG_SHOW_PERMISSIONS = 'PMct'; // MainWindow → be_app: open the Permissions center
 static const uint32 MSG_PERMISSION_CENTER_CLOSED = 'PMcc'; // center → be_app (clear the stored messenger)
 
 // Permissions center internal
 static const uint32 MSG_PERM_SESSION_SELECTED = 'PSsl';  // session dropdown; "session_id" string
 static const uint32 MSG_PERM_TOGGLE_AUTO      = 'PTaw';  // auto-writes checkbox (center-local)
-static const uint32 MSG_PERM_TOGGLE_READ      = 'PTrd';  // read-outside checkbox (center-local)
+static const uint32 MSG_PERM_TOGGLE_READ      = 'PTrd';  // read-outside checkbox (center) / dropdown item (MainWindow)
 static const uint32 MSG_PERM_TOGGLE_BYPASS    = 'PTbp';  // bypass checkbox (center-local, confirmed)
 static const uint32 MSG_PERM_PENDING_ALLOW    = 'PPal';  // approve selected pending row (once)
 static const uint32 MSG_PERM_PENDING_DENY     = 'PPdn';  // deny selected pending row
