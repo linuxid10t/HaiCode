@@ -149,7 +149,10 @@ Key types live in `lib/include/haicode/` — `engine.h`, `provider.h`, `tool.h`,
 All config saves are atomic and non-destructive: the app reads the existing
 file, refuses to overwrite one that doesn't parse (so a hand-edit typo can't
 cost you your API keys — the error is shown instead), preserves every key it
-doesn't own, and writes through a temp file + rename.
+doesn't own, and writes through a temp file + rename. Config files and the
+ChatGPT OAuth token store are written owner-only (`0600`), and existing
+secret files are tightened at startup if another editor left them
+group-readable.
 
 ### Providers
 

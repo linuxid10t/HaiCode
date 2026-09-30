@@ -165,6 +165,35 @@ static bool empty_path_fails() {
     return true;
 }
 
+// Task 6: config.json carries provider API keys — every write through this
+// path must be owner-only, including over a pre-existing loose file.
+static bool writes_owner_only() {
+    reset_dir();
+    const std::string p = std::string(kDir) + "/secret.json";
+    write_file(p, "{}");
+    chmod(p.c_str(), 0644);
+    std::string err;
+    bool ok = haicode::update_config_file(p, [](nlohmann::json& j) {
+        j["providers"] = nlohmann::json::object();
+    }, err);
+    CHECK(ok, "update should succeed: " + err);
+    struct stat st;
+    CHECK(::stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0600, "config write must be 0600, was "
+          + std::to_string(st.st_mode & 07777));
+
+    // And a fresh file (no prior loose bits to worry about).
+    const std::string q = std::string(kDir) + "/fresh.json";
+    ok = haicode::update_config_file(q, [](nlohmann::json& j) {
+        j["model"] = "m";
+    }, err);
+    CHECK(ok, "fresh update should succeed: " + err);
+    CHECK(::stat(q.c_str(), &st) == 0, "stat failed on fresh file");
+    CHECK((st.st_mode & 07777) == 0600, "fresh config write must be 0600");
+    std::cout << "[OK] update_config_file writes owner-only (0600)\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok &= missing_file_created();
@@ -173,6 +202,7 @@ int main() {
     ok &= mutate_can_erase_keys();
     ok &= creates_parent_dirs();
     ok &= empty_path_fails();
+    ok &= writes_owner_only();
     if (ok) {
         std::cout << "\nAll config-write tests passed!\n";
         return 0;

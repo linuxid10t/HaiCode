@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <sys/stat.h>
 
 namespace haicode {
 namespace util {
@@ -36,11 +37,23 @@ std::string truncate_utf8(const std::string& s, size_t max_bytes);
 
 // Atomically replace `path` with `content`: the temp file is created via
 // mkstemp (O_CREAT|O_EXCL — it can never clobber a pre-existing sibling),
-// inherits the target's previous permission bits when the target existed
-// (an 0755 script keeps its execute bits), is fsynced, then renamed over
-// the target. Returns "" on success, error text otherwise. Parent-directory
-// creation is the caller's responsibility.
-std::string atomic_write_file(const std::string& path, const std::string& content);
+// is fsynced, then renamed over the target. Returns "" on success, error
+// text otherwise. Parent-directory creation is the caller's responsibility.
+//
+// Mode selection: with the default `preserve_mode`, a pre-existing target's
+// permission bits are kept (an 0755 script keeps its execute bits) and new
+// files are created 0644. An explicit `mode` (e.g. 0600 for secrets) always
+// wins, INCLUDING over a pre-existing target's bits — secrets must tighten,
+// never inherit a group/world-readable 0644.
+std::string atomic_write_file(const std::string& path, const std::string& content,
+                              mode_t mode = (mode_t)0);
+
+// Tighten an existing file to owner-only (0600) when it currently carries
+// group/world bits. A no-op for already-0600 (or stricter) files and for
+// missing files. Returns "" on success, error text otherwise. Applied at
+// startup to secret files (config/token stores) that earlier releases or
+// other editors may have created world-readable.
+std::string ensure_owner_only(const std::string& path);
 
 // Create a securely-named scratch file via mkstemp on tmpl_prefix +
 // "XXXXXX". For temp files that are deleted when done (not renamed over a

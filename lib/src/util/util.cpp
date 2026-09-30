@@ -165,13 +165,20 @@ std::string truncate_utf8(const std::string& s, size_t max_bytes) {
     return s.substr(0, end);
 }
 
-std::string atomic_write_file(const std::string& path, const std::string& content) {
+std::string atomic_write_file(const std::string& path, const std::string& content,
+                              mode_t mode) {
     // Remember the target's permission bits so replacement preserves them
     // (an 0755 script keeps its execute bits). 0 = target doesn't exist yet.
-    mode_t mode = 0;
+    // An explicit `mode` argument (secrets pass 0600) wins over BOTH the
+    // preserved bits and the 0644 new-file default — a secret replacement
+    // must tighten, never re-inherit world-readable bits.
+    mode_t preserve_mode = 0;
     struct stat st{};
     if (stat(path.c_str(), &st) == 0)
-        mode = st.st_mode & 07777;
+        preserve_mode = st.st_mode & 07777;
+    mode_t effective = (mode != 0) ? mode
+                     : (preserve_mode != 0) ? preserve_mode
+                                            : (mode_t)0644;
 
     // mkstemp demands trailing X's and creates with O_EXCL semantics — a
     // pre-existing file of a similar name can never be clobbered.
@@ -183,7 +190,7 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
         return "Cannot create temp file for " + path + ": " + strerror(errno);
     std::string tmp_path(buf.data());
 
-    if (fchmod(fd, mode != 0 ? mode : (mode_t)0644) != 0) {
+    if (fchmod(fd, effective) != 0) {
         std::string err = "Cannot set mode on temp file: " + std::string(strerror(errno));
         close(fd);
         unlink(tmp_path.c_str());
@@ -223,6 +230,18 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
         unlink(tmp_path.c_str());
         return err;
     }
+    return "";
+}
+
+std::string ensure_owner_only(const std::string& path) {
+    struct stat st{};
+    if (stat(path.c_str(), &st) != 0)
+        return "";  // missing file — nothing to tighten
+    mode_t bits = st.st_mode & 07777;
+    if ((bits & 077) == 0)
+        return "";  // already owner-only (or stricter)
+    if (chmod(path.c_str(), bits & ~077) != 0)
+        return "Cannot tighten permissions on " + path + ": " + strerror(errno);
     return "";
 }
 

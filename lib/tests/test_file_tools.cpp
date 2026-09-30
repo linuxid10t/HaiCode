@@ -1,5 +1,6 @@
 #include <haicode/haicode.h>
 #include <haicode/tool.h>
+#include <haicode/util.h>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -294,6 +295,75 @@ static bool write_preserves_mode_0755() {
     return true;
 }
 
+// Task 6: util::atomic_write_file mode semantics — an explicit mode wins
+// over the preserved bits of a pre-existing target (secrets must tighten,
+// never inherit 0644/0755), while the default keeps preserving them.
+static bool util_explicit_mode_beats_preserved() {
+    const std::string p = "/tmp/tft_atomic_secret.json";
+    write_file(p, "{}");
+    chmod(p.c_str(), 0755);
+    std::string err = haicode::util::atomic_write_file(p, "{\"a\":1}\n", 0600);
+    CHECK(err.empty(), ("atomic_write_file: " + err).c_str());
+    struct stat st{};
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0600, "explicit 0600 must beat preserved 0755");
+    std::remove(p.c_str());
+    std::cout << "[OK] atomic_write_file explicit mode beats preserved bits\n";
+    return true;
+}
+
+static bool util_default_mode_still_preserves() {
+    const std::string p = "/tmp/tft_atomic_preserve.sh";
+    write_file(p, "#!/bin/sh\n");
+    chmod(p.c_str(), 0755);
+    std::string err = haicode::util::atomic_write_file(p, "#!/bin/sh\nexit 0\n");
+    CHECK(err.empty(), ("atomic_write_file: " + err).c_str());
+    struct stat st{};
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0755, "default write must still preserve 0755");
+    std::remove(p.c_str());
+
+    // New file via the default path lands at 0644.
+    const std::string q = "/tmp/tft_atomic_new.json";
+    std::remove(q.c_str());
+    err = haicode::util::atomic_write_file(q, "{}\n");
+    CHECK(err.empty(), ("atomic_write_file: " + err).c_str());
+    CHECK(stat(q.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0644, "new file via default mode is 0644");
+    std::remove(q.c_str());
+    std::cout << "[OK] atomic_write_file default mode still preserves\n";
+    return true;
+}
+
+// Task 6: startup tightening helper — chmod to owner-only only when
+// group/world bits are present; no-op for already-tight and missing files.
+static bool util_ensure_owner_only() {
+    const std::string p = "/tmp/tft_ensure_owner.json";
+
+    write_file(p, "{}");
+    chmod(p.c_str(), 0644);
+    CHECK(haicode::util::ensure_owner_only(p).empty(), "ensure_owner_only 0644");
+    struct stat st{};
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0600, "0644 must tighten to 0600");
+
+    chmod(p.c_str(), 0600);
+    CHECK(haicode::util::ensure_owner_only(p).empty(), "ensure_owner_only 0600");
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0600, "0600 stays 0600 (no churn)");
+
+    chmod(p.c_str(), 0666);
+    CHECK(haicode::util::ensure_owner_only(p).empty(), "ensure_owner_only 0666");
+    CHECK(stat(p.c_str(), &st) == 0, "stat failed");
+    CHECK((st.st_mode & 07777) == 0600, "0666 tightens to 0600");
+
+    std::remove(p.c_str());
+    CHECK(haicode::util::ensure_owner_only(p).empty(),
+          "missing file is a silent no-op");
+    std::cout << "[OK] util::ensure_owner_only tightens only when needed\n";
+    return true;
+}
+
 // ============================================================
 // EditTool
 // ============================================================
@@ -533,6 +603,11 @@ int main() {
     ok &= write_no_stray_tmp_file();
     ok &= write_missing_content_param_leaves_file_intact();
     ok &= write_preserves_mode_0755();
+
+    std::cout << "\n-- atomic write modes (util) --\n";
+    ok &= util_explicit_mode_beats_preserved();
+    ok &= util_default_mode_still_preserves();
+    ok &= util_ensure_owner_only();
 
     std::cout << "\n-- edit --\n";
     ok &= edit_basic();

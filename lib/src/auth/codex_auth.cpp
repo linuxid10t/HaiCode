@@ -437,7 +437,7 @@ bool codex_auth_save(const CodexAuth& auth, std::string& err) {
         {"expires_at_ms", auth.expires_at_ms},
         {"account_id", auth.account_id},
     };
-    err = util::atomic_write_file(path, j.dump(2));
+    err = util::atomic_write_file(path, j.dump(2), 0600);
     return err.empty();
 }
 

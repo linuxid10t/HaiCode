@@ -125,6 +125,18 @@ static bool test_store_roundtrip() {
     std::string err;
     CHECK(codex_auth_save(auth, err), ("save failed: " + err).c_str());
 
+    // Task 6: the token store is a secret — owner-only, even when an earlier
+    // release or editor left it group/world-readable.
+    {
+        struct stat st{};
+        CHECK(stat(path.c_str(), &st) == 0, "stat failed on saved store");
+        CHECK((st.st_mode & 07777) == 0600, "token store must be 0600");
+        chmod(path.c_str(), 0644);  // simulate a pre-existing loose file
+        CHECK(codex_auth_save(auth, err), "resave over 0644 ok");
+        CHECK(stat(path.c_str(), &st) == 0, "stat failed after resave");
+        CHECK((st.st_mode & 07777) == 0600, "resave must tighten 0644 back to 0600");
+    }
+
     CodexAuth loaded;
     CHECK(codex_auth_load(loaded), "load failed after save");
     CHECK(loaded.access == "acc-tok", "access roundtrip");

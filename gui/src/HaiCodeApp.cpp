@@ -21,6 +21,7 @@
 #include <haicode/tool.h>
 #include <haicode/config.h>
 #include <haicode/default_prompt.h>
+#include <haicode/util.h>
 
 #include <nlohmann/json.hpp>
 
@@ -154,6 +155,19 @@ HaiCodeApp::ReadyToRun()
         alert->Go();
         Quit();
         return;
+    }
+
+    // Tighten secret files that earlier releases or other editors may have
+    // left group/world-readable: config.json carries provider API keys,
+    // openai-auth.json the OAuth tokens. Best-effort — every later save
+    // rewrites them 0600 anyway.
+    {
+        BPath cfg(settings_path);
+        cfg.Append("config.json");
+        (void)haicode::util::ensure_owner_only(cfg.Path());
+        BPath auth(settings_path);
+        auth.Append("openai-auth.json");
+        (void)haicode::util::ensure_owner_only(auth.Path());
     }
 
     BPath db_path(settings_path);

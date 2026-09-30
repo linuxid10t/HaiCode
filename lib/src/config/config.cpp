@@ -456,30 +456,17 @@ bool save_permission_document(const std::string& path,
         j["permissions"] = arr;
     }
 
-    // 4. Write through a temporary sibling, then atomic rename.
+    // 4. Write through the shared atomic path (mkstemp sibling + fsync +
+    // rename). Default mode: policy files aren't secrets, and preservation
+    // keeps an existing file's bits.
     auto slash = path.find_last_of('/');
-    std::string dir = (slash == std::string::npos) ? "." : path.substr(0, slash);
-    if (slash != std::string::npos && slash > 0)
-        ::mkdir(dir.c_str(), 0755);  // EEXIST is fine — file is written next
-    std::string tmp = path + ".perm-tmp";
-    {
-        std::ofstream f(tmp, std::ios::trunc);
-        if (!f.is_open()) {
-            error = "cannot create " + tmp;
-            return false;
-        }
-        f << j.dump(2) << "\n";
-        f.flush();
-        if (!f.good()) {
-            f.close();
-            std::remove(tmp.c_str());
-            error = "failed writing " + tmp;
-            return false;
-        }
+    if (slash != std::string::npos && slash > 0) {
+        std::error_code ec;
+        std::filesystem::create_directories(path.substr(0, slash), ec);
     }
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-        std::remove(tmp.c_str());
-        error = "cannot replace " + path;
+    std::string write_err = util::atomic_write_file(path, j.dump(2) + "\n");
+    if (!write_err.empty()) {
+        error = write_err;
         return false;
     }
     return true;
@@ -524,7 +511,9 @@ bool update_config_file(const std::string& path,
         // below; a permissions error surfaces there with the path attached.
     }
 
-    std::string write_err = util::atomic_write_file(path, j.dump(2) + "\n");
+    // 0600: the file carries provider API keys (and later trust records) —
+    // explicit mode wins over any pre-existing group/world-readable bits.
+    std::string write_err = util::atomic_write_file(path, j.dump(2) + "\n", 0600);
     if (!write_err.empty()) {
         error = write_err;
         return false;
