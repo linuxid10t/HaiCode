@@ -17,6 +17,7 @@
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <PopUpMenu.h>
+#include <Screen.h>
 #include <ListView.h>
 #include <StringItem.h>
 #include <GroupView.h>
@@ -63,6 +64,41 @@
 #include <sstream>
 
 using json = nlohmann::json;
+
+class PermissionMenu : public BPopUpMenu {
+public:
+    PermissionMenu() : BPopUpMenu("Perms", false, false) {}
+
+protected:
+    // BMenu anchors to the superitem, which sits inset inside the field, so
+    // the popup overlaps the closed control's border — and near the screen
+    // bottom BMenu::_CalcFrame slides a menu-field popup up onto the field.
+    // Anchor to the field's outer bottom border instead (x keeps the closed
+    // label's text alignment), and open above the field only when the
+    // already-laid-out menu does not fit below it.
+    BPoint ScreenLocation() override
+    {
+        BMenu* superMenu = Supermenu();
+        BMenuItem* superItem = Superitem();
+        BView* field = superMenu != NULL ? superMenu->Parent() : NULL;
+        if (superItem == NULL || field == NULL)
+            return BMenu::ScreenLocation();
+
+        BPoint point = superItem->Frame().LeftBottom() + BPoint(1.0f, 1.0f);
+        superMenu->ConvertToScreen(&point);
+
+        BRect fieldFrame = field->ConvertToScreen(field->Bounds());
+        point.y = fieldFrame.bottom + 1.0f;
+
+        float height = Bounds().Height();
+        BRect screen = BScreen(field->Window()).Frame();
+        if (point.y + height > screen.bottom
+                && fieldFrame.top - 1.0f - height >= screen.top)
+            point.y = fieldFrame.top - 1.0f - height;
+
+        return point;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // SessionListView — BListView with right-click context menu
@@ -356,25 +392,15 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // open menu always matches the session's mode — no grayed-out cross-mode
     // items. Not radio mode: the read toggle marks independently of the
     // presets, so marks are managed by hand.
-    perm_menu_ = new BPopUpMenu("Perms");
-    perm_menu_->SetRadioMode(false);
-    perm_status_field_ = new BMenuField("perm_status", "Permissions:", perm_menu_);
+    perm_menu_ = new PermissionMenu();
+    perm_status_field_ = new BMenuField("perm_status", "Permissions:", perm_menu_, true);
     _RebuildPermMenu();
     if (BMenuItem* bar = perm_status_field_->MenuItem())
         bar->SetLabel("Standard");
-    // Fixed width, pinned once to the largest Build-mode status word
-    // ("Auto-write") — no dynamic resizing. BMenuField's natural preferred
-    // width tracks the menu's widest ITEM ("Allow reads everywhere") and its
-    // MaxSize() width is unlimited, so without the pin the field bloats to
-    // the widest item and grows on window maximize; re-pinning per word
-    // instead overflowed the prompt row's right inset at small window
-    // sizes. "Auto-write" also covers Plan's "All reads". The OPEN popup is
-    // unaffected: it lives in its own BMenuWindow that sizes to fit its
-    // items, so the menu can be wider than the closed field.
-    perm_status_field_->SetExplicitMinSize(BSize(_PermFieldWidth("Auto-write"),
-                                                 B_SIZE_UNSET));
-    perm_status_field_->SetExplicitMaxSize(BSize(_PermFieldWidth("Auto-write"),
-                                                 B_SIZE_UNSET));
+    // Pin only the closed bar: the open menu keeps its natural item width.
+    float perm_width = _PermFieldWidth();
+    perm_status_field_->SetExplicitMinSize(BSize(perm_width, B_SIZE_UNSET));
+    perm_status_field_->SetExplicitMaxSize(BSize(perm_width, B_SIZE_UNSET));
 
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView();
@@ -2024,17 +2050,20 @@ MainWindow::_RebuildPermMenu()
     }
 }
 
-// Width to pin the permission field to for a status word: label + divider
-// spacing + the word + the closed bar's fixed chrome (margins, popup
-// marker). Small slack absorbs the label-draw rounding.
 float
-MainWindow::_PermFieldWidth(const std::string& status) const
+MainWindow::_PermFieldWidth()
 {
-    if (!perm_status_field_) return 0.f;
-    float label = ceilf(perm_status_field_->StringWidth("Permissions:"))
-                + 14.f;  // divider/label spacing (DefaultLabelSpacing)
-    float word = ceilf(perm_status_field_->StringWidth(status.c_str()));
-    return label + word + 30.f;  // bar margins + popup marker + slack
+    BMenuItem* bar = perm_status_field_->MenuItem();
+    bar->SetLabel("Auto-write");
+    BMenuBar* menu_bar = perm_status_field_->MenuBar();
+    // Haiku's menu-bar MinSize adds the popup indicator a second time.
+    menu_bar->SetExplicitMinSize(BSize(menu_bar->PreferredSize().width,
+                                       B_SIZE_UNSET));
+    perm_status_field_->InvalidateLayout();
+    float width = perm_status_field_->MinSize().width;
+    bar->SetLabel("Standard");
+    perm_status_field_->InvalidateLayout();
+    return width;
 }
 
 void
@@ -2060,8 +2089,13 @@ MainWindow::_UpdatePermissionStatus()
     // BMenuItem has no tooltips; the disabled state alone carries it.
     if (perm_read_item_)
         perm_read_item_->SetEnabled(perm_preset_ != "unrestricted");
-    if (BMenuItem* bar = perm_status_field_->MenuItem())
-        bar->SetLabel(perm_status_.c_str());
+    if (BMenuItem* bar = perm_status_field_->MenuItem()) {
+        BFont font;
+        perm_status_field_->MenuBar()->GetFont(&font);
+        BString label(perm_status_.c_str());
+        font.TruncateString(&label, B_TRUNCATE_END, font.StringWidth("Auto-write"));
+        bar->SetLabel(label.String());
+    }
 }
 
 void
