@@ -28,6 +28,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <memory>
 #include <thread>
@@ -46,6 +47,24 @@ providers_json(const std::map<std::string, haicode::ProviderConfig>& providers)
     for (auto& [id, p] : providers)
         j[id] = {{"type", p.type}, {"api_key", p.api_key}, {"base_url", p.base_url}};
     return j;
+}
+
+// Every config save funnels through here: read the existing document, apply
+// the mutation, write back atomically. An unparseable file is refused, not
+// overwritten — the old truncating ofstream silently replaced a hand-edited
+// file (typo included) with the few keys being saved, losing the rest.
+// Failures are surfaced to the user instead of swallowed.
+static void
+save_config_at(const std::string& path, const char* what,
+               const std::function<void(nlohmann::json&)>& mutate)
+{
+    std::string err;
+    if (haicode::update_config_file(path, mutate, err))
+        return;  // saved
+    BString text;
+    text << "Could not save " << what << ":\n\n" << err.c_str();
+    BAlert* alert = new BAlert("Config save failed", text.String(), "OK");
+    alert->Go();
 }
 
 static std::unique_ptr<haicode::ProviderRegistry>
@@ -361,45 +380,21 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             if (provider) config_.provider = provider;
             if (model)    config_.model    = model;
 
-            BPath settings_path;
-            if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
-                BPath cfg_path(settings_path);
-                cfg_path.Append("haicode");
-                create_directory(cfg_path.Path(), 0755);
-                cfg_path.Append("config.json");
-
-                nlohmann::json j;
-                {
-                    std::ifstream f(cfg_path.Path());
-                    if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
-                }
-                if (!config_.provider.empty()) j["provider"] = config_.provider;
-                if (!config_.model.empty())    j["model"]    = config_.model;
-                std::ofstream f(cfg_path.Path());
-                if (f.is_open()) f << j.dump(2);
-            }
+            std::string p = config_.provider, m = config_.model;
+            save_config_at(haicode::global_config_path(), "the provider selection",
+                [p, m](nlohmann::json& j) {
+                    if (!p.empty()) j["provider"] = p;
+                    if (!m.empty()) j["model"]    = m;
+                });
             break;
         }
         case MSG_DIR_CHANGED: {
             const char* path = nullptr;
             if (msg->FindString("path", &path) != B_OK || !path) break;
 
-            BPath settings_path;
-            if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) != B_OK) break;
-            BPath cfg_path(settings_path);
-            cfg_path.Append("haicode");
-            create_directory(cfg_path.Path(), 0755);
-            cfg_path.Append("config.json");
-
-            // Load existing config, update last_directory, write back
-            nlohmann::json j;
-            {
-                std::ifstream f(cfg_path.Path());
-                if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
-            }
-            j["last_directory"] = path;
-            std::ofstream f(cfg_path.Path());
-            if (f.is_open()) f << j.dump(2);
+            std::string dir = path;
+            save_config_at(haicode::global_config_path(), "the project directory",
+                [dir](nlohmann::json& j) { j["last_directory"] = dir; });
 
             // Reload project-specific config (picks up agents.md/claude.md in the new dir).
             project_dir_ = path;
@@ -480,22 +475,9 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         }
         case MSG_PROVIDERS_UPDATED: {
             if (!_ApplyProviders(msg)) break;
-            BPath settings_path;
-            if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
-                BPath cfg_path(settings_path);
-                cfg_path.Append("haicode");
-                create_directory(cfg_path.Path(), 0755);
-                cfg_path.Append("config.json");
-                nlohmann::json j = nlohmann::json::object();
-                {
-                    std::ifstream f(cfg_path.Path());
-                    if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
-                }
-                if (!j.is_object()) j = nlohmann::json::object();
-                j["providers"] = providers_json(config_.providers);
-                std::ofstream f(cfg_path.Path());
-                if (f.is_open()) f << j.dump(2);
-            }
+            auto providers = providers_json(config_.providers);
+            save_config_at(haicode::global_config_path(), "providers",
+                [providers](nlohmann::json& j) { j["providers"] = providers; });
             _RefreshProviders();
             break;
         }
@@ -623,19 +605,12 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 }
             }
 
-            // Persist the full providers map, preserving other top-level keys.
-            BPath settings_path;
-            if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
-                BPath cfg_path(settings_path);
-                cfg_path.Append("haicode");
-                create_directory(cfg_path.Path(), 0755);
-                cfg_path.Append("config.json");
-
-                nlohmann::json j;
-                {
-                    std::ifstream f(cfg_path.Path());
-                    if (f.is_open()) try { j = nlohmann::json::parse(f); } catch (...) {}
-                }
+            // Persist the settings, preserving every other top-level key the
+            // app doesn't own. The lambda runs synchronously inside
+            // update_config_file on this thread, so reading config_ via the
+            // captured this is race-free.
+            save_config_at(haicode::global_config_path(), "settings",
+                [this](nlohmann::json& j) {
                 if (!config_.provider.empty()) j["provider"] = config_.provider;
                 else j.erase("provider");
                 if (!config_.model.empty())    j["model"]    = config_.model;
@@ -703,10 +678,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                     j.erase("vision_fallback");
                 }
                 j["providers"] = providers_json(config_.providers);
-
-                std::ofstream f(cfg_path.Path());
-                if (f.is_open()) f << j.dump(2);
-            }
+            });
 
             _RefreshProviders();
             main_window_->PostMessage(new BMessage(MSG_SETTINGS_SAVED));

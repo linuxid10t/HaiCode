@@ -100,6 +100,9 @@ target_link_libraries(test_db_upgrade haicode)
 add_executable(test_db_concurrency tests/test_db_concurrency.cpp)
 target_link_libraries(test_db_concurrency haicode)
 
+add_executable(test_config_write tests/test_config_write.cpp)
+target_link_libraries(test_config_write haicode)
+
 # Register every test executable with CTest (ctest --test-dir build).
 foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_config_permission test_step_budget test_compaction
@@ -107,6 +110,6 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_text_attachment test_screenshot test_tool_safety
          test_skills test_retry test_http_client test_symbols
          test_codex_auth test_permission_requests test_db_upgrade
-         test_db_concurrency)
+         test_db_concurrency test_config_write)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

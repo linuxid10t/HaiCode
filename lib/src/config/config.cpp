@@ -1,7 +1,9 @@
 #include <haicode/config.h>
 #include <haicode/default_prompt.h>
+#include <haicode/util.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <cstdio>
@@ -478,6 +480,53 @@ bool save_permission_document(const std::string& path,
     if (std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::remove(tmp.c_str());
         error = "cannot replace " + path;
+        return false;
+    }
+    return true;
+}
+
+bool update_config_file(const std::string& path,
+                        const std::function<void(nlohmann::json&)>& mutate,
+                        std::string& error) {
+    error.clear();
+    if (path.empty()) {
+        error = "empty config path";
+        return false;
+    }
+
+    // Read the existing document; missing file starts from an empty object.
+    nlohmann::json j = nlohmann::json::object();
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0) {
+        std::ifstream f(path);
+        if (!f.is_open()) {
+            error = "cannot open " + path;
+            return false;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        j = nlohmann::json::parse(ss.str(), nullptr, false);
+        if (j.is_discarded() || !j.is_object()) {
+            error = path + " is not valid JSON — refusing to overwrite it";
+            return false;
+        }
+    }
+
+    mutate(j);
+
+    // Create every missing parent (a fresh project's .haicode/ can be
+    // arbitrarily deep); create_directories tolerates existing levels.
+    auto slash = path.find_last_of('/');
+    if (slash != std::string::npos && slash > 0) {
+        std::error_code ec;
+        std::filesystem::create_directories(path.substr(0, slash), ec);
+        // Existing dir vs. genuine failure is distinguished by the write
+        // below; a permissions error surfaces there with the path attached.
+    }
+
+    std::string write_err = util::atomic_write_file(path, j.dump(2) + "\n");
+    if (!write_err.empty()) {
+        error = write_err;
         return false;
     }
     return true;

@@ -146,6 +146,11 @@ Key types live in `lib/include/haicode/` — `engine.h`, `provider.h`, `tool.h`,
 - **Global:** `B_USER_SETTINGS_DIRECTORY/haicode/config.json` — provider keys, default model, `last_directory`.
 - **Project:** `<project_dir>/.haicode/config.json` — overlays globals when that project is open.
 
+All config saves are atomic and non-destructive: the app reads the existing
+file, refuses to overwrite one that doesn't parse (so a hand-edit typo can't
+cost you your API keys — the error is shown instead), preserves every key it
+doesn't own, and writes through a temp file + rename.
+
 ### Providers
 
 The `"providers"` object maps arbitrary ids to provider configs. Each entry has

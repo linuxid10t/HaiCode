@@ -5,6 +5,8 @@
 #include <map>
 #include <vector>
 #include <optional>
+#include <functional>
+#include <nlohmann/json.hpp>
 
 namespace haicode {
 
@@ -160,5 +162,16 @@ bool save_permission_document(const std::string& path,
                               const std::vector<PermissionRule>& rules,
                               const std::string& expected_fingerprint,
                               std::string& error);
+
+// Central, non-destructive config-file update: read the existing JSON object
+// at `path` (a missing file starts from {}), apply `mutate`, and write the
+// result back atomically (mkstemp + fsync + rename) preserving every key the
+// mutate lambda did not touch. An existing file that does not parse as a
+// JSON object is NEVER overwritten — the call fails with an error naming the
+// path so the caller can surface it (a hand-edited typo must not cost the
+// user their API keys). Missing parent directories are created.
+bool update_config_file(const std::string& path,
+                        const std::function<void(nlohmann::json&)>& mutate,
+                        std::string& error);
 
 } // namespace haicode
