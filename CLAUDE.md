@@ -50,7 +50,7 @@ Build type defaults to `RelWithDebInfo` when none is given; all targets compile 
 ./build/lib/test_retry                        # /retry: store delete-tail + engine e2e (rerun last turn)
 ```
 
-**Single instance only.** Do not launch a second HaiCode GUI instance while one is already running — both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db` and concurrent access fails on SQLite database locking. If you need to verify runtime behavior, use the already-running instance; never spawn another copy for testing.
+**Single instance (enforced).** The app signature `application/x-vnd.haicode` carries `B_SINGLE_LAUNCH` (compiled from `gui/haicode.rdef` and attached via `rc`/`xres` in the GUI build): a second launch does not start a new process — the running instance is activated and any project-directory argument is forwarded to its window (`HaiCodeApp::ArgvReceived`/`RefsReceived` → MainWindow's `B_REFS_RECEIVED` handler). Agents must still never spawn a second copy for testing; verify runtime behavior in the already-running instance.
 
 **`/retry` command:** typing `/retry` (exact match) in the GUI input deletes the last turn's assistant output and re-runs the agentic loop on the stored prompt. Intercepted in `MainWindow::_SubmitPrompt` before submission (never stored, never matched against skills); the engine side is `SessionEngine::retry_last_turn` — keeps the `user_prompted` row (so attachments/skill blocks/mode notices re-apply automatically), deletes only `seq > last_prompt_seq`, refuses while running.
 

@@ -246,6 +246,41 @@ HaiCodeApp::ReadyToRun()
     main_window_->PostMessage(new BMessage(MSG_FETCH_MODELS));
 }
 
+void
+HaiCodeApp::ArgvReceived(int32 argc, char** argv)
+{
+    // First launch: argv arrives while still launching and was already
+    // consumed by the constructor. Only a second launch of the
+    // B_SINGLE_LAUNCH app reaches here with the window up.
+    if (IsLaunching())
+        return;
+    for (int32 i = 1; i < argc; ++i) {
+        if (!argv[i])
+            continue;
+        BEntry entry(argv[i]);
+        if (entry.InitCheck() == B_OK && entry.Exists() && entry.IsDirectory()) {
+            entry_ref ref;
+            if (entry.GetRef(&ref) == B_OK && main_window_) {
+                BMessage fwd(B_REFS_RECEIVED);
+                fwd.AddRef("refs", &ref);
+                main_window_->PostMessage(&fwd);
+            }
+            return;
+        }
+    }
+}
+
+void
+HaiCodeApp::RefsReceived(BMessage* msg)
+{
+    // A second launch invoked via Tracker ("Open With", drag-onto-icon).
+    // MainWindow's own B_REFS_RECEIVED handler switches the project dir and
+    // posts MSG_DIR_CHANGED; on the first launch the window does not exist
+    // yet, and the constructor's argv handling covers that path.
+    if (main_window_)
+        main_window_->PostMessage(msg);
+}
+
 bool
 HaiCodeApp::QuitRequested()
 {

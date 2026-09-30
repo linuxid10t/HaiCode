@@ -26,6 +26,12 @@ public:
     void ReadyToRun() override;
     void MessageReceived(BMessage* msg) override;
     bool QuitRequested() override;
+    // B_SINGLE_LAUNCH routes a second launch's argv/refs to the running
+    // instance instead of starting a new process. Forward a directory
+    // argument (or a Tracker "Open With" ref) to MainWindow's existing
+    // B_REFS_RECEIVED handler, which switches the project directory.
+    void ArgvReceived(int32 argc, char** argv) override;
+    void RefsReceived(BMessage* msg) override;
 
 private:
     // Owned haicode objects

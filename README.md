@@ -113,7 +113,7 @@ no special action is needed.
 
 If no project directory is given, the GUI opens the last-used project from global config.
 
-**Single instance only.** Do not run two HaiCode GUI instances at once: both open the same `B_USER_SETTINGS_DIRECTORY/haicode/sessions.db`, and concurrent access fails on SQLite database locking. Close one before starting another.
+**Single instance.** The app signature (`application/x-vnd.haicode`) carries `B_SINGLE_LAUNCH`: launching HaiCode again while it is running does not start a second process — the existing instance is activated and, if the new launch named a project directory (command line, Tracker "Open With", or drag-onto-icon), that directory is forwarded to the running window and becomes the active project.
 
 ## Permissions
 
