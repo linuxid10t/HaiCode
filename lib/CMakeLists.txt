@@ -94,12 +94,15 @@ target_link_libraries(test_codex_auth haicode)
 add_executable(test_permission_requests tests/test_permission_requests.cpp)
 target_link_libraries(test_permission_requests haicode)
 
+add_executable(test_db_upgrade tests/test_db_upgrade.cpp)
+target_link_libraries(test_db_upgrade haicode)
+
 # Register every test executable with CTest (ctest --test-dir build).
 foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_config_permission test_step_budget test_compaction
          test_checkpoint test_model_context test_openai_translate
          test_text_attachment test_screenshot test_tool_safety
          test_skills test_retry test_http_client test_symbols
-         test_codex_auth test_permission_requests)
+         test_codex_auth test_permission_requests test_db_upgrade)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

@@ -721,8 +721,15 @@ std::string SessionEngine::create_session(const std::string& project_dir,
     model_json["mode"]        = config_.default_mode;
     model_json["skills"]      = config_.default_skills;
 
-    auto session = store_.create(project_dir, eff_agent, model_json.dump());
-    return session.id;
+    try {
+        auto session = store_.create(project_dir, eff_agent, model_json.dump());
+        return session.id;
+    } catch (const DbError& e) {
+        // Runs on the GUI looper thread; a failure must surface, not escape
+        // into BApplication::MessageReceived.
+        publish_db_error("", e.what());
+        return "";
+    }
 }
 
 void SessionEngine::submit_prompt(const std::string& session_id,
@@ -757,7 +764,7 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     // body.
     std::string skill_id, skill_args, skill_block;
     bool skill_active = false;
-    {
+    try {
         auto sess = store_.get(session_id);
         if (sess) {
             SkillInfo sk;
@@ -781,6 +788,11 @@ void SessionEngine::submit_prompt(const std::string& session_id,
                                                      mode_label(get_mode(session_id)));
             }
         }
+    } catch (const DbError& e) {
+        // GUI-thread read needed to build the row; abort the turn before
+        // publishing Prompted (same contract as the append below).
+        publish_db_error(session_id, e.what());
+        return;
     }
 
     // Persist the user message
@@ -840,22 +852,34 @@ void SessionEngine::submit_prompt(const std::string& session_id,
         if (!arr.empty())
             data["attachments"] = arr;
     }
-    store_.append_message(session_id, "user_prompted", data.dump());
+    try {
+        store_.append_message(session_id, "user_prompted", data.dump());
+    } catch (const DbError& e) {
+        // The persisted row is the source of truth for the turn: without it
+        // there is nothing to run, so abort before publishing Prompted.
+        publish_db_error(session_id, e.what());
+        return;
+    }
 
     // Immediate heuristic autonaming: if the session still has no title, derive
     // one from this first user message so the sidebar is descriptive without
     // waiting for an LLM round-trip.
     if (config_.autoname_sessions) {
-        auto sess = store_.get(session_id);
-        if (sess && sess->title.empty()) {
-            std::string title = derive_heuristic_title(text);
-            if (!title.empty()) {
-                store_.update_title(session_id, title);
-                nlohmann::json rev;
-                rev["session_id"] = session_id;
-                rev["title"] = title;
-                bus_.publish(events::EventType::SessionRenamed, rev);
+        try {
+            auto sess = store_.get(session_id);
+            if (sess && sess->title.empty()) {
+                std::string title = derive_heuristic_title(text);
+                if (!title.empty()) {
+                    store_.update_title(session_id, title);
+                    nlohmann::json rev;
+                    rev["session_id"] = session_id;
+                    rev["title"] = title;
+                    bus_.publish(events::EventType::SessionRenamed, rev);
+                }
             }
+        } catch (const DbError& e) {
+            // Cosmetic write; the turn itself is already persisted.
+            publish_db_error(session_id, e.what());
         }
     }
 
@@ -909,19 +933,24 @@ void SessionEngine::inject_message(const std::string& session_id,
                                    const std::string& text) {
     // An explicit injection (plan approval) supersedes any queued mode
     // notice: its own text already tells the model the mode changed.
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        pending_mode_notice_.erase(session_id);
-    }
-    nlohmann::json data;
-    data["role"] = "user";
-    data["text"] = text;
-    store_.append_message(session_id, "user_prompted", data.dump());
+    try {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            pending_mode_notice_.erase(session_id);
+        }
+        nlohmann::json data;
+        data["role"] = "user";
+        data["text"] = text;
+        store_.append_message(session_id, "user_prompted", data.dump());
 
-    nlohmann::json ev;
-    ev["session_id"] = session_id;
-    ev["text"] = text;
-    bus_.publish(events::EventType::Prompted, ev);
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        ev["text"] = text;
+        bus_.publish(events::EventType::Prompted, ev);
+    } catch (const DbError& e) {
+        // GUI-thread persist; surface instead of escaping into the looper.
+        publish_db_error(session_id, e.what());
+    }
 }
 
 void SessionEngine::continue_session(const std::string& session_id) {
@@ -944,38 +973,43 @@ void SessionEngine::continue_session(const std::string& session_id) {
 }
 
 void SessionEngine::retry_last_turn(const std::string& session_id) {
-    // Read the stored history before taking mu_ (same discipline as
-    // compact_now) — SQLite work does not belong inside the engine lock.
-    int last_prompt_seq = -1;
-    for (const auto& m : store_.load_messages(session_id))
-        if (m.type == "user_prompted")
-            last_prompt_seq = m.seq;
-    if (last_prompt_seq < 0) return;
+    try {
+        // Read the stored history before taking mu_ (same discipline as
+        // compact_now) — SQLite work does not belong inside the engine lock.
+        int last_prompt_seq = -1;
+        for (const auto& m : store_.load_messages(session_id))
+            if (m.type == "user_prompted")
+                last_prompt_seq = m.seq;
+        if (last_prompt_seq < 0) return;
 
-    std::lock_guard<std::mutex> lock(mu_);
-    // No new runners during destruction (see submit_prompt).
-    if (shutting_down_) return;
-    // Refuse while the agentic loop is mid-run: deleting rows under a live
-    // runner would corrupt the turn it is still writing.
-    if (session_running_.count(session_id) && session_running_[session_id])
-        return;
+        std::lock_guard<std::mutex> lock(mu_);
+        // No new runners during destruction (see submit_prompt).
+        if (shutting_down_) return;
+        // Refuse while the agentic loop is mid-run: deleting rows under a live
+        // runner would corrupt the turn it is still writing.
+        if (session_running_.count(session_id) && session_running_[session_id])
+            return;
 
-    auto th_it = runner_threads_.find(session_id);
-    if (th_it != runner_threads_.end() && th_it->second.joinable())
-        th_it->second.join();
+        auto th_it = runner_threads_.find(session_id);
+        if (th_it != runner_threads_.end() && th_it->second.joinable())
+            th_it->second.join();
 
-    store_.delete_messages_after(session_id, last_prompt_seq);
-    // Rearm the compaction hysteresis so the retried turn's first step is
-    // allowed to compact if needed (same as submit_prompt).
-    last_compaction_step_[session_id] = -1;
+        store_.delete_messages_after(session_id, last_prompt_seq);
+        // Rearm the compaction hysteresis so the retried turn's first step is
+        // allowed to compact if needed (same as submit_prompt).
+        last_compaction_step_[session_id] = -1;
 
-    if (interrupt_flags_.count(session_id))
-        delete interrupt_flags_[session_id];
-    interrupt_flags_[session_id] = new std::atomic<bool>(false);
-    session_running_[session_id] = true;
-    runner_threads_[session_id] = std::thread([this, session_id]() {
-        runner_main(session_id);
-    });
+        if (interrupt_flags_.count(session_id))
+            delete interrupt_flags_[session_id];
+        interrupt_flags_[session_id] = new std::atomic<bool>(false);
+        session_running_[session_id] = true;
+        runner_threads_[session_id] = std::thread([this, session_id]() {
+            runner_main(session_id);
+        });
+    } catch (const DbError& e) {
+        // GUI-thread reads/writes; surface instead of escaping into the looper.
+        publish_db_error(session_id, e.what());
+    }
 }
 
 void SessionEngine::set_permission_broker(PermissionRequestBroker* broker) {
@@ -1079,20 +1113,33 @@ void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
                                           : kSwitchedToBuildMessage;
         }
     }
-    store_.update_mode(session_id, mode == SessionMode::Plan ? "plan"
+    try {
+        store_.update_mode(session_id, mode == SessionMode::Plan ? "plan"
                                                        : mode == SessionMode::Chat ? "chat"
                                                                                    : "build");
+    } catch (const DbError& e) {
+        // GUI-thread persist; surface instead of escaping into the looper.
+        publish_db_error(session_id, e.what());
+    }
 }
 
 void SessionEngine::update_provider_model(const std::string& session_id,
                                            const std::string& provider_id,
                                            const std::string& model_id) {
-    store_.update_provider_model(session_id, provider_id, model_id);
+    try {
+        store_.update_provider_model(session_id, provider_id, model_id);
+    } catch (const DbError& e) {
+        publish_db_error(session_id, e.what());
+    }
 }
 
 void SessionEngine::update_inference(const std::string& session_id,
                                      const InferenceParams& params) {
-    store_.update_inference(session_id, params);
+    try {
+        store_.update_inference(session_id, params);
+    } catch (const DbError& e) {
+        publish_db_error(session_id, e.what());
+    }
 }
 
 std::vector<Todo> SessionEngine::get_todos(const std::string& session_id) {
@@ -1120,6 +1167,16 @@ SessionMode SessionEngine::get_mode(const std::string& session_id) {
     return SessionMode::Build;
 }
 
+void SessionEngine::publish_db_error(const std::string& session_id,
+                                     const std::string& what) {
+    fprintf(stderr, "[engine] database error: %s\n", what.c_str());
+    fflush(stderr);
+    nlohmann::json ev;
+    ev["session_id"] = session_id;
+    ev["error"] = "database error: " + what;
+    bus_.publish(events::EventType::StepFailed, ev);
+}
+
 void SessionEngine::runner_main(const std::string& session_id) {
     // A new run re-arms permission submissions for this session: an earlier
     // interrupt blocked them until now (see interrupt()).
@@ -1127,6 +1184,10 @@ void SessionEngine::runner_main(const std::string& session_id) {
         perm_broker_->allow_submissions(session_id);
     try {
         agentic_loop(session_id);
+    } catch (const DbError& e) {
+        // Loop-thread persist failures get their own clause so the message
+        // reads "database error: …" rather than "internal error: …".
+        publish_db_error(session_id, e.what());
     } catch (const std::exception& e) {
         // Exception barrier: anything escaping the loop (e.g. nlohmann
         // type_error.316 on invalid UTF-8) must surface as a failed step,
@@ -2664,7 +2725,13 @@ void SessionEngine::backfill_attachment_descriptions(
 void SessionEngine::seed_todos(const std::string& session_id,
                                const std::vector<Todo>& todos)
 {
-    store_.replace_todos(session_id, todos);
+    try {
+        store_.replace_todos(session_id, todos);
+    } catch (const DbError& e) {
+        // GUI-thread persist; surface instead of escaping into the looper.
+        publish_db_error(session_id, e.what());
+        return;
+    }
 
     nlohmann::json ev;
     ev["session_id"] = session_id;

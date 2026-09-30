@@ -4,9 +4,93 @@
 #include <vector>
 #include <optional>
 #include <functional>
+#include <stdexcept>
 #include <sqlite3.h>
 
 namespace haicode {
+
+// Typed SQLite failure. Subclasses runtime_error so existing
+// catch (std::exception) / catch (...) sites keep working.
+struct DbError : std::runtime_error {
+    explicit DbError(const std::string& what) : std::runtime_error(what) {}
+};
+
+// RAII prepared statement: the constructor prepares (throwing DbError with
+// sqlite3_errmsg on failure), the destructor finalizes. Write paths must
+// confirm the result with expect_done(); read paths advance with
+// expect_row() (single lookups) or loop `while (stmt.expect_row())`.
+class DbStmt {
+public:
+    DbStmt(sqlite3* db, const std::string& sql) : db_(db) {
+        int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt_, nullptr);
+        if (rc != SQLITE_OK) {
+            std::string err = db ? sqlite3_errmsg(db) : "unknown";
+            if (stmt_) { sqlite3_finalize(stmt_); stmt_ = nullptr; }
+            throw DbError("prepare failed: " + err + " [" + sql + "]");
+        }
+    }
+    ~DbStmt() { if (stmt_) sqlite3_finalize(stmt_); }
+    DbStmt(const DbStmt&) = delete;
+    DbStmt& operator=(const DbStmt&) = delete;
+
+    // Raw step result, for callers that handle SQLITE_ROW/DONE themselves.
+    int step() { return sqlite3_step(stmt_); }
+    // Step once and require SQLITE_DONE (writes). Throws DbError otherwise.
+    void expect_done() {
+        int rc = sqlite3_step(stmt_);
+        if (rc != SQLITE_DONE)
+            throw DbError(std::string("step failed: ") + errmsg());
+    }
+    // Step once: true when a row is available, false at SQLITE_DONE,
+    // DbError on anything else (reads).
+    bool expect_row() {
+        int rc = sqlite3_step(stmt_);
+        if (rc == SQLITE_ROW) return true;
+        if (rc == SQLITE_DONE) return false;
+        throw DbError(std::string("step failed: ") + errmsg());
+    }
+    // Re-arm a statement for the next iteration of an insert loop.
+    void reset() {
+        sqlite3_reset(stmt_);
+        sqlite3_clear_bindings(stmt_);
+    }
+
+    DbStmt& bind(int idx, const std::string& v) {
+        if (sqlite3_bind_text(stmt_, idx, v.c_str(), -1, SQLITE_TRANSIENT) != SQLITE_OK)
+            throw DbError(std::string("bind(text) failed: ") + errmsg());
+        return *this;
+    }
+    DbStmt& bind(int idx, int v) {
+        if (sqlite3_bind_int(stmt_, idx, v) != SQLITE_OK)
+            throw DbError(std::string("bind(int) failed: ") + errmsg());
+        return *this;
+    }
+    DbStmt& bind(int idx, int64_t v) {
+        if (sqlite3_bind_int64(stmt_, idx, v) != SQLITE_OK)
+            throw DbError(std::string("bind(int64) failed: ") + errmsg());
+        return *this;
+    }
+    DbStmt& bind(int idx, double v) {
+        if (sqlite3_bind_double(stmt_, idx, v) != SQLITE_OK)
+            throw DbError(std::string("bind(double) failed: ") + errmsg());
+        return *this;
+    }
+
+    // NULL columns read as empty/zero, matching the old column helpers.
+    std::string text(int col) {
+        const unsigned char* t = sqlite3_column_text(stmt_, col);
+        return t ? std::string(reinterpret_cast<const char*>(t)) : std::string();
+    }
+    int     int_col(int col)   { return sqlite3_column_int(stmt_, col); }
+    int64_t int64_col(int col) { return sqlite3_column_int64(stmt_, col); }
+    double  dbl_col(int col)   { return sqlite3_column_double(stmt_, col); }
+
+private:
+    const char* errmsg() const { return db_ ? sqlite3_errmsg(db_) : "unknown"; }
+
+    sqlite3* db_;
+    sqlite3_stmt* stmt_ = nullptr;
+};
 
 class Database {
 public:
@@ -21,6 +105,13 @@ public:
 
     void exec(const std::string& sql);
     void migrate();
+
+    // PRAGMA user_version — the schema version cursor for numbered migrations.
+    int  user_version();
+    void set_user_version(int version);
+    // Override the open-time busy timeout (tests use a short one to prove
+    // lock failures surface quickly instead of waiting the default 5 s).
+    void set_busy_timeout(int ms);
 
     sqlite3* handle() { return db_; }
 

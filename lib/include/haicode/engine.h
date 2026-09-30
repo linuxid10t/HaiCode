@@ -156,6 +156,10 @@ public:
 private:
     void agentic_loop(const std::string& session_id);
 
+    // Surface a DbError from a GUI-thread persist as a StepFailed event
+    // ("database error: …") instead of letting it escape into the looper.
+    void publish_db_error(const std::string& session_id, const std::string& what);
+
     // Entry point for the std::thread runners spawned by submit_prompt /
     // continue_session / retry_last_turn: agentic_loop plus an exception
     // barrier. An exception escaping the loop must never propagate out of
