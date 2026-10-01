@@ -308,17 +308,21 @@ In `lib/src/util/util.cpp`:
 - The operation inspector must show the new decision path. Update tests in
   `test_config_permission`.
 
-### Task 19. Gate web access and screenshots
+### Task 19. Bound web tools and make screenshots visible
 
-- `web_extract` never prompts: a prompt-injected model can exfiltrate data in
-  a URL or reach `localhost`/private services.
-  - Prompt on the first fetch to each new host per session (grant = host).
-  - Block loopback, link-local, and private address ranges unless explicitly
-    allowed (resolve the host, check the IP, pin it for the request).
-  - Cap `max_chars` and the download size.
-- `screenshot` captures the whole screen with no prompt; make it Ask by
-  default.
-- Document the new defaults in the permission docs.
+`web_search` and `web_extract` stay allowed without prompting, including
+`localhost` and private-network URLs (fetching a local dev server is normal
+agent work). Do not add per-host prompts or address blocking. Users who want
+web access gated can add an Ask or Deny rule in the Policies tab, which
+Task 18 makes effective.
+
+- Cap `web_extract`'s `max_chars` (e.g. 100 KB) and its download size (the
+  body cap from Task 11).
+- `screenshot` stays allowed. Add a visible transcript line each time a
+  screenshot is captured so the user always knows one was sent to the
+  provider.
+- Document in the permission docs that the web tools and `screenshot` are
+  allowed by default and how to gate them with policy rules.
 
 ### Task 20. Tighten rule matching and read-only git
 
@@ -492,5 +496,5 @@ Update `README.md`, `CLAUDE.md`, and `agents.md` to match the code:
   `BPath`, `find_directory`, `BUrl`). Correct the description.
 - `CLAUDE.md` test table: add `test_codex_auth`, `test_openai_translate`,
   `test_text_attachment`, and every test added during this work.
-- Document the project trust model, new permission defaults (`web_extract`,
-  `screenshot`), and the bash/git rule-matching semantics.
+- Document the project trust model, how to gate the web tools and
+  `screenshot` with policy rules, and the bash/git rule-matching semantics.
