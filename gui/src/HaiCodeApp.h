@@ -53,6 +53,15 @@ private:
     PermissionActivityLog perm_activity_;
 
     haicode::AppConfig config_;
+    // The global config LAYER (values + key presence), kept separate from the
+    // merged `config_` the engine/UI read. Settings saves edit this layer and
+    // persist only its global-scope keys to the global file — the merged
+    // config's project-owned values (build_command, project providers, ...)
+    // must never leak into it.
+    haicode::ConfigLayer global_layer_;
+    // Re-merge global_layer_ + the project layer into config_ and push the
+    // refreshed permission rules to the gate.
+    void _SyncMergedConfig();
     std::string project_dir_;
 
     // Shared holder so the broker's delivery callback can capture MainWindow*

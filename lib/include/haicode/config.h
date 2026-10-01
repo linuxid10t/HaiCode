@@ -132,11 +132,47 @@ struct ConfigLayer {
 // layer (nothing present), so it can never clobber the other layer.
 ConfigLayer load_layer(const std::string& path);
 
+// Full load with a caller-supplied GLOBAL layer: loads the project layer
+// from <project_dir>/.haicode/config.json, merges, and attaches agents.md /
+// claude.md. The GUI keeps its (possibly just-edited) global layer in
+// memory and re-merges through this after a Settings save.
+AppConfig load_with_layers(const ConfigLayer& global_layer,
+                           const std::string& project_dir);
+
 // Presence-based merge: the overlay wins exactly for keys present in the
 // overlay layer (per subkey for provider entries); collections (permissions,
 // instructions, skills) keep append semantics and per-key maps (models,
 // vision, pricing, search api keys) keep per-key overlay semantics.
 AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay);
+
+// Canonical provider-map serialization ({"id": {type, api_key, base_url}}).
+// Shared by the GUI's provider saves and global_scope_json so the two can't
+// drift.
+nlohmann::json providers_to_json(const std::map<std::string, ProviderConfig>& providers);
+
+// The set of top-level config keys the Settings window owns at GLOBAL scope.
+// Used together with global_scope_json() to sync a save onto the global file:
+// keys present in the returned object are written, absent ones erased —
+// nothing outside this set is ever touched by a Settings save.
+const std::vector<std::string>& global_scope_keys();
+
+// Serialize ONLY the global-scope keys of `cfg` (see global_scope_keys()).
+// Deliberately excluded: `build_command` (project-only — each project's
+// build hook lives in its own .haicode/config.json), `permissions` (owned
+// by the Permissions center's policy editor), `instructions`, `agents`/
+// `agent`, and `last_directory` (written on directory change). Keys at
+// their default/empty value are omitted, so syncing erases them and the
+// file stays minimal.
+nlohmann::json global_scope_json(const AppConfig& cfg);
+
+// Sync the Settings-owned global-scope values in `global` onto the config
+// file at `path`: every key in global_scope_keys() is replaced from
+// global_scope_json(global) (absent ones erased), and ALL other keys —
+// permissions, last_directory, instructions, agents, ... — are preserved
+// untouched. This is the exact write path of a Settings save, in the lib so
+// its non-leak guarantees are testable headless.
+bool sync_global_scope(const AppConfig& global, const std::string& path,
+                       std::string& error);
 
 // One configurable permission source (global or project file), kept
 // un-merged so the policy editor can show and edit each independently.

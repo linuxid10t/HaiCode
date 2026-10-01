@@ -48,7 +48,11 @@ AppConfig ConfigLoader::load(const std::string& project_dir) {
         std::string global_path = std::string(settings_path.Path()) + "/haicode/config.json";
         global_layer = load_layer(global_path);
     }
+    return load_with_layers(global_layer, project_dir);
+}
 
+AppConfig load_with_layers(const ConfigLayer& global_layer,
+                           const std::string& project_dir) {
     // Project config
     ConfigLayer project_layer = load_layer(project_dir + "/.haicode/config.json");
 
@@ -438,6 +442,111 @@ AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay) {
         result.web_search_api_keys[k] = v;
 
     return result;
+}
+
+nlohmann::json providers_to_json(const std::map<std::string, ProviderConfig>& providers) {
+    nlohmann::json j = nlohmann::json::object();
+    for (auto& [id, p] : providers)
+        j[id] = {{"type", p.type}, {"api_key", p.api_key}, {"base_url", p.base_url}};
+    return j;
+}
+
+const std::vector<std::string>& global_scope_keys() {
+    static const std::vector<std::string> keys = {
+        "provider", "model", "default_mode", "thinking_display",
+        "providers", "web_search", "skills", "models", "vision",
+        "vision_fallback", "pricing",
+        "auto_compact", "auto_compact_threshold",
+        "compaction_buffer", "compaction_recent_context",
+        "compaction_summary_max_tokens",
+        "autoname_sessions", "autoname_llm_refine",
+    };
+    return keys;
+}
+
+nlohmann::json global_scope_json(const AppConfig& cfg) {
+    nlohmann::json j = nlohmann::json::object();
+    if (!cfg.provider.empty()) j["provider"] = cfg.provider;
+    if (!cfg.model.empty())    j["model"]    = cfg.model;
+    if (!cfg.default_mode.empty()) j["default_mode"] = cfg.default_mode;
+    // Erase-when-default so the file stays minimal for default behavior.
+    if (!cfg.thinking_display.empty()
+            && cfg.thinking_display != "on_while_thinking")
+        j["thinking_display"] = cfg.thinking_display;
+    j["providers"] = providers_to_json(cfg.providers);
+    j["web_search"] = {
+        {"engine", cfg.web_search_engine},
+        {"max_results", cfg.web_search_max_results},
+    };
+    if (!cfg.web_search_api_keys.empty()) {
+        nlohmann::json keys_j = nlohmann::json::object();
+        for (auto& [engine, key] : cfg.web_search_api_keys)
+            keys_j[engine] = key;
+        j["web_search"]["api_keys"] = keys_j;
+    }
+    if (!cfg.default_skills.empty()) {
+        nlohmann::json skills_j = nlohmann::json::array();
+        for (auto& s : cfg.default_skills)
+            skills_j.push_back(s);
+        j["skills"] = skills_j;
+    }
+    if (!cfg.model_contexts.empty()) {
+        nlohmann::json models_j = nlohmann::json::object();
+        for (auto& [mid, win] : cfg.model_contexts)
+            models_j[mid] = win;
+        j["models"] = models_j;
+    }
+    if (!cfg.model_vision.empty()) {
+        nlohmann::json vision_j = nlohmann::json::object();
+        for (auto& [mid, vis] : cfg.model_vision)
+            vision_j[mid] = vis;
+        j["vision"] = vision_j;
+    }
+    if (!cfg.vision_fallback_model.empty()) {
+        j["vision_fallback"] = {
+            {"provider", cfg.vision_fallback_provider},
+            {"model",    cfg.vision_fallback_model},
+        };
+    }
+    if (!cfg.pricing.empty()) {
+        nlohmann::json pricing_j = nlohmann::json::object();
+        for (auto& [k, p] : cfg.pricing)
+            pricing_j[k] = {{"input", p.input}, {"output", p.output},
+                            {"cache_read", p.cache_read},
+                            {"cache_write", p.cache_write}};
+        j["pricing"] = pricing_j;
+    }
+    if (!cfg.auto_compact) j["auto_compact"] = false;
+    if (cfg.auto_compact_threshold != 0.80)
+        j["auto_compact_threshold"] = cfg.auto_compact_threshold;
+    if (cfg.compaction_buffer != 8192)
+        j["compaction_buffer"] = cfg.compaction_buffer;
+    if (cfg.compaction_recent_context != 10240)
+        j["compaction_recent_context"] = cfg.compaction_recent_context;
+    if (cfg.compaction_summary_max_tokens != 4096)
+        j["compaction_summary_max_tokens"] = cfg.compaction_summary_max_tokens;
+    if (!cfg.autoname_sessions) j["autoname_sessions"] = false;
+    if (!cfg.autoname_llm_refine) j["autoname_llm_refine"] = false;
+    return j;
+}
+
+bool sync_global_scope(const AppConfig& global, const std::string& path,
+                       std::string& error) {
+    return update_config_file(path, [&global](nlohmann::json& j) {
+        nlohmann::json scope = global_scope_json(global);
+        // Replace each Settings-owned key wholesale; erase the ones at
+        // default so the file stays minimal. Everything else in the file —
+        // permissions, last_directory, instructions, agents, ... — is
+        // untouched.
+        for (const auto& key : global_scope_keys()) {
+            if (scope.contains(key)) j[key] = scope[key];
+            else j.erase(key);
+        }
+        // build_command is project-only; a global one can only be a leak
+        // from releases that saved the merged config wholesale. Erase it so
+        // one project's build hook stops running in every project.
+        j.erase("build_command");
+    }, error);
 }
 
 // ---- Source-aware permission policy documents ----

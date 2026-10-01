@@ -194,6 +194,66 @@ static bool writes_owner_only() {
     return true;
 }
 
+// Task 8 regression: a Settings save (sync_global_scope) must never leak
+// project-owned state into the global file. Seeded like the real setup:
+// global file with providers + last_directory + permissions, project file
+// with its own build_command and providers entry.
+static bool settings_save_does_not_leak_project_state() {
+    reset_dir();
+    const std::string gp = std::string(kDir) + "/global.json";
+    const std::string pp = std::string(kDir) + "/proj/.haicode/config.json";
+    ::mkdir((std::string(kDir) + "/proj").c_str(), 0755);
+    ::mkdir((std::string(kDir) + "/proj/.haicode").c_str(), 0755);
+    write_file(gp, R"({
+  "last_directory": "/boot/home/Desktop/HaiCode",
+  "permissions": [{"action": "bash", "resource": "*", "effect": "ask"}],
+  "providers": {"anthropic": {"type": "anthropic", "api_key": "sk-global"}}
+})");
+    write_file(pp, R"({
+  "build_command": "make -C build -j4 2>&1",
+  "providers": {"evil-proxy": {"type": "openai", "base_url": "http://localhost:9/v1"}}
+})");
+
+    // What the GUI holds as the global layer after a Settings save.
+    haicode::AppConfig g = haicode::load_layer(gp).values;
+    g.model = "claude-sonnet-4";
+
+    std::string err;
+    CHECK(haicode::sync_global_scope(g, gp, err), "sync should succeed: " + err);
+
+    nlohmann::json j = nlohmann::json::parse(read_file(gp), nullptr, false);
+    CHECK(!j.is_discarded(), "global file must still parse");
+    CHECK(!j.contains("build_command"),
+          "global file must never gain a build_command");
+    CHECK(j["providers"].size() == 1 && j["providers"].contains("anthropic"),
+          "global providers must be exactly the global ones (no project entries)");
+    CHECK(j["model"] == "claude-sonnet-4", "saved global key applied");
+    CHECK(j["last_directory"] == "/boot/home/Desktop/HaiCode",
+          "unowned key (last_directory) preserved");
+    CHECK(j["permissions"].is_array() && j["permissions"].size() == 1,
+          "permissions preserved untouched");
+
+    // The project file is untouched by a global save.
+    nlohmann::json pj = nlohmann::json::parse(read_file(pp), nullptr, false);
+    CHECK(!pj.is_discarded(), "project file must still parse");
+    CHECK(pj["build_command"] == "make -C build -j4 2>&1",
+          "project build_command stays in the project file");
+    CHECK(pj["providers"].contains("evil-proxy"),
+          "project providers stay in the project file");
+
+    // A legacy global build_command is dropped (project-only now), and a
+    // stale model is erased when the layer no longer sets it.
+    write_file(gp, R"({"build_command":"make legacy","model":"old","future":1})");
+    haicode::AppConfig g2;
+    CHECK(haicode::sync_global_scope(g2, gp, err), "second sync: " + err);
+    j = nlohmann::json::parse(read_file(gp), nullptr, false);
+    CHECK(!j.contains("build_command"), "legacy global build_command dropped");
+    CHECK(!j.contains("model"), "unset model erased");
+    CHECK(j["future"] == 1, "unknown keys still preserved");
+    std::cout << "[OK] settings save does not leak project state\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok &= missing_file_created();
@@ -203,6 +263,7 @@ int main() {
     ok &= creates_parent_dirs();
     ok &= empty_path_fails();
     ok &= writes_owner_only();
+    ok &= settings_save_does_not_leak_project_state();
     if (ok) {
         std::cout << "\nAll config-write tests passed!\n";
         return 0;

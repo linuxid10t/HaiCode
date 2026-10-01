@@ -161,6 +161,11 @@ resets a global setting (a missing `default_mode` no longer wipes a global
 can be turned back *on*), and provider entries merge field by field — a
 project `base_url` no longer drops the global `api_key`.
 
+Settings saves are scope-aware: only global-scope keys are written to the
+global config, and the build command is project-scoped — saved to the open
+project's own `.haicode/config.json`, so one project's build hook never runs
+in every project.
+
 ### Providers
 
 The `"providers"` object maps arbitrary ids to provider configs. Each entry has

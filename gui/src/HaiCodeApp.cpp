@@ -41,15 +41,6 @@
 
 
 
-static nlohmann::json
-providers_json(const std::map<std::string, haicode::ProviderConfig>& providers)
-{
-    nlohmann::json j = nlohmann::json::object();
-    for (auto& [id, p] : providers)
-        j[id] = {{"type", p.type}, {"api_key", p.api_key}, {"base_url", p.base_url}};
-    return j;
-}
-
 // Every config save funnels through here: read the existing document, apply
 // the mutation, write back atomically. An unparseable file is refused, not
 // overwritten — the old truncating ofstream silently replaced a hand-edited
@@ -190,8 +181,8 @@ HaiCodeApp::ReadyToRun()
     }
 
     // --- 3. Load config ---
-    haicode::ConfigLoader loader;
-    config_ = loader.load(project_dir_);
+    global_layer_ = haicode::load_layer(haicode::global_config_path());
+    config_ = haicode::load_with_layers(global_layer_, project_dir_);
 
     // --- 4. Create core objects ---
     store_     = std::make_unique<haicode::SessionStore>(*db_);
@@ -393,6 +384,10 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             msg->FindString("model",    &model);
             if (provider) config_.provider = provider;
             if (model)    config_.model    = model;
+            // Keep the global layer in sync: a later Settings save writes
+            // provider/model from it and must not resurrect a stale pick.
+            if (provider) global_layer_.values.provider = provider;
+            if (model)    global_layer_.values.model    = model;
 
             std::string p = config_.provider, m = config_.model;
             save_config_at(haicode::global_config_path(), "the provider selection",
@@ -412,11 +407,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
 
             // Reload project-specific config (picks up agents.md/claude.md in the new dir).
             project_dir_ = path;
-            haicode::ConfigLoader loader2;
-            config_ = loader2.load(project_dir_);
-            // The new project layer may add or remove permission rules; the
-            // gate keeps the previously configured set otherwise.
-            perm_gate_->set_rules(config_.permissions);
+            global_layer_ = haicode::load_layer(haicode::global_config_path());
+            _SyncMergedConfig();
             _RecreateEngine();
             break;
         }
@@ -489,7 +481,8 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         }
         case MSG_PROVIDERS_UPDATED: {
             if (!_ApplyProviders(msg)) break;
-            auto providers = providers_json(config_.providers);
+            auto providers = haicode::providers_to_json(
+                global_layer_.values.providers);
             save_config_at(haicode::global_config_path(), "providers",
                 [providers](nlohmann::json& j) { j["providers"] = providers; });
             _RefreshProviders();
@@ -508,14 +501,19 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             // A policy file was written from the Permissions center: reload
             // the effective configuration and refresh the gate's configured
             // rules. Session layers (toggles, grants) are untouched.
-            haicode::ConfigLoader loader;
-            config_ = loader.load(project_dir_);
-            perm_gate_->set_rules(config_.permissions);
+            global_layer_ = haicode::load_layer(haicode::global_config_path());
+            _SyncMergedConfig();
             _RefreshPermissionsCenter();
             break;
         }
         case MSG_SETTINGS_SAVED: {
             if (!_ApplyProviders(msg)) break;
+
+            // Settings edits the GLOBAL layer; the merged config_ is
+            // re-derived from it below. Applying here (not to config_) is
+            // what stops project-owned values from leaking into the global
+            // file on save.
+            haicode::AppConfig& g = global_layer_.values;
 
             // Apply scalar settings from the settings window.
             const char* model = nullptr;
@@ -526,34 +524,37 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             const char* ws_engine = nullptr;
             int32 ws_max = 0;
             if (msg->FindString("model", &model) == B_OK && model)
-                config_.model = model;
+                g.model = model;
             if (msg->FindString("provider", &provider) == B_OK && provider)
-                config_.provider = provider;
+                g.provider = provider;
             if (msg->FindString("default_mode", &default_mode) == B_OK
                 && default_mode && (*default_mode == '\0'
                     || *default_mode == 'p' || *default_mode == 'b')) {
                 // Accept "plan"/"build"; treat empty as "leave as-is".
                 if (*default_mode)
-                    config_.default_mode = default_mode;
+                    g.default_mode = default_mode;
             }
             if (msg->FindString("thinking_display", &thinking_display) == B_OK
                 && thinking_display
                 && (std::string(thinking_display) == "off"
                     || std::string(thinking_display) == "on"
                     || std::string(thinking_display) == "on_while_thinking")) {
-                config_.thinking_display = thinking_display;
+                g.thinking_display = thinking_display;
             }
+            // build_command is project-scoped: captured here, written to
+            // <project>/.haicode/config.json below — never the global file.
+            std::string project_build_command;
             if (msg->FindString("build_command", &build_command) == B_OK)
-                config_.build_command = build_command ? build_command : "";
+                project_build_command = build_command ? build_command : "";
             if (msg->FindString("web_search_engine", &ws_engine) == B_OK && ws_engine
                 && (std::string(ws_engine) == "ddg_lite"
                     || std::string(ws_engine) == "ddg_html"
                     || std::string(ws_engine) == "exa"
                     || std::string(ws_engine) == "zai")) {
-                config_.web_search_engine = ws_engine;
+                g.web_search_engine = ws_engine;
             }
             if (msg->FindInt32("web_search_max_results", &ws_max) == B_OK && ws_max > 0)
-                config_.web_search_max_results = ws_max;
+                g.web_search_max_results = ws_max;
             // Search API key: paired with its engine id. Non-empty key sets/
             // replaces it; empty key means "keep the stored key" (provider-
             // editor semantics). No message pair = nothing to change.
@@ -565,7 +566,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 && (std::string(ws_key_engine) == "exa"
                     || std::string(ws_key_engine) == "zai")
                 && *ws_key) {
-                config_.web_search_api_keys[ws_key_engine] = ws_key;
+                g.web_search_api_keys[ws_key_engine] = ws_key;
             }
 
             // Context-window override for a model (from the Settings General tab).
@@ -575,7 +576,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 && context_window > 0
                 && msg->FindString("context_model", &context_model) == B_OK
                 && context_model && *context_model) {
-                config_.model_contexts[context_model] = context_window;
+                g.model_contexts[context_model] = context_window;
             }
 
             // Vision override for a model (from the Settings General tab).
@@ -589,11 +590,11 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 && vision_model && *vision_model) {
                 std::string v(vision_override);
                 if (v == "yes")
-                    config_.model_vision[vision_model] = true;
+                    g.model_vision[vision_model] = true;
                 else if (v == "no")
-                    config_.model_vision[vision_model] = false;
+                    g.model_vision[vision_model] = false;
                 else
-                    config_.model_vision.erase(vision_model);
+                    g.model_vision.erase(vision_model);
             }
 
             // Vision fallback pair (from the Settings General tab). Empty
@@ -602,98 +603,50 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             const char* fb_model = nullptr;
             if (msg->FindString("vision_fallback_provider", &fb_provider) == B_OK
                 && msg->FindString("vision_fallback_model", &fb_model) == B_OK) {
-                config_.vision_fallback_provider = fb_provider ? fb_provider : "";
-                config_.vision_fallback_model    = fb_model    ? fb_model    : "";
+                g.vision_fallback_provider = fb_provider ? fb_provider : "";
+                g.vision_fallback_model    = fb_model    ? fb_model    : "";
             }
 
             // Default skills for new sessions (Settings Skills tab).
             // Repeated field: replace the whole list on every save.
-            config_.default_skills.clear();
+            g.default_skills.clear();
             {
                 const char* def_skill = nullptr;
                 for (int32 i = 0;
                         msg->FindString("default_skill", i, &def_skill) == B_OK;
                         ++i) {
                     if (def_skill && *def_skill)
-                        config_.default_skills.push_back(def_skill);
+                        g.default_skills.push_back(def_skill);
                 }
             }
 
-            // Persist the settings, preserving every other top-level key the
-            // app doesn't own. The lambda runs synchronously inside
-            // update_config_file on this thread, so reading config_ via the
-            // captured this is race-free.
-            save_config_at(haicode::global_config_path(), "settings",
-                [this](nlohmann::json& j) {
-                if (!config_.provider.empty()) j["provider"] = config_.provider;
-                else j.erase("provider");
-                if (!config_.model.empty())    j["model"]    = config_.model;
-                if (!config_.default_mode.empty())
-                    j["default_mode"] = config_.default_mode;
-                // Thinking display: erase-when-default (and when never set)
-                // so the file stays minimal for the default behavior.
-                if (!config_.thinking_display.empty()
-                    && config_.thinking_display != "on_while_thinking")
-                    j["thinking_display"] = config_.thinking_display;
-                else
-                    j.erase("thinking_display");
-                if (!config_.build_command.empty())
-                    j["build_command"] = config_.build_command;
-                else
-                    j.erase("build_command");
-                j["web_search"] = {
-                    {"engine", config_.web_search_engine},
-                    {"max_results", config_.web_search_max_results},
-                };
-                // Default-enabled skills; erase-when-empty so unchecking
-                // every skill fully clears the persisted list.
-                if (!config_.default_skills.empty()) {
-                    nlohmann::json skills_j = nlohmann::json::array();
-                    for (auto& s : config_.default_skills)
-                        skills_j.push_back(s);
-                    j["skills"] = skills_j;
-                } else {
-                    j.erase("skills");
+            // Persist the global-scope keys (and only those) atomically;
+            // permissions/last_directory/... in the file are preserved, and a
+            // legacy global build_command is dropped (project-only now).
+            {
+                std::string err;
+                if (!haicode::sync_global_scope(g, haicode::global_config_path(),
+                                                err)) {
+                    BString text;
+                    text << "Could not save settings:\n\n" << err.c_str();
+                    BAlert* alert = new BAlert("Config save failed",
+                                               text.String(), "OK");
+                    alert->Go();
                 }
-                // Preserve any API keys the user set by hand in config.json
-                // (the Settings UI has no key-entry field; keys live in
-                // config.json or env vars only).
-                if (!config_.web_search_api_keys.empty()) {
-                    nlohmann::json keys_j = nlohmann::json::object();
-                    for (auto& [engine, key] : config_.web_search_api_keys)
-                        keys_j[engine] = key;
-                    j["web_search"]["api_keys"] = keys_j;
-                }
-                if (!config_.model_contexts.empty()) {
-                    nlohmann::json models_j = nlohmann::json::object();
-                    for (auto& [mid, win] : config_.model_contexts)
-                        models_j[mid] = win;
-                    j["models"] = models_j;
-                }
-                // Vision overrides use the "vision" top-level key that
-                // ConfigLoader parses; erase it when fully reset to Auto so
-                // stale entries don't linger.
-                if (!config_.model_vision.empty()) {
-                    nlohmann::json vision_j = nlohmann::json::object();
-                    for (auto& [mid, vis] : config_.model_vision)
-                        vision_j[mid] = vis;
-                    j["vision"] = vision_j;
-                } else {
-                    j.erase("vision");
-                }
-                // Vision fallback pair; erase-when-empty so "(none)" fully
-                // disables the feature in the persisted file.
-                if (!config_.vision_fallback_model.empty()) {
-                    j["vision_fallback"] = {
-                        {"provider", config_.vision_fallback_provider},
-                        {"model",    config_.vision_fallback_model},
-                    };
-                } else {
-                    j.erase("vision_fallback");
-                }
-                j["providers"] = providers_json(config_.providers);
-            });
+            }
+            // The build hook is project-scoped: it lives in the project's own
+            // .haicode/config.json (erase-when-empty), never the global file.
+            save_config_at(haicode::project_config_path(project_dir_),
+                "the build command",
+                [project_build_command](nlohmann::json& j) {
+                    if (!project_build_command.empty())
+                        j["build_command"] = project_build_command;
+                    else
+                        j.erase("build_command");
+                });
 
+            // Re-derive the merged config the engine/UI read.
+            _SyncMergedConfig();
             _RefreshProviders();
             main_window_->PostMessage(new BMessage(MSG_SETTINGS_SAVED));
 
@@ -711,6 +664,16 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         default:
             BApplication::MessageReceived(msg);
     }
+}
+
+void
+HaiCodeApp::_SyncMergedConfig()
+{
+    config_ = haicode::load_with_layers(global_layer_, project_dir_);
+    // The project layer may add or remove permission rules; the gate keeps
+    // the previously configured set otherwise.
+    if (perm_gate_)
+        perm_gate_->set_rules(config_.permissions);
 }
 
 bool
@@ -733,7 +696,10 @@ HaiCodeApp::_ApplyProviders(const BMessage* msg)
             p.base_url = v.value("base_url", "");
             updated[id] = std::move(p);
         }
-        config_.providers = std::move(updated);
+        // Providers are global-scope: edit the global layer, then re-merge
+        // so config_ (engine + UI) reflects global + project as loaded.
+        global_layer_.values.providers = std::move(updated);
+        _SyncMergedConfig();
         return true;
     } catch (...) {
         return false;
