@@ -270,6 +270,22 @@ int make_secure_temp(const std::string& tmpl_prefix, std::string& out_path) {
 
 // ---- HttpClient ----
 
+// Caps shared by the HTTP paths: get()/post_json() bodies and the SSE
+// unparsed-line buffer. Generous multiples of the 100 KB tool-output cap —
+// these bound memory, not usefulness.
+static constexpr size_t kBodyCap = 10 * 1024 * 1024;      // 10 MB
+static constexpr size_t kSSEStreamCap = 2 * 1024 * 1024;  // 2 MB single stream/line
+// Same-host redirect loop bound for get().
+static constexpr int kMaxRedirectHops = 5;
+
+// libcurl global init is process-wide and not thread-safe; a HttpClient can
+// now be constructed from any thread (web tools, providers, tests), so the
+// init rides std::call_once instead of running per-constructor.
+static void ensure_curl_init() {
+    static std::once_flag once;
+    std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+
 // Per-request SSE state. These fields previously lived on the per-client
 // State below: each provider owns exactly one HttpClient and
 // ProviderRegistry::get() hands that provider to every session thread, so two
@@ -297,12 +313,23 @@ struct RequestState {
     // cancel), which curl reports as CURLE_ABORTED_BY_CALLBACK. post_sse must
     // not classify that as a transport failure.
     bool aborted_by_callback = false;
+    // Set when the unparsed buffer blew past the stream cap — an SSE line
+    // (or a headerless byte flood) that never terminated. Aborts the
+    // transfer with a distinct transport error.
+    bool over_cap = false;
 
     static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
         auto* s = static_cast<RequestState*>(userdata);
         if (s->cancelled) return 0;
 
         s->buffer.append(ptr, size * nmemb);
+        // A single SSE event larger than the cap would grow the buffer
+        // without bound (the parse loop below only frees memory at complete
+        // lines). Abort instead of letting a hostile or broken server eat RAM.
+        if (s->buffer.size() > kSSEStreamCap) {
+            s->over_cap = true;
+            return 0;
+        }
 
         // Parse SSE lines
         size_t pos = 0;
@@ -336,9 +363,13 @@ struct RequestState {
                 if (!s->event_type.empty() && s->event_type[0] == ' ')
                     s->event_type = s->event_type.substr(1);
             } else if (line.rfind("data:", 0) == 0) {
-                s->event_data = line.substr(5);
-                if (!s->event_data.empty() && s->event_data[0] == ' ')
-                    s->event_data = s->event_data.substr(1);
+                // SSE spec: consecutive data: lines join with \n into one
+                // event payload (they are NOT separate events, and the last
+                // line must not discard the earlier ones).
+                std::string d = line.substr(5);
+                if (!d.empty() && d[0] == ' ') d = d.substr(1);
+                if (!s->event_data.empty()) s->event_data += "\n";
+                s->event_data += d;
             }
         }
 
@@ -381,7 +412,7 @@ struct InflightGuard {
 } // namespace
 
 HttpClient::HttpClient() : state_(std::make_unique<State>()) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    ensure_curl_init();
 }
 
 HttpClient::~HttpClient() = default;
@@ -404,6 +435,15 @@ void HttpClient::cancel() {
 // gets its own handle, initialized and cleaned up around perform.
 static CURL* fresh_handle() {
     return curl_easy_init();
+}
+
+// Progress callback: runs frequently during every phase (connect, headers,
+// body). Returning non-zero aborts the transfer with
+// CURLE_ABORTED_BY_CALLBACK — this is what makes cancel() work during
+// connect and silent streams, where no write_cb ever fires.
+static int xfer_cb(void* userdata, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    auto* s = static_cast<RequestState*>(userdata);
+    return s->cancelled ? 1 : 0;
 }
 
 void HttpClient::post_sse(const std::string& url,
@@ -433,8 +473,25 @@ void HttpClient::post_sse(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, RequestState::write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &req);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &req);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    // The request body carries credentials (x-api-key / Authorization).
+    // Following a redirect would re-send them wherever the server points —
+    // never follow.
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    // No total timeout: long generations legitimately stream for minutes.
+    // Instead: bound the connect phase, and abort a transfer sustained below
+    // 1 byte/s for 60 s (a live-but-silent server, not a slow one).
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
 
     struct curl_slist* hlist = nullptr;
     for (auto& [k, v] : headers)
@@ -445,89 +502,181 @@ void HttpClient::post_sse(const std::string& url,
     long code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
 
-    if (response_code) *response_code = (res == CURLE_OK || req.aborted_by_callback) ? code : -1;
-    if (res != CURLE_OK && !req.aborted_by_callback && transport_error)
-        *transport_error = curl_easy_strerror(res);
-    // Non-2xx: the body is a plain error document, not SSE — the callback
-    // never fired. Surface a short excerpt so callers can show the cause.
-    if (res == CURLE_OK && code >= 400 && transport_error && transport_error->empty()) {
-        std::string excerpt = req.buffer.substr(0, 500);
-        *transport_error = util::sanitize_utf8(excerpt);
+    // Size-cap abort is a transport failure with a distinct message; a
+    // cancel is deliberately silent (providers check their own flags).
+    if (req.over_cap && !req.aborted_by_callback) {
+        if (response_code) *response_code = -1;
+        if (transport_error)
+            *transport_error = "response line/stream exceeded size cap";
+    } else {
+        if (response_code) *response_code = (res == CURLE_OK || req.aborted_by_callback) ? code : -1;
+        if (res != CURLE_OK && !req.aborted_by_callback && transport_error
+                && !req.cancelled)
+            *transport_error = curl_easy_strerror(res);
+        // Non-2xx: the body is a plain error document, not SSE — the callback
+        // never fired. Surface a short excerpt so callers can show the cause.
+        if (res == CURLE_OK && code >= 400 && transport_error && transport_error->empty()) {
+            std::string excerpt = req.buffer.substr(0, 500);
+            *transport_error = util::sanitize_utf8(excerpt);
+        }
     }
 
     curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
 }
 
+// Body sink with a hard cap for get()/post_json(): past kBodyCap the write
+// callback aborts the transfer and the truncated prefix is returned to the
+// caller with *truncated set — a runaway response must never grow without
+// bound, but the useful prefix survives.
+struct BodySink {
+    std::string data;
+    bool truncated = false;
+    static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+        auto* s = static_cast<BodySink*>(userdata);
+        size_t bytes = size * nmemb;
+        if (s->data.size() + bytes > kBodyCap) {
+            s->data.append(ptr, kBodyCap - s->data.size());
+            s->truncated = true;
+            return 0;  // abort (CURLE_WRITE_ERROR)
+        }
+        s->data.append(ptr, bytes);
+        return bytes;
+    }
+};
+
+// Hostname of a URL via the CURLU API (lowercased, port-free — an
+// http->https upgrade or port change stays same-host). Empty on parse
+// failure, which callers treat as "do not follow".
+static std::string url_hostname(const std::string& url) {
+    CURLU* u = curl_url();
+    if (!u) return {};
+    std::string host;
+    if (curl_url_set(u, CURLUPART_URL, url.c_str(), 0) == CURLUE_OK) {
+        char* h = nullptr;
+        if (curl_url_get(u, CURLUPART_HOST, &h, 0) == CURLUE_OK && h) {
+            host = h;
+            curl_free(h);
+        }
+    }
+    curl_url_cleanup(u);
+    return host;
+}
+
+// Is this HTTP code a redirect curl would have followed?
+static bool is_redirect_code(long code) {
+    return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+}
+
 std::string HttpClient::get(const std::string& url,
                              const std::map<std::string, std::string>& headers,
                              long timeout_seconds,
-                             long* response_code) {
+                             long* response_code,
+                             bool* truncated) {
+    if (truncated) *truncated = false;
+    if (response_code) *response_code = 0;
     std::string result;
 
-    auto write_fn = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-        auto* s = static_cast<std::string*>(userdata);
-        s->append(ptr, size * nmemb);
-        return size * nmemb;
-    };
+    // Manual same-host-only redirect following (curl's own FOLLOWLOCATION
+    // re-sends headers — including any credentials — to whatever host the
+    // server names). Each hop is a plain request with following disabled;
+    // CURLINFO_REDIRECT_URL then names the next hop, which we take only when
+    // its hostname matches the ORIGIN (the first URL the caller gave us —
+    // same host all the way, never a chain across hosts).
+    const std::string origin_host = url_hostname(url);
+    std::string current = url;
 
-    CURL* curl = fresh_handle();
-    if (!curl) {
-        if (response_code) *response_code = -1;
+    for (int hop = 0;; hop++) {
+        BodySink sink;
+        CURL* curl = fresh_handle();
+        if (!curl) {
+            if (response_code) *response_code = -1;
+            return result;
+        }
+        curl_easy_setopt(curl, CURLOPT_URL, current.c_str());
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, BodySink::write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+#else
+        curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                         CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
+
+        struct curl_slist* hlist = nullptr;
+        for (auto& [k, v] : headers)
+            hlist = curl_slist_append(hlist, (k + ": " + v).c_str());
+        if (hlist) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
+
+        CURLcode res = curl_easy_perform(curl);
+        long code = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+        char* redir_raw = nullptr;
+        curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redir_raw);
+        // REDIRECT_URL points into handle-owned memory (not a duplicate) —
+        // copying is fine, curl_free on it would corrupt the heap.
+        std::string next = redir_raw ? redir_raw : "";
+        curl_slist_free_all(hlist);
+        curl_easy_cleanup(curl);
+
+        result = std::move(sink.data);
+        if (truncated) *truncated = sink.truncated;
+        // Transport failure — except the deliberate over-cap abort, which
+        // still reports the real HTTP code with the truncated prefix.
+        if (res != CURLE_OK && !sink.truncated) {
+            if (response_code) *response_code = -1;
+            if (truncated) *truncated = false;
+            return result;
+        }
+        if (response_code) *response_code = code;
+
+        // Follow only same-host 3xx, within the hop budget.
+        if (is_redirect_code(code) && !next.empty()
+                && hop < kMaxRedirectHops) {
+            std::string next_host = url_hostname(next);
+            if (!origin_host.empty() && next_host == origin_host) {
+                current = next;
+                continue;
+            }
+        }
         return result;
     }
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_fn);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
-
-    struct curl_slist* hlist = nullptr;
-    for (auto& [k, v] : headers)
-        hlist = curl_slist_append(hlist, (k + ": " + v).c_str());
-    if (hlist) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hlist);
-
-    CURLcode res = curl_easy_perform(curl);
-    if (response_code) {
-        if (res != CURLE_OK) {
-            *response_code = -1;  // transport-level failure (DNS, conn, timeout)
-        } else {
-            long code = 0;
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-            *response_code = code;
-        }
-    }
-    if (hlist) curl_slist_free_all(hlist);
-    curl_easy_cleanup(curl);
-    return result;
 }
 
 std::string HttpClient::post_json(const std::string& url,
                                   const std::map<std::string, std::string>& headers,
                                   const std::string& body,
                                   long timeout_seconds,
-                                  long* response_code) {
-    std::string result;
-
-    auto write_fn = [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-        auto* s = static_cast<std::string*>(userdata);
-        s->append(ptr, size * nmemb);
-        return size * nmemb;
-    };
+                                  long* response_code,
+                                  bool* truncated) {
+    if (truncated) *truncated = false;
+    BodySink sink;
 
     CURL* curl = fresh_handle();
     if (!curl) {
         if (response_code) *response_code = -1;
-        return result;
+        return sink.data;
     }
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_POST, 1L);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +write_fn);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &result);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, BodySink::write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+    // Credential-bearing (API keys, OAuth tokens): never follow redirects.
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_seconds);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+#endif
 
     struct curl_slist* hlist = nullptr;
     for (auto& [k, v] : headers)
@@ -536,7 +685,7 @@ std::string HttpClient::post_json(const std::string& url,
 
     CURLcode res = curl_easy_perform(curl);
     if (response_code) {
-        if (res != CURLE_OK) {
+        if (res != CURLE_OK && !sink.truncated) {
             *response_code = -1;
         } else {
             long code = 0;
@@ -544,9 +693,10 @@ std::string HttpClient::post_json(const std::string& url,
             *response_code = code;
         }
     }
+    if (truncated) *truncated = sink.truncated;
     if (hlist) curl_slist_free_all(hlist);
     curl_easy_cleanup(curl);
-    return result;
+    return sink.data;
 }
 
 } // namespace haicode

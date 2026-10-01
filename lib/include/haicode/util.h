@@ -85,6 +85,16 @@ public:
     // (transport failures only). A stream stopped early because the callback
     // returned false (OpenAI [DONE], consumer cancel) is NOT a transport
     // failure — the response code is still reported.
+    //
+    // Cancellation/liveness: cancel() aborts the transfer from any phase
+    // (including connect and silent header waits) via the progress callback.
+    // There is no total timeout; instead a connect gets 30 s and a transfer
+    // sustained below 1 byte/s for 60 s aborts (CURLE_LOW_SPEED) — long
+    // generations legitimately run for minutes. Redirects are never
+    // followed: the request carries credentials that must not be re-sent
+    // cross-host. The unparsed stream buffer is capped at 2 MB — a larger
+    // single line/stream aborts with transport_error "response line/stream
+    // exceeded size cap".
     void post_sse(const std::string& url,
                   const std::map<std::string, std::string>& headers,
                   const std::string& body,
@@ -93,19 +103,26 @@ public:
                   std::string* transport_error = nullptr);
 
     // Simple GET. timeout_seconds caps the whole transfer (default 60s).
+    // Redirects are followed SAME-HOST ONLY (<= 5 hops; hostname compared,
+    // port ignored so http->https upgrades still work). A cross-host 3xx is
+    // returned as-is. Bodies are capped at 10 MB: an over-cap transfer is
+    // aborted, the truncated prefix returned, and *truncated set true.
     // response_code (out, optional): HTTP status, or -1 on transport failure.
     std::string get(const std::string& url,
                     const std::map<std::string, std::string>& headers,
                     long timeout_seconds = 60,
-                    long* response_code = nullptr);
+                    long* response_code = nullptr,
+                    bool* truncated = nullptr);
 
     // Plain JSON POST (not SSE). Used for native endpoints like Ollama's
-    // /api/show. response_code follows the same convention as get().
+    // /api/show. Redirects are never followed (credential-bearing). Body
+    // cap and *truncated follow get(); response_code follows its convention.
     std::string post_json(const std::string& url,
                           const std::map<std::string, std::string>& headers,
                           const std::string& body,
                           long timeout_seconds = 60,
-                          long* response_code = nullptr);
+                          long* response_code = nullptr,
+                          bool* truncated = nullptr);
 
     void cancel();
 
