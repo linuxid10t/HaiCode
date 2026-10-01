@@ -320,6 +320,10 @@ HaiCodeApp::QuitRequested()
     // the app; vetoing there vetoed the quit).
     if (relay_) bus_->unsubscribe_all();
 
+    // Deletion workers reference engine_ and store_; join them before the
+    // engine shuts down so no worker outlives what it touches.
+    _JoinLifecycleWorkers();
+
     // Orderly shutdown with a hard bound: the engine's workers are now
     // cancellable (subprocess runner + HTTP abort-on-cancel), so shutdown()
     // normally joins within ~1 s. On the normal path returning true lets
@@ -531,6 +535,31 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             _RefreshProviders();
             break;
         }
+        case MSG_DELETE_SESSION_CONFIRMED: {
+            const char* sid_c = nullptr;
+            if (msg->FindString("session_id", &sid_c) != B_OK || !sid_c) break;
+            std::string sid = sid_c;
+            // Retiring, joining, and the DB delete happen off the looper so
+            // the GUI stays responsive while a running session winds down.
+            // The worker only touches engine_/store_ (thread-safe) and posts
+            // the completion message; all UI work happens in the handler.
+            std::lock_guard<std::mutex> lock(lifecycle_mu_);
+            lifecycle_workers_.emplace_back([this, sid]() {
+                std::string err;
+                bool ok = engine_ ? engine_->delete_session(sid, err) : false;
+                BMessage done(MSG_SESSION_DELETED);
+                done.AddString("session_id", sid.c_str());
+                done.AddBool("ok", ok);
+                if (!err.empty())
+                    done.AddString("error", err.c_str());
+                PostMessage(&done);
+            });
+            break;
+        }
+        case MSG_SESSION_DELETED:
+            if (main_window_)
+                main_window_->PostMessage(msg);
+            break;
         case MSG_SHOW_PERMISSIONS:
             _ShowPermissionsCenter();
             break;
@@ -823,6 +852,20 @@ HaiCodeApp::_ApplyProviders(const BMessage* msg)
 }
 
 void
+HaiCodeApp::_JoinLifecycleWorkers()
+{
+    // Swap under the mutex, join outside it: a finishing worker's last act
+    // is PostMessage (no app lock needed), so this cannot deadlock.
+    std::vector<std::thread> workers;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
+        workers.swap(lifecycle_workers_);
+    }
+    for (auto& t : workers)
+        if (t.joinable()) t.join();
+}
+
+void
 HaiCodeApp::_RefreshProviders()
 {
     auto next_providers = make_provider_registry(config_.providers);
@@ -837,6 +880,8 @@ HaiCodeApp::_RefreshProviders()
 void
 HaiCodeApp::_RecreateEngine(std::unique_ptr<haicode::ProviderRegistry> next_providers)
 {
+    // Deletion workers reference engine_; they must exit before it does.
+    _JoinLifecycleWorkers();
     if (engine_) {
         engine_->cancel_pending_asks();
         // Accepted replacement stops every run deliberately — background

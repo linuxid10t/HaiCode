@@ -115,6 +115,9 @@ target_link_libraries(test_turn_integrity haicode)
 add_executable(test_engine_correctness tests/test_engine_correctness.cpp)
 target_link_libraries(test_engine_correctness haicode)
 
+add_executable(test_session_lifecycle tests/test_session_lifecycle.cpp)
+target_link_libraries(test_session_lifecycle haicode)
+
 # Register every test executable with CTest (ctest --test-dir build).
 foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_config_permission test_step_budget test_compaction
@@ -123,6 +126,7 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_skills test_retry test_http_client test_symbols
          test_codex_auth test_permission_requests test_db_upgrade
          test_db_concurrency test_config_write test_config_trust
-         test_subprocess test_turn_integrity test_engine_correctness)
+         test_subprocess test_turn_integrity test_engine_correctness
+         test_session_lifecycle)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

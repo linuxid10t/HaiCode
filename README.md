@@ -295,6 +295,16 @@ Interrupt stops the current turn; queued prompts then start with fresh
 interruption state. Closing the engine discards queued prompts rather than
 restarting work. Each session has an independent foreground queue.
 
+### Deleting sessions
+
+Deleting a session asks for confirmation first (a running session is
+interrupted as part of deletion). The engine retires the session — refusing
+new prompts, discarding queued ones, cancelling open approvals and questions
+— waits for its work to fully stop, and only then removes the conversation,
+todos, and history. If the database delete fails, the session stays usable
+and the error is shown. Other sessions, including their permission grants,
+are untouched.
+
 ### Session autonaming
 
 New sessions are created with an empty title and given a descriptive name

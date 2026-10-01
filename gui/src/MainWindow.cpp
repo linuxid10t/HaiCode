@@ -793,22 +793,36 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_DELETE_SESSION: {
             int32 idx = -1;
             msg->FindInt32("index", &idx);
-            if (idx >= 0 && idx < (int32)session_ids_.size()) {
-                std::string sid = session_ids_[idx];
-                store_.delete_session(sid);
-                session_drafts_.erase(sid);
-                if (active_session_id_ == sid)
-                    active_session_id_.clear();
-                _RefreshSessionList();
-                if (!session_ids_.empty()) {
-                    int32 next = std::min(idx, (int32)session_ids_.size() - 1);
-                    _SwitchToSession(next);
-                } else {
-                    _NewSession();
-                }
-            }
+            if (idx < 0 || idx >= (int32)session_ids_.size())
+                break;
+            // Stable id captured synchronously — the list index may shift
+            // under asynchronous work; the id cannot.
+            std::string sid = session_ids_[idx];
+            auto si = store_.get(sid);
+            std::string title = (si && !si->title.empty()) ? si->title
+                : (sid.size() > 8 ? sid.substr(sid.size() - 8) : sid);
+            bool running = engine_ && engine_->is_running(sid);
+            BString text;
+            text << "Delete session \"" << title.c_str() << "\"?\n\n";
+            if (running)
+                text << "It is still running and will be interrupted.\n\n";
+            text << "The conversation, todos, and history are removed "
+                    "permanently.";
+            // Cancel is the safe choice (default + Escape).
+            BAlert* alert = new BAlert("Delete session", text.String(),
+                                       "Cancel", "Delete", nullptr,
+                                       B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+            alert->SetShortcut(0, B_ESCAPE);
+            if (alert->Go() != 1)
+                break;
+            BMessage go(MSG_DELETE_SESSION_CONFIRMED);
+            go.AddString("session_id", sid.c_str());
+            be_app->PostMessage(&go);
             break;
         }
+        case MSG_SESSION_DELETED:
+            _HandleSessionDeleted(msg);
+            break;
         case MSG_TEXT_DELTA:
             _HandleTextDelta(msg);
             break;
@@ -1974,11 +1988,12 @@ MainWindow::_HandlePermissionWindowClosed(BMessage* msg)
     const char* sid = nullptr;
     if (msg->FindString("session_id", &sid) != B_OK || !sid) return;
     open_perm_sessions_.erase(sid);
-    // Surface the next queued request for that session, if any.
+    // Surface the next queued request for that session, if any. The entry
+    // may be gone entirely (session deleted) — erasing end() is UB.
     auto it = pending_perm_queue_.find(sid);
     if (it != pending_perm_queue_.end() && !it->second.empty()) {
         _ShowNextPermissionRequest(sid);
-    } else {
+    } else if (it != pending_perm_queue_.end()) {
         pending_perm_queue_.erase(it);
     }
 }
@@ -2002,6 +2017,58 @@ MainWindow::PostPermissionRequest(const haicode::PermissionRequest& req)
     msg.AddInt64("created_ms",  req.created_ms);
     msg.AddString("input_json", input_json.c_str());
     PostMessage(&msg);
+}
+
+void
+MainWindow::_HandleSessionDeleted(BMessage* msg)
+{
+    const char* sid_c = nullptr;
+    bool ok = false;
+    if (msg->FindString("session_id", &sid_c) != B_OK || !sid_c) return;
+    std::string sid = sid_c;
+    msg->FindBool("ok", &ok);
+
+    if (!ok) {
+        // The DB delete failed and the engine rolled the retirement back —
+        // the session stays selected and usable. Surface, don't dismantle.
+        const char* error = nullptr;
+        msg->FindString("error", &error);
+        BString text;
+        text << "Could not delete the session:\n\n"
+             << (error ? error : "unknown error");
+        BAlert* alert = new BAlert("Delete failed", text.String(), "OK");
+        alert->Go();
+        return;
+    }
+
+    bool was_active = (active_session_id_ == sid);
+    // Where the session sat in the list, so the replacement selection
+    // matches the pre-deletion neighborhood (old delete-handler behavior).
+    int replaced_idx = 0;
+    for (size_t i = 0; i < session_ids_.size(); ++i)
+        if (session_ids_[i] == sid) { replaced_idx = (int)i; break; }
+    session_drafts_.erase(sid);
+    pending_perm_queue_.erase(sid);
+    open_perm_sessions_.erase(sid);
+    perm_pending_sessions_.erase(sid);
+    if (was_active) {
+        active_session_id_.clear();
+        queued_prompts_ = 0;
+        engine_running_ = false;
+        streaming_state_ = "idle";
+        current_tool_name_.clear();
+        build_call_id_.clear();
+        chat_view_->EndStreaming();
+        interrupt_btn_->SetEnabled(false);
+    }
+    _RefreshSessionList();
+    if (was_active) {
+        if (!session_ids_.empty())
+            _SwitchToSession(std::min(replaced_idx,
+                                      (int)session_ids_.size() - 1));
+        else
+            _NewSession();
+    }
 }
 
 void

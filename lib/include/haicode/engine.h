@@ -103,6 +103,16 @@ public:
     // mu_). Used by the quit path to warn before interrupting live runs.
     std::vector<std::string> running_sessions();
 
+    // Delete a session: mark it retiring (new runs/submissions refused,
+    // queued prompts discarded), interrupt it (asks, approvals, scoped
+    // provider streams), join its foreground and title workers OUTSIDE
+    // engine locks, then remove its rows and every in-memory map entry,
+    // including its PermissionGate rules and grants. Returns false with
+    // `error` set when the DB delete fails (the session stays usable) or the
+    // engine is shutting down. Idempotent: deleting an already-deleted
+    // session succeeds without touching anything.
+    bool delete_session(const std::string& session_id, std::string& error);
+
     // Per-session Plan/Build mode. Persisted into model_json so it survives
     // process restarts; also cached in session_modes_ for synchronous reads.
     void      set_mode(const std::string& session_id, SessionMode mode);
@@ -316,6 +326,11 @@ private:
     // only when the prompt's turn actually starts, so a mid-turn submission
     // can never land between a tool_use row and its results. Guarded by mu_.
     std::map<std::string, std::deque<std::string>> prompt_queue_;
+
+    // Sessions marked for deletion: every spawn path refuses, queued prompts
+    // are discarded, and the drain stops instead of resetting the interrupt
+    // flag for another queued turn. Guarded by mu_.
+    std::set<std::string> retiring_sessions_;
 
     // Post-turn LLM title refinement runs on tracked maintenance workers so a
     // slow request never keeps the session's foreground state busy. cancel and

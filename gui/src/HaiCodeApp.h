@@ -18,6 +18,9 @@
 #include <string>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 class HaiCodeApp : public BApplication {
 public:
@@ -51,6 +54,10 @@ private:
     PermissionsCenterWindow* perm_center_ = nullptr;
     // Authorization outcomes since launch (bounded, in-memory).
     PermissionActivityLog perm_activity_;
+    // Session-deletion workers (tracked; joined in QuitRequested and by
+    // _JoinLifecycleWorkers before any engine shutdown).
+    std::mutex lifecycle_mu_;
+    std::vector<std::thread> lifecycle_workers_;
 
     haicode::AppConfig config_;
     // The global config LAYER (values + key presence), kept separate from the
@@ -109,6 +116,12 @@ private:
     // explicit "Interrupt and apply" choice; Cancel leaves app, window, DB,
     // and config files untouched.
     bool _ConfirmDisruptiveChange(const char* what);
+
+    // Retiring/join/delete work for session deletion runs on tracked worker
+    // threads (never the looper — joins can wait on network teardown) and
+    // posts MSG_SESSION_DELETED back. The workers reference engine_, so they
+    // are joined before any engine shutdown/replacement.
+    void _JoinLifecycleWorkers();
 
     // Replace the engine after handing the window its new pointer. When supplied,
     // keep the old provider registry alive until the retiring engine is destroyed.

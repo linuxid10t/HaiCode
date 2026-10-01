@@ -90,6 +90,10 @@ private:
     void _HandleStepFailed(BMessage* msg);
     void _HandleInterrupted();
     void _HandlePermissionReq(BMessage* msg);
+    // Engine confirmed deletion completed (or failed): finish the UI half —
+    // clear drafts and queued approval state, refresh the list, select or
+    // create a replacement when the deleted session was the active one.
+    void _HandleSessionDeleted(BMessage* msg);
     void _ShowNextPermissionRequest(const std::string& session_id);
     void _HandlePermissionWindowClosed(BMessage* msg);
     void _HandlePermStatus(BMessage* msg);

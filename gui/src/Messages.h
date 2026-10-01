@@ -121,3 +121,5 @@ static const uint32 MSG_SKILL_TOGGLED   = 'SKtg';
 // Session tracking
 static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string
 static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32
+static const uint32 MSG_DELETE_SESSION_CONFIRMED = 'DLcf';  // MainWindow → be_app; "session_id" — confirmed, run the retiring worker
+static const uint32 MSG_SESSION_DELETED = 'DLok';  // lifecycle worker → be_app → MainWindow; "session_id" + "ok" bool + "error" string

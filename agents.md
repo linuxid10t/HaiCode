@@ -10,7 +10,7 @@ tools with per-action permissions, and persists every session to SQLite.
 ```bash
 cmake -B build -S .            # only needed once
 make -C build -j4              # builds lib + gui + tests
-ctest --test-dir build         # runs all 27 test binaries
+ctest --test-dir build         # runs all 28 test binaries
 
 ./build/gui/haicode-gui [project_dir]
 ```
@@ -64,6 +64,14 @@ Rules:
   not applied, until accepted. Cancel leaves app, window, DB, and config
   files unchanged. Accepted replacements interrupt every running session —
   background ones included.
+
+- **Session deletion is confirmed and retired.** `SessionEngine::delete_session`
+  marks the session retiring (spawns refused, queue discarded), interrupts
+  asks/approvals/scoped streams, joins foreground and title workers outside
+  engine locks, deletes rows only afterwards, and clears that session's gate
+  layers (`erase_session_state`). DB failure rolls retirement back and keeps
+  the session usable. The GUI runs retirement on tracked workers and ignores
+  late events for deleted sessions.
 
 - **Image retention is wire-only.** Keep raw user/screenshot images for the
   current and immediately preceding user turn; replace older images with

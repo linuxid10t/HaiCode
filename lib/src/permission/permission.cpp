@@ -183,6 +183,13 @@ void PermissionGate::revoke_temporary_allows(const std::string& session_id) {
     session_allows_.erase(session_id);
 }
 
+void PermissionGate::erase_session_state(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(*mu_);
+    session_rules_.erase(session_id);
+    session_allows_.erase(session_id);
+    exact_allows_.erase(session_id);
+}
+
 AuthorizationDecision PermissionGate::evaluate(const std::string& session_id,
     const std::string& action, const std::string& resource) const {
     auto state = snapshot(session_id);

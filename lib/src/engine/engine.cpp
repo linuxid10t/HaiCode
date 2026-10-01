@@ -934,7 +934,7 @@ void SessionEngine::submit_prompt(const std::string& session_id,
     std::thread retired;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (shutting_down_) return;
+        if (shutting_down_ || retiring_sessions_.count(session_id)) return;
         bool running = session_running_.count(session_id)
                     && session_running_[session_id];
         if (running) {
@@ -967,7 +967,7 @@ void SessionEngine::inject_message(const std::string& session_id,
     data["text"] = text;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        if (shutting_down_) return;
+        if (shutting_down_ || retiring_sessions_.count(session_id)) return;
         pending_mode_notice_.erase(session_id);
         // The approving runner may not have cleared session_running_ yet
         // (it is between the plan-proposal break and its idle flip). Queue
@@ -1001,8 +1001,9 @@ void SessionEngine::continue_session(const std::string& session_id) {
     std::thread retired;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        // No new runners during destruction (see submit_prompt).
-        if (shutting_down_) return;
+        // No new runners during destruction (see submit_prompt); a retiring
+        // session was deleted — refuse rather than resurrect it.
+        if (shutting_down_ || retiring_sessions_.count(session_id)) return;
         bool running = session_running_.count(session_id) && session_running_[session_id];
         if (!running)
             retired = spawn_runner_locked(session_id, "");
@@ -1024,7 +1025,7 @@ void SessionEngine::retry_last_turn(const std::string& session_id) {
         {
             std::lock_guard<std::mutex> lock(mu_);
             // No new runners during destruction (see submit_prompt).
-            if (shutting_down_) return;
+            if (shutting_down_ || retiring_sessions_.count(session_id)) return;
             // Refuse while the agentic loop is mid-run: deleting rows under a
             // live runner would corrupt the turn it is still writing.
             if (session_running_.count(session_id) && session_running_[session_id])
@@ -1174,6 +1175,137 @@ std::vector<std::string> SessionEngine::running_sessions() {
     return ids;
 }
 
+bool SessionEngine::delete_session(const std::string& session_id,
+                                   std::string& error) {
+    error.clear();
+
+    // 1. Mark retiring and snapshot everything that must be joined, under
+    //    mu_. From here every spawn path refuses the session and its queued
+    //    prompts are discarded, so no new foreground work can appear while
+    //    we tear it down.
+    std::thread runner;
+    std::vector<std::unique_ptr<TitleJob>> retiring_title_jobs;
+    std::vector<std::pair<std::shared_ptr<Provider>, std::string>> title_streams;
+    std::atomic<bool>* flag = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (shutting_down_) {
+            error = "engine is shutting down";
+            return false;
+        }
+        if (retiring_sessions_.count(session_id)) {
+            // A previous delete already retired (and removed) the session —
+            // repeated cleanup is a safe no-op.
+            if (!store_.get(session_id)) return true;
+            // Retired but still present: an earlier DB delete failed and the
+            // mark was rolled back; treat this call as a fresh attempt.
+        }
+        retiring_sessions_.insert(session_id);
+        prompt_queue_.erase(session_id);
+
+        auto fit = interrupt_flags_.find(session_id);
+        if (fit != interrupt_flags_.end() && fit->second) {
+            flag = fit->second;
+            flag->store(true);
+        }
+        auto th = runner_threads_.find(session_id);
+        if (th != runner_threads_.end() && th->second.joinable())
+            runner = std::move(th->second);
+        runner_threads_.erase(session_id);
+
+        std::vector<std::unique_ptr<TitleJob>> live;
+        live.reserve(title_jobs_.size());
+        for (auto& j : title_jobs_) {
+            if (j->session_id != session_id) {
+                live.push_back(std::move(j));
+                continue;
+            }
+            j->cancel->store(true);
+            title_streams.emplace_back(j->provider, j->stream_token);
+            retiring_title_jobs.push_back(std::move(j));
+        }
+        title_jobs_.swap(live);
+    }
+
+    // 2. Release waits and cancel streams outside mu_ (network teardown can
+    //    block). Mirrors interrupt() but never re-arms: a retiring session's
+    //    approvals stay denied and its asks are answered "(interrupted)".
+    std::string stream_token;
+    std::shared_ptr<Provider> active_provider;
+    std::shared_ptr<Provider> fallback_provider;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        auto tok = session_stream_tokens_.find(session_id);
+        if (tok != session_stream_tokens_.end()) stream_token = tok->second;
+        auto pit = session_providers_.find(session_id);
+        if (pit != session_providers_.end()) active_provider = pit->second;
+        auto fitb = fallback_providers_.find(session_id);
+        if (fitb != fallback_providers_.end()) fallback_provider = fitb->second;
+    }
+    if (active_provider && !stream_token.empty())
+        active_provider->cancel(stream_token);
+    if (fallback_provider && !stream_token.empty())
+        fallback_provider->cancel(stream_token);
+    for (auto& [provider, token] : title_streams)
+        if (provider) provider->cancel(token);
+    cancel_pending_asks(session_id);
+    if (perm_broker_)
+        perm_broker_->cancel_session(session_id, "session deleted");
+
+    // 3. Joins — never under an engine lock. The interrupt flag, cancelled
+    //    approvals/asks, and scoped stream cancels above guarantee the
+    //    workers reach their exit instead of parking forever.
+    if (runner.joinable()) runner.join();
+    for (auto& j : retiring_title_jobs)
+        if (j->worker.joinable()) j->worker.join();
+
+    // 4. Rows go last: the DB delete happens only after every worker that
+    //    could write them has exited. A failure surfaces through `error`,
+    //    rolls the retiring mark back, and leaves the session usable.
+    try {
+        store_.delete_session(session_id);
+    } catch (const DbError& e) {
+        error = e.what();
+        fprintf(stderr, "[engine] session delete failed: %s\n", e.what());
+        fflush(stderr);
+        std::lock_guard<std::mutex> lock(mu_);
+        retiring_sessions_.erase(session_id);
+        session_running_[session_id] = false;
+        if (flag) flag->store(false);
+        return false;
+    }
+
+    // 5. Clear every in-memory trace, then free the interrupt flag (its
+    //    worker is joined). Other sessions' entries are untouched.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        session_running_.erase(session_id);
+        session_modes_.erase(session_id);
+        session_providers_.erase(session_id);
+        fallback_providers_.erase(session_id);
+        session_stream_tokens_.erase(session_id);
+        last_compaction_step_.erase(session_id);
+        pending_mode_notice_.erase(session_id);
+        prompt_queue_.erase(session_id);
+        compaction_in_progress_.erase(session_id);
+        interrupts_in_progress_.erase(session_id);
+        if (flag) {
+            auto it = interrupt_flags_.find(session_id);
+            if (it != interrupt_flags_.end() && it->second == flag)
+                interrupt_flags_.erase(it);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(ask_mu_);
+        for (auto it = pending_ask_.begin(); it != pending_ask_.end();)
+            if (it->second.session_id == session_id) it = pending_ask_.erase(it);
+            else ++it;
+    }
+    permissions_.erase_session_state(session_id);
+    delete flag;
+    return true;
+}
+
 void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
     // Resolve the previous mode before either copy is overwritten (get_mode
     // reads the in-memory cache, else the DB value update_mode is about to
@@ -1312,6 +1444,10 @@ void SessionEngine::drain_queue_and_finish(const std::string& session_id) {
                 std::unique_lock<std::mutex> lock(mu_);
                 run_cv_.wait(lock, [&] { return interrupts_in_progress_[session_id] == 0; });
                 if (shutting_down_) { stopping = true; break; }
+                // Retiring: the session was deleted mid-drain. Do not reset
+                // the interrupt flag or re-arm approvals for another queued
+                // turn — exit and let the flag clear read false.
+                if (retiring_sessions_.count(session_id)) { stopping = true; break; }
                 auto qit = prompt_queue_.find(session_id);
                 if (qit == prompt_queue_.end() || qit->second.empty()) break;
                 row = qit->second.front();
@@ -1361,9 +1497,7 @@ void SessionEngine::drain_queue_and_finish(const std::string& session_id) {
         prompt_queue_.erase(session_id);
         session_running_[session_id] = false;
     }
-}
-
-std::thread SessionEngine::spawn_runner_locked(const std::string& session_id,
+}std::thread SessionEngine::spawn_runner_locked(const std::string& session_id,
                                         const std::string& initial_row) {
     // Caller holds mu_ and has confirmed the session is idle. The previous
     // thread is detached from its slot here and joined by the caller after
@@ -3126,7 +3260,7 @@ void SessionEngine::compact_now(const std::string& session_id) {
     // agentic_loop and trample the same SQLite rows.
     std::thread retired;
     std::unique_lock<std::mutex> lock(mu_);
-    if (shutting_down_) return;
+    if (shutting_down_ || retiring_sessions_.count(session_id)) return;
     if (session_running_.count(session_id) && session_running_[session_id]) {
         lock.unlock();
         nlohmann::json ev;

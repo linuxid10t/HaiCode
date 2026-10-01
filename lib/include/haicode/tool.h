@@ -88,6 +88,10 @@ public:
     bool revoke_pattern_allow(const std::string& session_id,
         const std::string& action, const std::string& resource);
     void revoke_temporary_allows(const std::string& session_id);
+    // Erase every layer a session owns: toggle rules, legacy pattern grants,
+    // and exact grants. Used when the session itself is deleted; other
+    // sessions' layers are untouched.
+    void erase_session_state(const std::string& session_id);
     // session_id is the id of the session the check runs for ("" = unscoped,
     // used by tests and legacy callers).
     using AskCallback = std::function<PermissionEffect(
