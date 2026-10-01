@@ -627,6 +627,8 @@ void SessionEngine::shutdown() {
     // to spawn new runners from this point on.
     std::vector<std::shared_ptr<Provider>> providers;
     std::vector<std::thread> threads;
+    std::vector<std::unique_ptr<TitleJob>> retiring_title_jobs;
+    std::vector<std::pair<std::shared_ptr<Provider>, std::string>> title_streams;
     std::vector<std::atomic<bool>*> flags;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -643,17 +645,28 @@ void SessionEngine::shutdown() {
         // The moved-from thread handles are gone; drop the map entries so
         // nothing can join them twice.
         runner_threads_.clear();
+        retiring_title_jobs = std::move(title_jobs_);
+        title_jobs_.clear();
+        for (auto& j : retiring_title_jobs) {
+            j->cancel->store(true);
+            title_streams.emplace_back(j->provider, j->stream_token);
+        }
     }
 
     // 2. Release the ask waits and cancel in-flight HTTP requests (no locks
     // held — cancel can block on network teardown). Permission waits are
     // released the same way BEFORE the join below: a worker parked on an
     // approval cannot be joined out, and shutdown must not hang on one.
+    // Title streams are cancelled through their scoped tokens too — the
+    // cancel flag alone cannot interrupt a parked HTTP transfer, and the
+    // joins in 3b would hang on it.
     cancel_pending_asks();
     if (perm_broker_)
         perm_broker_->cancel_all("engine shutdown");
     for (auto& provider : providers)
         provider->cancel();
+    for (auto& [provider, token] : title_streams)
+        if (provider) provider->cancel(token);
 
     // 3. Join the snapshotted runners. A worker blocked on a permission
     // future cannot be waited out here; callers must not destroy a running
@@ -663,9 +676,20 @@ void SessionEngine::shutdown() {
     for (auto& t : threads)
         t.join();
 
+    // 3b. Join tracked title workers (cancel flags were set under mu_ in
+    // step 1, so each job aborts promptly instead of streaming on).
+    for (auto& j : retiring_title_jobs)
+        if (j->worker.joinable()) j->worker.join();
+
     // 4. Free per-session interrupt flags (workers are gone by now).
     for (auto* flag : flags)
         delete flag;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        interrupt_flags_.clear();
+        session_providers_.clear();
+        session_stream_tokens_.clear();
+    }
 }
 
 void SessionEngine::cancel_pending_asks() {
@@ -836,80 +860,39 @@ void SessionEngine::submit_prompt(const std::string& session_id,
         if (!arr.empty())
             data["attachments"] = arr;
     }
-    try {
-        store_.append_message(session_id, "user_prompted", data.dump());
-    } catch (const DbError& e) {
-        // The persisted row is the source of truth for the turn: without it
-        // there is nothing to run, so abort before publishing Prompted.
-        publish_db_error(session_id, e.what());
-        return;
-    }
-
-    // Immediate heuristic autonaming: if the session still has no title, derive
-    // one from this first user message so the sidebar is descriptive without
-    // waiting for an LLM round-trip.
-    if (config_.autoname_sessions) {
-        try {
-            auto sess = store_.get(session_id);
-            if (sess && sess->title.empty()) {
-                std::string title = derive_heuristic_title(text);
-                if (!title.empty()) {
-                    store_.update_title(session_id, title);
-                    nlohmann::json rev;
-                    rev["session_id"] = session_id;
-                    rev["title"] = title;
-                    bus_.publish(events::EventType::SessionRenamed, rev);
-                }
-            }
-        } catch (const DbError& e) {
-            // Cosmetic write; the turn itself is already persisted.
-            publish_db_error(session_id, e.what());
-        }
-    }
-
-    // A fresh user turn rearms the compaction hysteresis so the first
-    // step of this turn is allowed to compact again if needed.
+    // Persist-or-queue, atomically under mu_. A prompt submitted while
+    // foreground work runs is queued as a fully prepared row (attachments
+    // and skill metadata were inlined above, so nothing depends on files
+    // staying unchanged); its user_prompted row is written only when the
+    // turn actually starts, so it can never land between a tool_use row and
+    // its results. The idle path claims the session and hands the row to a
+    // fresh runner.
+    bool queued = false;
+    size_t queued_count = 0;
+    std::thread retired;
     {
         std::lock_guard<std::mutex> lock(mu_);
-        last_compaction_step_[session_id] = -1;
-    }
-
-    // Publish event
-    nlohmann::json ev;
-    ev["session_id"] = session_id;
-    ev["text"] = text;
-    if (data.contains("attachments")) {
-        nlohmann::json names = nlohmann::json::array();
-        for (const auto& a : data["attachments"]) {
-            std::string p = a.value("path", "");
-            size_t slash = p.find_last_of('/');
-            names.push_back(slash == std::string::npos ? p : p.substr(slash + 1));
+        if (shutting_down_) return;
+        bool running = session_running_.count(session_id)
+                    && session_running_[session_id];
+        if (running) {
+            prompt_queue_[session_id].push_back(data.dump());
+            queued_count = prompt_queue_[session_id].size();
+            queued = true;
+        } else {
+            retired = spawn_runner_locked(session_id, data.dump());
         }
-        ev["attachments"] = names;
     }
-    bus_.publish(events::EventType::Prompted, ev);
-
-    // Start runner thread if not already running for this session. Refuse
-    // to spawn once the destructor has begun: it snapshotted the thread set
-    // under mu_, so a new runner would outlive the engine. The persisted
-    // prompt stays in the DB for the next engine instance.
-    std::lock_guard<std::mutex> lock(mu_);
-    if (shutting_down_) return;
-    bool running = session_running_.count(session_id) && session_running_[session_id];
-    if (!running) {
-        // Join the previous thread (safe — it has already exited since running==false)
-        auto th_it = runner_threads_.find(session_id);
-        if (th_it != runner_threads_.end() && th_it->second.joinable())
-            th_it->second.join();
-
-        if (interrupt_flags_.count(session_id))
-            delete interrupt_flags_[session_id];
-        interrupt_flags_[session_id] = new std::atomic<bool>(false);
-        session_running_[session_id] = true;
-
-        runner_threads_[session_id] = std::thread([this, session_id]() {
-            runner_main(session_id);
-        });
+    // Both joins and publishes happen outside mu_: the retired runner's final
+    // acts are a publish and a mu_-scoped clear, and handlers may re-enter
+    // the engine (std::mutex is not recursive).
+    if (retired.joinable()) retired.join();
+    if (queued) {
+        nlohmann::json qev;
+        qev["session_id"] = session_id;
+        qev["text"] = text;
+        qev["queued_count"] = queued_count;
+        bus_.publish(events::EventType::PromptQueued, qev);
     }
 }
 
@@ -917,14 +900,29 @@ void SessionEngine::inject_message(const std::string& session_id,
                                    const std::string& text) {
     // An explicit injection (plan approval) supersedes any queued mode
     // notice: its own text already tells the model the mode changed.
-    try {
-        {
-            std::lock_guard<std::mutex> lock(mu_);
-            pending_mode_notice_.erase(session_id);
+    nlohmann::json data;
+    data["role"] = "user";
+    data["text"] = text;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (shutting_down_) return;
+        pending_mode_notice_.erase(session_id);
+        // The approving runner may not have cleared session_running_ yet
+        // (it is between the plan-proposal break and its idle flip). Queue
+        // instead of appending: a row written now could interleave with a
+        // queued prompt's turn, and continue_session's spawn would no-op
+        // against the still-running flag — stranding the approval. The
+        // drain persists and runs it as its own turn.
+        if (!shutting_down_) {
+            bool running = session_running_.count(session_id)
+                        && session_running_[session_id];
+            if (running) {
+                prompt_queue_[session_id].push_back(data.dump());
+                return;
+            }
         }
-        nlohmann::json data;
-        data["role"] = "user";
-        data["text"] = text;
+    }
+    try {
         store_.append_message(session_id, "user_prompted", data.dump());
 
         nlohmann::json ev;
@@ -938,25 +936,20 @@ void SessionEngine::inject_message(const std::string& session_id,
 }
 
 void SessionEngine::continue_session(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(mu_);
-    // No new runners during destruction (see submit_prompt).
-    if (shutting_down_) return;
-    bool running = session_running_.count(session_id) && session_running_[session_id];
-    if (!running) {
-        auto th_it = runner_threads_.find(session_id);
-        if (th_it != runner_threads_.end() && th_it->second.joinable())
-            th_it->second.join();
-        if (interrupt_flags_.count(session_id))
-            delete interrupt_flags_[session_id];
-        interrupt_flags_[session_id] = new std::atomic<bool>(false);
-        session_running_[session_id] = true;
-        runner_threads_[session_id] = std::thread([this, session_id]() {
-            runner_main(session_id);
-        });
+    std::thread retired;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        // No new runners during destruction (see submit_prompt).
+        if (shutting_down_) return;
+        bool running = session_running_.count(session_id) && session_running_[session_id];
+        if (!running)
+            retired = spawn_runner_locked(session_id, "");
     }
+    if (retired.joinable()) retired.join();
 }
 
 void SessionEngine::retry_last_turn(const std::string& session_id) {
+    std::thread retired;
     try {
         // Read the stored history before taking mu_ (same discipline as
         // compact_now) — SQLite work does not belong inside the engine lock.
@@ -966,34 +959,27 @@ void SessionEngine::retry_last_turn(const std::string& session_id) {
                 last_prompt_seq = m.seq;
         if (last_prompt_seq < 0) return;
 
-        std::lock_guard<std::mutex> lock(mu_);
-        // No new runners during destruction (see submit_prompt).
-        if (shutting_down_) return;
-        // Refuse while the agentic loop is mid-run: deleting rows under a live
-        // runner would corrupt the turn it is still writing.
-        if (session_running_.count(session_id) && session_running_[session_id])
-            return;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            // No new runners during destruction (see submit_prompt).
+            if (shutting_down_) return;
+            // Refuse while the agentic loop is mid-run: deleting rows under a
+            // live runner would corrupt the turn it is still writing.
+            if (session_running_.count(session_id) && session_running_[session_id])
+                return;
 
-        auto th_it = runner_threads_.find(session_id);
-        if (th_it != runner_threads_.end() && th_it->second.joinable())
-            th_it->second.join();
+            store_.delete_messages_after(session_id, last_prompt_seq);
+            // Rearm the compaction hysteresis so the retried turn's first
+            // step is allowed to compact if needed (same as submit_prompt).
+            last_compaction_step_[session_id] = -1;
 
-        store_.delete_messages_after(session_id, last_prompt_seq);
-        // Rearm the compaction hysteresis so the retried turn's first step is
-        // allowed to compact if needed (same as submit_prompt).
-        last_compaction_step_[session_id] = -1;
-
-        if (interrupt_flags_.count(session_id))
-            delete interrupt_flags_[session_id];
-        interrupt_flags_[session_id] = new std::atomic<bool>(false);
-        session_running_[session_id] = true;
-        runner_threads_[session_id] = std::thread([this, session_id]() {
-            runner_main(session_id);
-        });
+            retired = spawn_runner_locked(session_id, "");
+        }
     } catch (const DbError& e) {
         // GUI-thread reads/writes; surface instead of escaping into the looper.
         publish_db_error(session_id, e.what());
     }
+    if (retired.joinable()) retired.join();
 }
 
 void SessionEngine::set_permission_broker(PermissionRequestBroker* broker) {
@@ -1032,6 +1018,7 @@ void SessionEngine::interrupt(const std::string& session_id) {
     {
         std::lock_guard<std::mutex> lock(mu_);
 
+        ++interrupts_in_progress_[session_id];
         auto it = interrupt_flags_.find(session_id);
         if (it != interrupt_flags_.end() && it->second)
             it->second->store(true);
@@ -1056,6 +1043,25 @@ void SessionEngine::interrupt(const std::string& session_id) {
         active_provider->cancel(stream_token);
     }
 
+    // Title refinement is maintenance work, not foreground state: cancel any
+    // in-flight job for THIS session (flag + scoped token) without joining.
+    std::vector<std::shared_ptr<Provider>> title_providers;
+    std::vector<std::string> title_tokens;
+    std::vector<std::shared_ptr<std::atomic<bool>>> title_cancels;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        for (auto& j : title_jobs_) {
+            if (j->session_id != session_id) continue;
+            title_providers.push_back(j->provider);
+            title_tokens.push_back(j->stream_token);
+            title_cancels.push_back(j->cancel);
+        }
+    }
+    for (size_t i = 0; i < title_providers.size(); ++i) {
+        title_cancels[i]->store(true);
+        if (title_providers[i]) title_providers[i]->cancel(title_tokens[i]);
+    }
+
     // 3. Release any ask_user wait for THIS session: mark it replied with
     // "(interrupted)" and wake asking_cv_. The worker overwrites the
     // placeholder row and the post-wait interrupt_flag check breaks the
@@ -1070,6 +1076,12 @@ void SessionEngine::interrupt(const std::string& session_id) {
     if (perm_broker_)
         perm_broker_->cancel_session(session_id, "run interrupted");
 
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        --interrupts_in_progress_[session_id];
+        run_cv_.notify_all();
+    }
+
     // 4. Publish Interrupted event so UIs know the interrupt was processed.
     nlohmann::json ev;
     ev["session_id"] = session_id;
@@ -1080,6 +1092,12 @@ bool SessionEngine::is_running(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = session_running_.find(session_id);
     return it != session_running_.end() && it->second;
+}
+
+size_t SessionEngine::queued_prompt_count(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = prompt_queue_.find(session_id);
+    return it == prompt_queue_.end() ? 0 : it->second.size();
 }
 
 std::vector<std::string> SessionEngine::running_sessions() {
@@ -1169,12 +1187,25 @@ void SessionEngine::publish_db_error(const std::string& session_id,
     bus_.publish(events::EventType::StepFailed, ev);
 }
 
-void SessionEngine::runner_main(const std::string& session_id) {
-    // A new run re-arms permission submissions for this session: an earlier
-    // interrupt blocked them until now (see interrupt()).
-    if (perm_broker_)
-        perm_broker_->allow_submissions(session_id);
+void SessionEngine::runner_main(const std::string& session_id,
+                                const std::string& initial_row) {
+    {
+        std::unique_lock<std::mutex> lock(mu_);
+        run_cv_.wait(lock, [&] { return interrupts_in_progress_[session_id] == 0; });
+        if (perm_broker_) perm_broker_->allow_submissions(session_id);
+    }
+    run_turn_barried(session_id, initial_row);
+    drain_queue_and_finish(session_id);
+}
+
+void SessionEngine::run_turn_barried(const std::string& session_id,
+                                     const std::string& prompt_row) {
     try {
+        if (!prompt_row.empty()) {
+            auto data = nlohmann::json::parse(prompt_row, nullptr, false);
+            if (data.is_discarded() || !data.is_object()) return;
+            if (!store_prompt_row(session_id, data)) return;
+        }
         agentic_loop(session_id);
     } catch (const DbError& e) {
         // Loop-thread persist failures get their own clause so the message
@@ -1200,8 +1231,156 @@ void SessionEngine::runner_main(const std::string& session_id) {
         ev["error"] = "internal error: unknown exception";
         bus_.publish(events::EventType::StepFailed, ev);
     }
-    std::lock_guard<std::mutex> g(mu_);
-    session_running_[session_id] = false;
+}
+
+void SessionEngine::drain_queue_and_finish(const std::string& session_id) {
+    bool stopping = false;
+    for (;;) {
+        // Run every currently queued prompt as its own turn. FIFO order is
+        // preserved; each gets a fresh interruption state and re-armed
+        // broker submissions so an interrupt that stopped the previous turn
+        // does not poison (or silently deny) the next one.
+        for (;;) {
+            std::string row;
+            {
+                std::unique_lock<std::mutex> lock(mu_);
+                run_cv_.wait(lock, [&] { return interrupts_in_progress_[session_id] == 0; });
+                if (shutting_down_) { stopping = true; break; }
+                auto qit = prompt_queue_.find(session_id);
+                if (qit == prompt_queue_.end() || qit->second.empty()) break;
+                row = qit->second.front();
+                qit->second.pop_front();
+                auto fit = interrupt_flags_.find(session_id);
+                if (fit != interrupt_flags_.end() && fit->second)
+                    fit->second->store(false);
+                if (perm_broker_) perm_broker_->allow_submissions(session_id);
+            }
+            run_turn_barried(session_id, row);
+        }
+        if (stopping) break;
+
+        // Announce completion, then decide atomically under mu_. The flag is
+        // still true here, so a prompt racing in during publication —
+        // including one submitted synchronously from a TurnEnded handler on
+        // THIS thread — queues instead of spawning, and the re-check below
+        // drains it. Only when the queue is empty does the session go idle,
+        // so a submission at runner exit can never be stranded.
+        nlohmann::json ev;
+        ev["session_id"] = session_id;
+        bus_.publish(events::EventType::TurnEnded, ev);
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            if (shutting_down_) {
+                // Shutdown discards queued work and must not restart it.
+                prompt_queue_.erase(session_id);
+                session_running_[session_id] = false;
+                return;
+            }
+            auto qit = prompt_queue_.find(session_id);
+            if (qit == prompt_queue_.end() || qit->second.empty()) {
+                prompt_queue_.erase(session_id);
+                // The runner's last engine-touching act: a submitter that
+                // observes idle joins this already-exiting thread in
+                // spawn_runner_locked's caller (never a self-join — this
+                // thread no longer takes engine locks afterwards).
+                session_running_[session_id] = false;
+                return;
+            }
+        }
+    }
+    if (stopping) {
+        // Shutdown discards queued work and must not restart it; the flag
+        // clears so post-shutdown observers never see the session running.
+        std::lock_guard<std::mutex> lock(mu_);
+        prompt_queue_.erase(session_id);
+        session_running_[session_id] = false;
+    }
+}
+
+std::thread SessionEngine::spawn_runner_locked(const std::string& session_id,
+                                        const std::string& initial_row) {
+    // Caller holds mu_ and has confirmed the session is idle. The previous
+    // thread is detached from its slot here and joined by the caller after
+    // mu_ is released (see header).
+    std::thread retired;
+    auto th_it = runner_threads_.find(session_id);
+    if (th_it != runner_threads_.end() && th_it->second.joinable())
+        retired = std::move(th_it->second);
+
+    if (interrupt_flags_.count(session_id))
+        delete interrupt_flags_[session_id];
+    interrupt_flags_[session_id] = new std::atomic<bool>(false);
+    session_running_[session_id] = true;
+
+    std::string row = initial_row;
+    runner_threads_[session_id] = std::thread([this, session_id, row]() {
+        runner_main(session_id, row);
+    });
+    return retired;
+}
+
+bool SessionEngine::store_prompt_row(const std::string& session_id,
+                                     const nlohmann::json& data) {
+    try {
+        store_.append_message(session_id, "user_prompted", data.dump());
+    } catch (const DbError& e) {
+        // The persisted row is the source of truth for the turn: without it
+        // there is nothing to run, so surface the failure and skip the turn.
+        publish_db_error(session_id, e.what());
+        return false;
+    }
+
+    // Immediate heuristic autonaming: if the session still has no title,
+    // derive one from this first user message so the sidebar is descriptive
+    // without waiting for an LLM round-trip.
+    if (config_.autoname_sessions) {
+        try {
+            auto sess = store_.get(session_id);
+            if (sess && sess->title.empty()) {
+                std::string title =
+                    derive_heuristic_title(data.value("text", ""));
+                if (!title.empty()) {
+                    store_.update_title(session_id, title);
+                    nlohmann::json rev;
+                    rev["session_id"] = session_id;
+                    rev["title"] = title;
+                    bus_.publish(events::EventType::SessionRenamed, rev);
+                }
+            }
+        } catch (const DbError& e) {
+            // Cosmetic write; the turn itself is already persisted.
+            publish_db_error(session_id, e.what());
+        }
+    }
+
+    // A fresh user turn rearms the compaction hysteresis so the first step
+    // of this turn is allowed to compact again if needed.
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        last_compaction_step_[session_id] = -1;
+    }
+
+    auto todos = store_.load_todos(session_id);
+    if (!todos.empty() && std::all_of(todos.begin(), todos.end(),
+            [](const Todo& t) { return t.status == "completed"; }))
+        seed_todos(session_id, {});
+
+    // Prompted is published only now that the row is actually persisted —
+    // never as a claim of persistence at enqueue time.
+    nlohmann::json ev;
+    ev["session_id"] = session_id;
+    ev["text"] = data.value("text", "");
+    if (data.contains("attachments")) {
+        nlohmann::json names = nlohmann::json::array();
+        for (const auto& a : data["attachments"]) {
+            std::string p = a.value("path", "");
+            size_t slash = p.find_last_of('/');
+            names.push_back(slash == std::string::npos ? p : p.substr(slash + 1));
+        }
+        ev["attachments"] = names;
+    }
+    bus_.publish(events::EventType::Prompted, ev);
+    return true;
 }
 
 void SessionEngine::agentic_loop(const std::string& session_id) {
@@ -2208,15 +2387,17 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // Periodic LLM title refinement. Fires on turn 1 (generates a fresh title)
     // and again every 5 turns (6, 11, 16, …) so the model can reconsider the
     // title as the conversation's focus shifts. The 1/6/11/… cadence comes
-    // from `user_count % 5 == 1`. Best-effort — failures leave the existing
-    // title in place. Skipped when autonaming or refine is disabled.
-    if (config_.autoname_sessions && config_.autoname_llm_refine) {
+    // from `user_count % 5 == 1`. Runs on its own tracked maintenance worker
+    // so a slow request never keeps the session's foreground state busy and
+    // never delays a queued prompt. Skipped when the run was interrupted.
+    if (config_.autoname_sessions && config_.autoname_llm_refine
+            && !(interrupt_flag && interrupt_flag->load())) {
         int user_count = 0;
         for (const auto& m : store_.load_messages(session_id)) {
             if (m.type == "user_prompted") ++user_count;
         }
         if (user_count >= 1 && user_count % 5 == 1) {
-            refine_title_llm(session_id, *provider, model_id, run_token);
+            spawn_title_refinement(session_id, provider, model_id);
         }
     }
 
@@ -2502,6 +2683,8 @@ bool SessionEngine::compact_history(const std::string& session_id,
 void SessionEngine::refine_title_llm(const std::string& session_id,
                                       Provider& provider,
                                       const std::string& model_id,
+                                      const std::string& baseline_title,
+                                      const std::atomic<bool>* cancel,
                                       const std::string& stream_token)
 {
     // Load the full message history so we can summarize the conversation's
@@ -2516,9 +2699,10 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     }
     if (user_texts.empty()) return;
 
-    // Reconsideration: the current persisted title (may be empty on first call).
-    auto sess = store_.get(session_id);
-    std::string current_title = sess ? sess->title : "";
+    // Baseline captured when the job spawned; the stored title is re-read at
+    // the write site and must still equal it, so a stale job can never
+    // overwrite a newer title.
+    const std::string& current_title = baseline_title;
 
     // Build a compact digest of the user's prompts so the model has the real
     // subject matter. Clamp each to keep the request small.
@@ -2561,6 +2745,7 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
 
     StreamCallbacks cbs;
     cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
+        if (cancel && cancel->load()) return;
         raw_title += delta;
     };
     cbs.on_finish = [&](FinishReason, TokenUsage, std::vector<ToolCall>) {};
@@ -2569,7 +2754,9 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
         err = error;
     };
 
+    if (cancel && cancel->load()) return;
     provider.stream(req, cbs, stream_token);
+    if (cancel && cancel->load()) return;
 
     if (failed) {
         fprintf(stderr, "[engine] title refinement failed: %s\n", err.c_str());
@@ -2593,11 +2780,80 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     // verbatim — avoids a needless DB update and sidebar flicker.
     if (!current_title.empty() && title == current_title) return;
 
-    store_.update_title(session_id, title);
+    // Stale guard: re-read the stored title and write only while it still
+    // equals the baseline captured at spawn. A newer title (heuristic rename
+    // from a newer prompt row, or a newer refinement job) must never be
+    // overwritten by this one.
+    if (cancel && cancel->load()) return;
+    if (!store_.update_title_if_current(session_id, title, baseline_title)) return;
     nlohmann::json ev;
     ev["session_id"] = session_id;
     ev["title"] = title;
     bus_.publish(events::EventType::SessionRenamed, ev);
+}
+
+void SessionEngine::sweep_title_jobs() {
+    std::vector<std::unique_ptr<TitleJob>> finished;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        std::vector<std::unique_ptr<TitleJob>> live;
+        live.reserve(title_jobs_.size());
+        for (auto& j : title_jobs_) {
+            if (j->done->load()) finished.push_back(std::move(j));
+            else live.push_back(std::move(j));
+        }
+        title_jobs_.swap(live);
+    }
+    // Joins happen outside mu_ (a finishing worker never takes mu_, but
+    // keeping the lock out of join paths is the standing discipline).
+    for (auto& j : finished)
+        if (j->worker.joinable()) j->worker.join();
+}
+
+void SessionEngine::spawn_title_refinement(
+    const std::string& session_id,
+    const std::shared_ptr<Provider>& provider,
+    const std::string& model_id)
+{
+    if (!provider) return;
+    // Baseline: the stored title at spawn time ("" on turn 1).
+    std::string baseline;
+    if (auto sess = store_.get(session_id)) baseline = sess->title;
+
+    sweep_title_jobs();
+
+    auto job = std::make_unique<TitleJob>();
+    job->session_id = session_id;
+    job->provider  = provider;
+    auto cancel = job->cancel;
+    auto done   = job->done;
+
+    // Create, register, and arm the worker under one mu_ hold: shutdown
+    // snapshots title_jobs_ under the same lock, so a job is either in the
+    // snapshot (joined there) or created after shutting_down_ flipped (never
+    // created — the check below refuses). No window for an unjoined worker.
+    std::lock_guard<std::mutex> lock(mu_);
+    if (shutting_down_) return;
+    auto flag = interrupt_flags_.find(session_id);
+    if (flag != interrupt_flags_.end() && flag->second && flag->second->load()) return;
+    job->stream_token = "t:" + session_id + ":r"
+                      + std::to_string(next_run_seq_++);
+    std::string token = job->stream_token;
+    job->worker = std::thread([this, session_id, provider, model_id, baseline,
+                               cancel, done, token]() {
+        // Maintenance barrier: a throwing refinement is logged, never
+        // propagated out of the thread.
+        try {
+            refine_title_llm(session_id, *provider, model_id, baseline,
+                             cancel.get(), token);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[engine] title refinement failed: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[engine] title refinement failed (unknown)\n");
+        }
+        done->store(true);
+    });
+    title_jobs_.push_back(std::move(job));
 }
 
 bool SessionEngine::vision_fallback_ready()
@@ -2767,10 +3023,11 @@ void SessionEngine::compact_now(const std::string& session_id) {
     // closes the race where compact_now used to release mu_ before spawning
     // a detached worker, letting a subsequent submit_prompt also start the
     // agentic_loop and trample the same SQLite rows.
-    std::lock_guard<std::mutex> lock(mu_);
-    // No new runners during destruction (see submit_prompt).
+    std::thread retired;
+    std::unique_lock<std::mutex> lock(mu_);
     if (shutting_down_) return;
     if (session_running_.count(session_id) && session_running_[session_id]) {
+        lock.unlock();
         nlohmann::json ev;
         ev["session_id"] = session_id;
         ev["error"] = "Cannot compact while the session is running.";
@@ -2778,15 +3035,16 @@ void SessionEngine::compact_now(const std::string& session_id) {
         return;
     }
 
-    // Join any previously finished runner thread before overwriting the slot
-    // (matches the pattern in submit_prompt / continue_session).
     auto th_it = runner_threads_.find(session_id);
     if (th_it != runner_threads_.end() && th_it->second.joinable())
-        th_it->second.join();
-
+        retired = std::move(th_it->second);
+    if (interrupt_flags_.count(session_id)) delete interrupt_flags_[session_id];
+    auto* flag = new std::atomic<bool>(false);
+    interrupt_flags_[session_id] = flag;
+    session_providers_[session_id] = provider;
     session_running_[session_id] = true;
     runner_threads_[session_id] = std::thread(
-        [this, session_id, provider, model_id, provider_id]() {
+        [this, session_id, provider, model_id, provider_id, flag]() {
             // Exception barrier, same contract as runner_main: a throw out
             // of compact_history must surface as CompactionEnded, never
             // escape the thread (std::terminate → abort).
@@ -2804,7 +3062,7 @@ void SessionEngine::compact_now(const std::string& session_id) {
                 // Sentinel threshold of 0 — compact_history only echoes it in the
                 // CompactionStarted payload, not in the decision logic.
                 bool committed = compact_history(session_id, *provider, model_id,
-                                                 provider_id, nullptr, 0, 0, run_token);
+                                                 provider_id, flag, 0, 0, run_token);
                 if (!committed) {
                     // Manual compactions must not fail silently: the user pressed
                     // a button. Explain why nothing changed.
@@ -2833,10 +3091,21 @@ void SessionEngine::compact_now(const std::string& session_id) {
                 ev["error"] = "internal error: unknown exception";
                 bus_.publish(events::EventType::CompactionEnded, ev);
             }
-            std::unique_lock<std::mutex> g(mu_);
-            session_stream_tokens_.erase(session_id);
-            session_running_[session_id] = false;
+            // Same completion discipline as the agentic runner: erase this
+            // worker's token, then drain any prompts queued during the
+            // compaction as their own turns. The queue check and the
+            // running-flag clear are atomic under mu_ (see
+            // drain_queue_and_finish), so a submission racing the worker's
+            // exit can never be stranded.
+            {
+                std::lock_guard<std::mutex> g(mu_);
+                session_stream_tokens_.erase(session_id);
+                session_providers_.erase(session_id);
+            }
+            drain_queue_and_finish(session_id);
         });
+    lock.unlock();
+    if (retired.joinable()) retired.join();
 }
 
 static std::string to_active_form(const std::string& content) {

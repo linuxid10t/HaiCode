@@ -212,6 +212,9 @@ public:
     std::optional<SessionInfo> get(const std::string& session_id);
     std::vector<SessionInfo> list(int limit = 50);
     void update_title(const std::string& session_id, const std::string& title);
+    bool update_title_if_current(const std::string& session_id,
+                                 const std::string& title,
+                                 const std::string& baseline);
     void update_directory(const std::string& session_id, const std::string& directory);
     void update_cost(const std::string& session_id, double cost, const TokenUsage& tokens);
     // Overwrite just the per-request input seed (tok_last_input) — used after

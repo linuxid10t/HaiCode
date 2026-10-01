@@ -7,6 +7,7 @@
 #include <string>
 #include <map>
 #include <set>
+#include <deque>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -93,6 +94,11 @@ public:
     // the running/interrupt state when switching back to a background session.
     bool is_running(const std::string& session_id);
 
+    // Prompts currently queued behind the session's foreground work (they run
+    // as their own turns when it ends). Used by the UI to restore the queued
+    // indicator on session switch.
+    size_t queued_prompt_count(const std::string& session_id);
+
     // Ids of every session whose agentic loop is currently executing (under
     // mu_). Used by the quit path to warn before interrupting live runs.
     std::vector<std::string> running_sessions();
@@ -165,12 +171,14 @@ private:
     void publish_db_error(const std::string& session_id, const std::string& what);
 
     // Entry point for the std::thread runners spawned by submit_prompt /
-    // continue_session / retry_last_turn: agentic_loop plus an exception
-    // barrier. An exception escaping the loop must never propagate out of
-    // the thread (std::terminate → abort — the crash this guards against);
-    // it is logged and surfaced to the UI as a failed step instead, and the
+    // continue_session / retry_last_turn: persist the claimed prompt row (if
+    // any), run the turn, then drain queued prompts — each as its own turn —
+    // all behind the exception barrier. An exception escaping the loop must
+    // never propagate out of the thread (std::terminate → abort); it is
+    // logged and surfaced to the UI as a failed step instead, and the
     // running flag is always cleared.
-    void runner_main(const std::string& session_id);
+    void runner_main(const std::string& session_id,
+                     const std::string& initial_row = "");
 
     // Load the provider-facing message list through the single checkpoint-
     // aware path: full stored history, then — if a completed checkpoint
@@ -193,15 +201,17 @@ private:
                          const std::string& stream_token = "");
 
     // One-shot LLM call that produces a concise (≤6-word) session title from
-    // the conversation's user prompts. On the first call (turn 1) it generates
-    // a fresh title; on later calls (turns 6, 11, …) it reconsiders — shown the
-    // current title and the prompt history, the model either repeats it verbatim
-    // (no write) or returns a revised title. Replaces the title via update_title
-    // and publishes SessionRenamed. Best-effort: any error is logged to stderr
-    // and the existing title is left in place.
+    // the conversation's user prompts. Runs on its own tracked maintenance
+    // worker (see spawn_title_refinement): baseline_title guards against a
+    // stale job overwriting a newer title (the write only lands while the
+    // stored title still equals the baseline captured at spawn), and cancel
+    // aborts promptly. Best-effort: any error is logged to stderr and the
+    // existing title is left in place.
     void refine_title_llm(const std::string& session_id,
                           Provider& provider,
                           const std::string& model_id,
+                          const std::string& baseline_title,
+                          const std::atomic<bool>* cancel,
                           const std::string& stream_token = "");
 
     // Vision fallback: true when a usable fallback (provider registered +
@@ -227,6 +237,49 @@ private:
     // Failures are skipped individually (placeholder rendering covers them).
     void backfill_attachment_descriptions(const std::string& session_id,
                                           std::vector<SessionMessage>& messages);
+
+    // Persist one prepared prompt row (shared by the immediate and queued
+    // paths): append + heuristic autonaming + compaction rearm + Prompted.
+    // Returns false when the row could not be persisted — the turn must not
+    // run, so callers skip it. Publishes Prompted only on confirmed persist.
+    bool store_prompt_row(const std::string& session_id,
+                          const nlohmann::json& data);
+
+    // Spawn the foreground runner for a claimed prompt (caller holds mu_):
+    // arm a fresh interrupt flag, mark the session running, and hand the
+    // prepared row to the worker, which persists it before the turn starts.
+    // Returns the session's previous (already finished) thread handle for the
+    // caller to join OUTSIDE mu_ — the retiring runner's final acts are a
+    // publish and a mu_-scoped flag clear, and joining under mu_ could
+    // deadlock against a publish handler that re-enters the engine.
+    std::thread spawn_runner_locked(const std::string& session_id,
+                                    const std::string& initial_row);
+
+    // agentic_loop wrapped in the runner exception barrier (DbError →
+    // "database error", anything else → "internal error" StepFailed); a
+    // throwing turn must never kill the worker before the queue drains.
+    // prompt_row, when non-empty, is persisted first via store_prompt_row —
+    // a failed persist skips the turn (nothing was recorded to run).
+    void run_turn_barried(const std::string& session_id,
+                          const std::string& prompt_row);
+
+    // Foreground drain: run each queued prompt as its own turn (fresh
+    // interruption state, re-armed broker submissions, persisted row first),
+    // then flip the session idle atomically with the queue check so a
+    // submission at runner exit can never strand. TurnEnded is published
+    // just before the flip and re-checked after — a prompt that raced in
+    // during publication is drained, not lost.
+    void drain_queue_and_finish(const std::string& session_id);
+
+    // Join finished title workers (bounded growth); never called under mu_.
+    void sweep_title_jobs();
+
+    // Spawn a tracked maintenance worker for post-turn LLM title refinement,
+    // so a slow title request never keeps the session's foreground state
+    // busy and never blocks the next queued turn.
+    void spawn_title_refinement(const std::string& session_id,
+                                const std::shared_ptr<Provider>& provider,
+                                const std::string& model_id);
 
     SessionStore& store_;
     ProviderRegistry& providers_;
@@ -259,6 +312,31 @@ private:
     // user_prompted row by submit_prompt. Only the last flip before a send
     // survives; never persisted as its own message row. Guarded by mu_.
     std::map<std::string, std::string> pending_mode_notice_;
+
+    // Prompts submitted while foreground work is running: rows are persisted
+    // only when the prompt's turn actually starts, so a mid-turn submission
+    // can never land between a tool_use row and its results. Guarded by mu_.
+    std::map<std::string, std::deque<std::string>> prompt_queue_;
+
+    // Post-turn LLM title refinement runs on tracked maintenance workers so a
+    // slow request never keeps the session's foreground state busy. cancel and
+    // done are shared_ptr atomics captured by the worker, so sweeping or
+    // clearing the vector while a worker still runs stays safe. Jobs are
+    // joined on shutdown (and, later, deletion) — never detached. mu_ guards
+    // the vector.
+    struct TitleJob {
+        std::string session_id;
+        std::thread worker;
+        std::shared_ptr<Provider> provider;
+        std::string stream_token;
+        std::shared_ptr<std::atomic<bool>> cancel =
+            std::make_unique<std::atomic<bool>>(false);
+        std::shared_ptr<std::atomic<bool>> done =
+            std::make_unique<std::atomic<bool>>(false);
+    };
+    std::vector<std::unique_ptr<TitleJob>> title_jobs_;
+    std::map<std::string, int> interrupts_in_progress_;
+    std::condition_variable run_cv_;
     std::mutex mu_;
 
     // Track pending ask_user questions per session. The agentic_loop blocks on

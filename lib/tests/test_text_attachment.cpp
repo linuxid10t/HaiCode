@@ -1,3 +1,4 @@
+#include "test_check.h"
 #include <haicode/db.h>
 #include <haicode/engine.h>
 #include <haicode/compaction.h>
@@ -148,6 +149,12 @@ static bool test_base64_roundtrip() {
 
 // ---- Engine-side persistence of absent markers -----------------------------
 
+static void wait_idle(haicode::SessionEngine& engine, const std::string& sid) {
+    for (int i = 0; i < 500 && engine.is_running(sid); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    TEST_REQUIRE(!engine.is_running(sid), "bounded attachment worker completion");
+}
+
 static const char* kDbPath = "/tmp/haicode_test_text_att.db";
 
 class FakeProvider : public haicode::Provider {
@@ -201,6 +208,7 @@ static bool test_engine_marks_absent_attachments() {
     missing_att.path = "/tmp/haicode_test_does_not_exist.png";
     atts.push_back(missing_att);
     engine.submit_prompt(sid, "here you go", atts);
+    wait_idle(engine, sid);
 
     auto msgs = store.load_messages(sid);
     CHECK(!msgs.empty(), "user_prompted row stored");
@@ -289,6 +297,7 @@ static bool test_engine_truncates_oversized_text() {
     cap_att.path = "/tmp/haicode_test_atcap.txt";
     atts.push_back(cap_att);
     engine.submit_prompt(sid, "two files", atts);
+    wait_idle(engine, sid);
 
     auto msgs = store.load_messages(sid);
     json data = json::parse(msgs[0].data_json, nullptr, false);

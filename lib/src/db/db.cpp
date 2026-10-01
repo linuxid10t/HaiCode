@@ -280,6 +280,17 @@ void SessionStore::update_title(const std::string& session_id, const std::string
         .expect_done();
 }
 
+bool SessionStore::update_title_if_current(const std::string& session_id,
+                                           const std::string& title,
+                                           const std::string& baseline) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbStmt stmt(db_.handle(),
+        "UPDATE session SET title=?, time_updated=? WHERE id=? AND title=?");
+    stmt.bind(1, title).bind(2, util::now_ms()).bind(3, session_id)
+        .bind(4, baseline).expect_done();
+    return sqlite3_changes(db_.handle()) != 0;
+}
+
 void SessionStore::update_cost(const std::string& session_id, double cost,
                                 const TokenUsage& tokens) {
     std::lock_guard<std::mutex> lock(conn_mu_);

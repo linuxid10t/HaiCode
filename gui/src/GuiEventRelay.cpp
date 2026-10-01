@@ -40,6 +40,18 @@ GuiEventRelay::is_active_session(const std::string& sid)
 void
 GuiEventRelay::attach()
 {
+    bus_.subscribe(EventType::Prompted, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+        BMessage msg(MSG_PROMPT_STARTED);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddString("text", data.value("text", "").c_str());
+        if (data.contains("attachments"))
+            for (const auto& name : data["attachments"])
+                msg.AddString("attachment", name.get<std::string>().c_str());
+        main_window_.SendMessage(&msg);
+    });
+
     // TextDelta → MSG_TEXT_DELTA
     bus_.subscribe(EventType::TextDelta, [this](const json& data) {
         std::string sid = data.value("session_id", "");
@@ -135,6 +147,28 @@ GuiEventRelay::attach()
         if (!is_active_session(sid)) return;
 
         BMessage msg(MSG_STEP_STARTED);
+        main_window_.SendMessage(&msg);
+    });
+
+    // PromptQueued → MSG_PROMPT_QUEUED: submitted while the turn runs; the
+    // engine will run it as its own turn when the current one ends.
+    bus_.subscribe(EventType::PromptQueued, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_PROMPT_QUEUED);
+        msg.AddInt32("queued_count", data.value("queued_count", 1));
+        main_window_.SendMessage(&msg);
+    });
+
+    // TurnEnded → MSG_TURN_ENDED: the foreground runner (including any
+    // queued turns) finished and the session went idle. Authoritative idle
+    // signal — StepEnded only reports per-step usage.
+    bus_.subscribe(EventType::TurnEnded, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+
+        BMessage msg(MSG_TURN_ENDED);
         main_window_.SendMessage(&msg);
     });
 

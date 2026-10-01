@@ -81,6 +81,9 @@ private:
     void _HandleToolCalled(BMessage* msg);
     void _HandleToolResult(BMessage* msg);
     void _HandleStepStarted();
+    void _HandlePromptStarted(BMessage* msg);
+    void _HandlePromptQueued(BMessage* msg);
+    void _HandleTurnEnded();
     void _HandleStepEnded(BMessage* msg);
     void _HandleStepFailed(BMessage* msg);
     void _HandleInterrupted();
@@ -262,6 +265,10 @@ private:
 
     // Engine state mirror for UI
     bool           engine_running_        = false;
+    // Prompts queued behind the active session's running turn (from
+    // MSG_PROMPT_QUEUED / engine_->queued_prompt_count on switch). They run
+    // as their own turns when the current one ends; 0 once idle.
+    int            queued_prompts_        = 0;
     bool           models_load_failed_    = false;  // last model fetch errored; dropdown click re-fetches
     bool           compacting_            = false;
     int            compaction_progress_   = -1;  // 0-99 while compacting; -1 = unknown

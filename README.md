@@ -266,6 +266,19 @@ in the status area also drops immediately to a post-compaction estimate
 (checkpoint block + retained tail) instead of waiting for the next model
 response to report fresh usage.
 
+### Prompts while running
+
+You can submit another prompt while a session is streaming, executing a tool,
+waiting for approval, or compacting. It queues for that session and runs as its
+own turn in FIFO order once the current tool exchange is complete. Attachment
+payloads and slash-skill content are captured when you submit, not when the
+queued turn eventually starts. The status strip shows the queued count without
+resetting the active turn's counters or todos.
+
+Interrupt stops the current turn; queued prompts then start with fresh
+interruption state. Closing the engine discards queued prompts rather than
+restarting work. Each session has an independent foreground queue.
+
 ### Session autonaming
 
 New sessions are created with an empty title and given a descriptive name
@@ -280,7 +293,10 @@ automatically, in two stages:
    history. On the first call it generates a fresh ≤6-word title; on later calls
    it either repeats the current title verbatim (no change) or returns a revised
    one if the session's focus has shifted. Best-effort: on any error the
-   existing title is kept.
+   existing title is kept. Refinement is separate, tracked maintenance work:
+   it never keeps the session busy or delays your next prompt. Interrupted
+   turns skip it; interrupt and shutdown cancel it. A stale result cannot
+   overwrite a newer session title.
 
 ```json
 {

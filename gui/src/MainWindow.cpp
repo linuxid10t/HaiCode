@@ -679,6 +679,8 @@ MainWindow::SetEngine(haicode::SessionEngine& engine)
     engine_ = &engine;
     engine_running_ = !active_session_id_.empty()
         && engine_->is_running(active_session_id_);
+    queued_prompts_ = active_session_id_.empty()
+        ? 0 : static_cast<int>(engine_->queued_prompt_count(active_session_id_));
     interrupt_btn_->SetEnabled(engine_running_);
     streaming_state_ = engine_running_ ? "thinking" : "idle";
     current_tool_name_.clear();
@@ -816,6 +818,15 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_STEP_STARTED:
             _HandleStepStarted();
+            break;
+        case MSG_PROMPT_STARTED:
+            _HandlePromptStarted(msg);
+            break;
+        case MSG_PROMPT_QUEUED:
+            _HandlePromptQueued(msg);
+            break;
+        case MSG_TURN_ENDED:
+            _HandleTurnEnded();
             break;
         case MSG_STEP_ENDED:
             _HandleStepEnded(msg);
@@ -1224,6 +1235,7 @@ MainWindow::_NewSession()
     interrupt_btn_->SetEnabled(false);
     _RestoreSessionTotals(active_session_id_);
     engine_running_ = false;
+    queued_prompts_ = 0;
     streaming_state_ = "idle";
     current_tool_name_.clear();
     build_call_id_.clear();
@@ -1321,6 +1333,8 @@ MainWindow::_SelectSession(int idx)
     // running state so it can be watched and interrupted immediately instead
     // of waiting for the next step boundary.
     engine_running_ = engine_ && engine_->is_running(active_session_id_);
+    queued_prompts_ = engine_
+        ? static_cast<int>(engine_->queued_prompt_count(active_session_id_)) : 0;
     interrupt_btn_->SetEnabled(engine_running_);
     streaming_state_ = engine_running_ ? "thinking" : "idle";
     current_tool_name_.clear();
@@ -1543,7 +1557,6 @@ MainWindow::_SubmitPrompt()
     input_view_->SetText("");
     input_view_->MakeFocus(true);
 
-    std::vector<std::string> names;
     std::vector<haicode::Attachment> attachments;
     for (const auto& [path, mime] : pending_attachments_) {
         haicode::Attachment a;
@@ -1551,38 +1564,11 @@ MainWindow::_SubmitPrompt()
         a.path       = path;
         a.media_type = mime;
         attachments.push_back(a);
-        BPath p(path.c_str());
-        names.push_back(p.Leaf());
     }
     pending_attachments_.clear();
     _RebuildAttachRow();
     _SaveActiveDraft();
 
-    chat_view_->AppendUserText(text, names);
-    interrupt_btn_->SetEnabled(true);
-
-    // Reset per-prompt token counters; engine_running_ flips true on first
-    // MSG_STEP_STARTED, streaming_state_ goes to "thinking" then.
-    last_prompt_input_ = 0;
-    last_prompt_output_ = 0;
-    engine_running_ = true;
-    streaming_state_ = "thinking";
-    current_tool_name_.clear();
-    _UpdateStatusStrip();
-
-    // A fully completed todo list describes the previous task; clear it once
-    // the user moves on so the panel doesn't keep showing stale items.
-    // seed_todos({}) publishes TodoUpdated, which empties the Todos tab.
-    if (engine_ && !active_session_id_.empty()) {
-        auto todos = engine_->get_todos(active_session_id_);
-        if (!todos.empty() &&
-            std::all_of(todos.begin(), todos.end(),
-                        [](const auto& t) { return t.status == "completed"; })) {
-            engine_->seed_todos(active_session_id_, {});
-        }
-    }
-
-    // Submit to engine (runs on engine thread)
     engine_->submit_prompt(active_session_id_, text, attachments);
 }
 
@@ -1796,6 +1782,62 @@ MainWindow::_HandleStepStarted()
 }
 
 void
+MainWindow::_HandlePromptStarted(BMessage* msg)
+{
+    const char* sid = nullptr;
+    if (msg->FindString("session_id", &sid) != B_OK || active_session_id_ != sid) return;
+    const char* text = "";
+    msg->FindString("text", &text);
+    std::vector<std::string> names;
+    const char* name = nullptr;
+    for (int32 i = 0; msg->FindString("attachment", i, &name) == B_OK; ++i)
+        names.emplace_back(name);
+    chat_view_->AppendUserText(text, names);
+    last_prompt_input_ = 0;
+    last_prompt_output_ = 0;
+    queued_prompts_ = static_cast<int>(engine_->queued_prompt_count(active_session_id_));
+    engine_running_ = true;
+    streaming_state_ = "thinking";
+    current_tool_name_.clear();
+    interrupt_btn_->SetEnabled(true);
+    _UpdateStatusStrip();
+}
+
+void
+MainWindow::_HandlePromptQueued(BMessage* /*msg*/)
+{
+    // A prompt arrived while the active turn was still running. The engine
+    // queued it; keep the active turn's counters, todos, and streaming state
+    // untouched — only the queued count changes.
+    queued_prompts_ = engine_
+        ? static_cast<int>(engine_->queued_prompt_count(active_session_id_)) : 0;
+    _UpdateStatusStrip();
+}
+
+void
+MainWindow::_HandleTurnEnded()
+{
+    // Authoritative idle signal from the engine's foreground runner: the
+    // final step's results are persisted. Re-query the live queue: a prompt
+    // that raced in takes over immediately (its StepStarted follows), so the
+    // strip must not flash idle between turns.
+    queued_prompts_ = (engine_ && !active_session_id_.empty())
+        ? static_cast<int>(engine_->queued_prompt_count(active_session_id_)) : 0;
+    if (queued_prompts_ > 0) {
+        engine_running_ = true;
+        streaming_state_ = "thinking";
+    } else {
+        engine_running_ = false;
+        streaming_state_ = "idle";
+        interrupt_btn_->SetEnabled(false);
+        current_tool_name_.clear();
+        build_call_id_.clear();
+        chat_view_->EndStreaming();
+    }
+    _UpdateStatusStrip();
+}
+
+void
 MainWindow::_HandleStepEnded(BMessage* msg)
 {
     chat_view_->EndStreaming();
@@ -1814,20 +1856,9 @@ MainWindow::_HandleStepEnded(BMessage* msg)
     // it on this step — that's our best estimate of current context usage.
     if (in_tok > 0) current_context_tokens_ = in_tok;
 
-    const char* finish_reason = nullptr;
-    msg->FindString("finish_reason", &finish_reason);
-    bool more = (finish_reason && std::string(finish_reason) == "tool_use");
-    interrupt_btn_->SetEnabled(more);
-
-    if (more) {
-        // Another step will follow — keep "thinking" state.
-        engine_running_ = true;
-        streaming_state_ = "thinking";
-    } else {
-        engine_running_ = false;
-        streaming_state_ = "idle";
-        current_tool_name_.clear();
-    }
+    interrupt_btn_->SetEnabled(true);
+    engine_running_ = true;
+    streaming_state_ = "thinking";
     _UpdateStatusStrip();
 }
 
@@ -1835,9 +1866,9 @@ void
 MainWindow::_HandleStepFailed(BMessage* msg)
 {
     chat_view_->EndStreaming();
-    interrupt_btn_->SetEnabled(false);
-    engine_running_ = false;
-    streaming_state_ = "idle";
+    engine_running_ = engine_ && engine_->is_running(active_session_id_);
+    interrupt_btn_->SetEnabled(engine_running_);
+    streaming_state_ = engine_running_ ? "thinking" : "idle";
     current_tool_name_.clear();
     build_call_id_.clear();
 
@@ -1851,12 +1882,10 @@ MainWindow::_HandleStepFailed(BMessage* msg)
 void
 MainWindow::_HandleInterrupted()
 {
-    // Engine confirmed the runner thread has stopped after an interrupt.
-    // Clear all running state and surface feedback to the user.
     chat_view_->EndStreaming();
-    interrupt_btn_->SetEnabled(false);
-    engine_running_ = false;
-    streaming_state_ = "idle";
+    engine_running_ = engine_ && engine_->is_running(active_session_id_);
+    interrupt_btn_->SetEnabled(engine_running_);
+    streaming_state_ = engine_running_ ? "thinking" : "idle";
     current_tool_name_.clear();
     build_call_id_.clear();
     chat_view_->AppendSystem("Interrupted.");
@@ -2765,6 +2794,8 @@ MainWindow::_UpdateStatusStrip()
         glyph = "\xf0\x9f\x92\xa1";  // 💡
         label = "thinking\xe2\x80\xa6";
     }
+    if (queued_prompts_ > 0)
+        label += " (+" + std::to_string(queued_prompts_) + " queued)";
 
     std::string s = badge + " " + glyph + " " + label;
 

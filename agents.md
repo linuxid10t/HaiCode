@@ -15,7 +15,8 @@ ctest --test-dir build         # runs all 26 test binaries
 ./build/gui/haicode-gui [project_dir]
 ```
 
-Build hook for this project: `make -C build 2>&1`.
+Build hook for this project: `make -C build -j4 2>&1`. Header changes can
+require a multi-minute rebuild; use a sufficiently long tool timeout.
 
 # Plan mode
 
@@ -44,6 +45,18 @@ Rules:
   assembly groups one batch's responses in one user message, marks failures
   with `is_error`, and repairs legacy missing/late results without rewriting
   stored history; orphan and duplicate responses never go on the wire.
+
+- **Prompts are FIFO per session.** Capture attachments/skills at submission,
+  queue while foreground work runs, persist and publish `Prompted` only when
+  each distinct turn starts. Drain after complete tool exchanges (including
+  manual compaction); clear running state atomically with the queue check.
+  Shutdown rejects new work and discards queued prompts. `PromptQueued` is
+  feedback only; `StepEnded` accounts usage, `TurnEnded` marks foreground
+  completion. Do not reset counters/todos when merely queueing.
+- **Title refinement is tracked maintenance.** Never hold foreground busy
+  state behind title requests. Use scoped cancellation, skip interrupted
+  turns, atomically reject stale baseline writes, and join outside engine/UI
+  locks on shutdown or retirement; no detached workers.
 
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of

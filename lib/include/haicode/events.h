@@ -12,6 +12,8 @@ namespace events {
 
 enum class EventType {
     Prompted,
+    PromptQueued,
+    TurnEnded,
     StepStarted,
     StepEnded,
     StepFailed,
@@ -52,6 +54,19 @@ struct BaseEvent {
 struct Prompted : BaseEvent {
     std::string user_message_id;
     std::string text;
+};
+
+// A prompt arrived while the session's turn was still running; the engine
+// queued it and will run it as its own turn when the current one ends.
+struct PromptQueued : BaseEvent {
+    std::string text;
+    int queued_count = 0;
+};
+
+// The session's foreground runner finished its final step (after all tool
+// results are persisted) and no queued prompt followed it. Usage accounting
+// arrives per step in StepEnded; this only signals worker completion.
+struct TurnEnded : BaseEvent {
 };
 
 struct StepStarted : BaseEvent {
