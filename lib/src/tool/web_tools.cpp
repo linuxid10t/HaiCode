@@ -782,7 +782,7 @@ public:
             {"type", "object"},
             {"properties", {
                 {"url",       {{"type", "string"},  {"description", "http(s) URL"}}},
-                {"max_chars", {{"type", "integer"}, {"description", "Truncate to this many chars (default 8000)"}}}
+                {"max_chars", {{"type", "integer"}, {"description", "Truncate to this many chars (default 8000, capped at 102400)"}}}
             }},
             {"required", nlohmann::json::array({"url"})}
         };
@@ -801,6 +801,9 @@ public:
 
         int max_chars = input.value("max_chars", 8000);
         if (max_chars <= 0) max_chars = 8000;
+        // Model-supplied bound is untrusted: cap at the shared 100 KB output
+        // budget so one call can't request the whole download cap of text.
+        if (max_chars > (int)MAX_OUTPUT) max_chars = (int)MAX_OUTPUT;
 
         std::map<std::string, std::string> headers = {
             {"User-Agent", kBrowserUA},
@@ -808,8 +811,9 @@ public:
         };
 
         std::string body;
+        bool download_truncated = false;
         try {
-            body = http_.get(url, headers, 15L);
+            body = http_.get(url, headers, 15L, nullptr, &download_truncated);
         } catch (const std::exception& e) {
             nlohmann::json err = {{"url", url}, {"error", std::string("fetch failed: ") + e.what()}};
             return {false, err.dump(2), "fetch failed"};
@@ -830,16 +834,16 @@ public:
             return {true, err.dump(2), ""};
         }
 
-        bool truncated = false;
+        bool text_truncated = false;
         if ((int)text.size() > max_chars) {
             text.resize(max_chars);
-            truncated = true;
+            text_truncated = true;
         }
 
         nlohmann::json out = {
             {"url",        url},
             {"text",       text},
-            {"truncated",  truncated}
+            {"truncated",  text_truncated || download_truncated}
         };
         std::string dumped = out.dump(2);
         if (dumped.size() > MAX_OUTPUT) {

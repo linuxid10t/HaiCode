@@ -51,6 +51,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <memory>
 #include <thread>
 #include <ctime>
@@ -1658,6 +1659,9 @@ MainWindow::_LoadHistory(const std::string& session_id)
     // (a stored row would ride every future request and double-count).
     auto checkpoints = store_.list_complete_checkpoints(session_id);
     size_t cp_idx = 0;
+    // Tool name by call id, remembered from tool_calls rows so a screenshot
+    // tool_result can be surfaced as a visible transcript line on replay.
+    std::map<std::string, std::string> tool_name_by_call;
     // Batch the replay: per-message rebuilds are quadratic in session length;
     // EndBatch re-renders once.
     chat_view_->BeginBatch();
@@ -1693,6 +1697,8 @@ MainWindow::_LoadHistory(const std::string& session_id)
                 if (data.contains("tool_calls") && data["tool_calls"].is_array()) {
                     for (auto& tc : data["tool_calls"]) {
                         std::string name = tc.value("name", "");
+                        std::string cid = tc.value("id", "");
+                        if (!cid.empty()) tool_name_by_call[cid] = name;
                         std::string input_json;
                         if (tc.contains("input")) {
                             try { input_json = tc["input"].dump(2); } catch (...) {}
@@ -1711,6 +1717,14 @@ MainWindow::_LoadHistory(const std::string& session_id)
                 std::string output  = data.value("output", "");
                 bool success = data.value("success", true);
                 chat_view_->AppendToolResult(output, success);
+                // Same visibility line as the live path (_HandleToolResult):
+                // collapsed tool bubbles would otherwise hide a capture.
+                std::string cid = data.value("call_id", "");
+                if (success && !cid.empty()
+                        && tool_name_by_call.count(cid)
+                        && tool_name_by_call[cid] == "screenshot")
+                    chat_view_->AppendSystem(
+                        "Screenshot captured \xe2\x80\x94 image sent to the provider.");
             }
         } catch (const std::exception&) {
             // Skip malformed messages
@@ -1794,6 +1808,10 @@ MainWindow::_HandleToolResult(BMessage* msg)
     msg->FindString("output",  &output);
     msg->FindBool("success",   &success);
     chat_view_->AppendToolResult(output ? output : "", success);
+    // Tool bubbles collapse; a captured screenshot is easy to miss entirely,
+    // so surface it as a permanent transcript line too.
+    if (success && current_tool_name_ == "screenshot")
+        chat_view_->AppendSystem("Screenshot captured \xe2\x80\x94 image sent to the provider.");
     build_call_id_.clear();
     // After a tool finishes, the engine may keep going (another tool or more
     // text). If it does, MSG_STEP_STARTED will reset state to "thinking".
