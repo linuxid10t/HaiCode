@@ -1,5 +1,6 @@
 #include <haicode/engine.h>
 #include <haicode/util.h>
+#include <haicode/subprocess.h>
 #include <haicode/default_prompt.h>
 #include <haicode/pricing.h>
 #include <haicode/model_info.h>
@@ -33,78 +34,16 @@ std::pair<int, std::string> detail::run_build_hook(const std::string& command,
                                                     const std::string& directory,
                                                     int timeout_sec,
                                                     const std::atomic<bool>* interrupted) {
-    int fds[2];
-    if (pipe(fds) != 0)
-        return {-1, std::string("pipe failed: ") + strerror(errno)};
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(fds[0]);
-        close(fds[1]);
-        return {-1, std::string("fork failed: ") + strerror(errno)};
-    }
-    if (pid == 0) {
-        setpgid(0, 0);
-        close(fds[0]);
-        dup2(fds[1], STDOUT_FILENO);
-        dup2(fds[1], STDERR_FILENO);
-        close(fds[1]);
-        if (chdir(directory.c_str()) != 0) _exit(127);
-        execl("/bin/sh", "sh", "-c", command.c_str(), (char*)nullptr);
-        _exit(127);
-    }
-    close(fds[1]);
-    setpgid(pid, pid);
-    int flags = fcntl(fds[0], F_GETFL);
-    if (flags >= 0) fcntl(fds[0], F_SETFL, flags | O_NONBLOCK);
-    constexpr size_t kLimit = 100 * 1024;
-    std::string output;
-    bool pipe_open = true;
-    bool child_done = false;
-    bool timed_out = false;
-    bool cancelled = false;
-    int status = 0;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
-    while (pipe_open || !child_done) {
-        if (!child_done) {
-            pid_t waited = waitpid(pid, &status, WNOHANG);
-            if (waited == pid || (waited < 0 && errno == ECHILD)) child_done = true;
-        }
-        if ((interrupted && interrupted->load()) || std::chrono::steady_clock::now() >= deadline) {
-            cancelled = interrupted && interrupted->load();
-            timed_out = !cancelled;
-            kill(-pid, SIGKILL);
-            if (!child_done) {
-                while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-                child_done = true;
-            }
-            break;
-        }
-        if (pipe_open) {
-            struct pollfd pfd {fds[0], POLLIN | POLLHUP, 0};
-            int ready = poll(&pfd, 1, 100);
-            if (ready > 0) {
-                char buf[4096];
-                ssize_t n = read(fds[0], buf, sizeof(buf));
-                if (n > 0 && output.size() < kLimit)
-                    output.append(buf, std::min(static_cast<size_t>(n), kLimit - output.size()));
-                else if (n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN))
-                    pipe_open = false;
-            } else if (ready < 0 && errno != EINTR) {
-                pipe_open = false;
-            }
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    }
-    close(fds[0]);
-    if (!child_done) {
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    }
-    output = util::sanitize_utf8(output);
-    if (output.size() > kLimit) output = util::truncate_utf8(output, kLimit);
-    if (timed_out) return {124, output};
-    if (cancelled) return {130, output};
-    return {WIFEXITED(status) ? WEXITSTATUS(status) : -1, output};
+    // Thin wrapper over the shared cancellable runner (lib/src/util/subprocess.cpp):
+    // preserves this function's 124/130 exit-code contract while gaining the
+    // runner's fd hygiene, output-cap draining, and prompt-return-on-orphan
+    // semantics.
+    util::SubprocessResult r = util::run_subprocess(command, directory,
+                                                    timeout_sec, interrupted);
+    if (r.timed_out) return {124, r.output};
+    if (r.interrupted) return {130, r.output};
+    if (r.truncated) return {r.exit_code, r.output + "\n[output truncated]"};
+    return {r.exit_code, r.output};
 }
 
 // Hard per-turn ceiling multiplier for the renewable step budget: even a

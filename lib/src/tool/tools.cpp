@@ -1,5 +1,6 @@
 #include <haicode/tool.h>
 #include <haicode/util.h>
+#include <haicode/subprocess.h>
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
@@ -41,22 +42,6 @@ static std::string sq(const std::string& s) {
     }
     r += "'";
     return r;
-}
-
-// Read up to MAX_OUTPUT bytes from an open pipe, stopping early when limit hit.
-static std::string read_pipe(FILE* pipe) {
-    std::array<char, 4096> buf;
-    std::string out;
-    out.reserve(4096);
-    while (fgets(buf.data(), buf.size(), pipe)) {
-        out += buf.data();
-        if (out.size() >= MAX_OUTPUT) {
-            out.resize(MAX_OUTPUT);
-            out += "\n[output truncated]";
-            break;
-        }
-    }
-    return out;
 }
 
 // Resolve `path` against `working_dir` when relative. Empty path stays empty.
@@ -247,7 +232,7 @@ public:
             {"type", "object"},
             {"properties", {
                 {"command", {{"type", "string"}, {"description", "The bash command to run. Runs from the project directory. stderr is merged into stdout. Output is capped at 100 KB."}}},
-                {"timeout", {{"type", "integer"}, {"description", "Timeout in seconds (default 30, max enforced by the `timeout` binary). Exit code 124 = timed out."}}}
+                {"timeout", {{"type", "integer"}, {"description", "Timeout in seconds (default 30, clamped to 600). Run-interruption cancels the command."}}}
             }},
             {"required", nlohmann::json::array({"command"})}
         };
@@ -262,30 +247,23 @@ public:
         if (command.empty())
             return {false, "", missing_field("bash", "command", input)};
 
+        // Clamp the model-supplied timeout: sane floor, hard 600 s ceiling.
         int timeout_sec = input.value("timeout", 30);
         if (timeout_sec <= 0) timeout_sec = 30;
+        if (timeout_sec > 600) timeout_sec = 600;
 
-        // Build inner command: cd to working_dir (single-quoted), then run user command
-        std::string inner;
-        if (!ctx.working_dir.empty())
-            inner = "cd " + sq(ctx.working_dir) + " && ";
-        inner += "{ " + command + "; }";
+        util::SubprocessResult r = util::run_subprocess(
+            "{ " + command + "; }", ctx.working_dir, timeout_sec, ctx.interrupt);
 
-        // Wrap with timeout, run via sh, merge stderr
-        std::string full_cmd = "timeout " + std::to_string(timeout_sec)
-                             + " sh -c " + sq(inner) + " 2>&1";
-
-        FILE* pipe = popen(full_cmd.c_str(), "r");
-        if (!pipe) return {false, "", std::string("Failed to execute command: ") + strerror(errno)};
-
-        std::string output = read_pipe(pipe);
-        int status = pclose(pipe);
-        int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-
-        if (rc == 124)
-            return {false, output, "Command timed out after " + std::to_string(timeout_sec) + "s"};
-
-        return {rc == 0, output, rc != 0 ? "Exit code: " + std::to_string(rc) : ""};
+        if (r.interrupted)
+            return {false, r.output, "Command interrupted"};
+        if (r.timed_out)
+            return {false, r.output,
+                    "Command timed out after " + std::to_string(timeout_sec) + "s"};
+        if (r.truncated)
+            r.output += "\n[output truncated]";
+        return {r.exit_code == 0, r.output,
+                r.exit_code != 0 ? "Exit code: " + std::to_string(r.exit_code) : ""};
     }
 };
 
@@ -611,21 +589,16 @@ public:
         if (!include.empty()) cmd += " --include=" + sq(include);
         cmd += " -e " + sq(pattern);
         cmd += " " + sq(path);
-        cmd += " 2>&1";
 
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe)
-            return {false, "", std::string("Failed to run grep: ") + strerror(errno)};
-
-        std::string output = read_pipe(pipe);
-        int status = pclose(pipe);
-        int rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        util::SubprocessResult r = util::run_subprocess(cmd, ".", 60, ctx.interrupt);
 
         // grep exit codes: 0 = found, 1 = not found, 2 = error
-        if (rc == 2)
-            return {false, output, "grep error"};
+        if (r.exit_code == 2 || r.timed_out || r.interrupted)
+            return {false, r.output, r.timed_out ? "grep timed out"
+                        : r.interrupted ? "grep interrupted" : "grep error"};
+        if (r.truncated) r.output += "\n[output truncated]";
 
-        return {true, output.empty() ? "(no matches)" : output, ""};
+        return {true, r.output.empty() ? "(no matches)" : r.output, ""};
     }
 };
 
@@ -1341,19 +1314,16 @@ public:
             }
         }
 
-        std::string cmd = "diff -u " + sq(path) + " " + sq(tmp) + " 2>&1";
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe) {
-            ::unlink(tmp.c_str());
-            return {false, "", "popen failed: " + std::string(strerror(errno))};
-        }
-        std::string output = read_pipe(pipe);
-        int rc = pclose(pipe);
+        std::string cmd = "diff -u " + sq(path) + " " + sq(tmp);
+        util::SubprocessResult r = util::run_subprocess(cmd, ".", 30, ctx.interrupt);
         ::unlink(tmp.c_str());
 
-        int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
-        if (exit_code == 2)
-            return {false, "", "diff error: " + output};
+        if (r.timed_out || r.interrupted)
+            return {false, "", r.timed_out ? "diff timed out" : "diff interrupted"};
+        if (r.exit_code == 2)
+            return {false, "", "diff error: " + r.output};
+        std::string output = r.output;
+        if (r.truncated) output += "\n[output truncated]";
 
         return {true, output.empty() ? "(no differences)" : output, ""};
     }
@@ -1416,14 +1386,21 @@ public:
                 if (a.is_string()) cmd += " " + sq(a.get<std::string>());
             }
         }
-        cmd += " 2>&1";
 
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe)
-            return {false, "", "popen failed: " + std::string(strerror(errno))};
-        std::string output = read_pipe(pipe);
-        int rc = pclose(pipe);
-        int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+        // GIT_TERMINAL_PROMPT=0: a credential prompt (push/pull/fetch over
+        // https) must fail fast instead of hanging the 300 s timeout on a
+        // terminal that will never answer.
+        util::SubprocessResult r = util::run_subprocess(
+            cmd, ".", 300, ctx.interrupt, {{"GIT_TERMINAL_PROMPT", "0"}});
+        int exit_code = r.exit_code;
+        std::string output = r.output;
+        if (r.timed_out) {
+            return {false, output, "git timed out after 300s"};
+        }
+        if (r.interrupted) {
+            return {false, output, "git interrupted"};
+        }
+        if (r.truncated) output += "\n[output truncated]";
 
         if (exit_code != 0 && output.empty())
             return {false, "", "git exited with code " + std::to_string(exit_code)};
@@ -1487,17 +1464,16 @@ public:
         if (input.contains("size") && input["size"].is_string())
             cmd += " -size " + sq(input["size"].get<std::string>());
 
-        cmd += " 2>&1";
+        util::SubprocessResult r = util::run_subprocess(cmd, ".", 60, ctx.interrupt);
 
-        FILE* pipe = popen(cmd.c_str(), "r");
-        if (!pipe)
-            return {false, "", "popen failed: " + std::string(strerror(errno))};
-        std::string output = read_pipe(pipe);
-        int rc = pclose(pipe);
-        int exit_code = WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
-
-        if (exit_code != 0)
-            return {false, "", "find error: " + output};
+        if (r.timed_out || r.interrupted || r.exit_code != 0) {
+            return {false, "",
+                    r.timed_out ? "find timed out"
+                    : r.interrupted ? "find interrupted"
+                    : "find error: " + r.output};
+        }
+        std::string output = r.output;
+        if (r.truncated) output += "\n[output truncated]";
 
         return {true, output.empty() ? "(no matches)" : output, ""};
     }
@@ -1952,18 +1928,19 @@ public:
         return action;
     }
 
-    ToolResult execute(const nlohmann::json& input, const ToolContext&) override {
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         std::string action = input.value("action", "");
         if (action.empty())
             return {false, "", missing_field("process", "action", input)};
 
         if (action == "list") {
             std::string filter = input.value("filter", "");
-            FILE* pipe = popen("ps 2>&1", "r");
-            if (!pipe)
-                return {false, "", "popen failed: " + std::string(strerror(errno))};
-            std::string raw = read_pipe(pipe);
-            pclose(pipe);
+            util::SubprocessResult r = util::run_subprocess("ps", ".", 30,
+                                                            ctx.interrupt);
+            std::string raw = r.output;
+            if (r.truncated) raw += "\n[output truncated]";
+            if (r.timed_out || r.interrupted)
+                return {false, raw, r.timed_out ? "ps timed out" : "ps interrupted"};
 
             if (filter.empty())
                 return {true, raw, ""};
@@ -1998,11 +1975,13 @@ public:
             if (!input.contains("port") || !input["port"].is_number_integer())
                 return {false, "", "process check_port: \"port\" (integer) is required"};
             int port = input["port"].get<int>();
-            FILE* pipe = popen("netstat -n 2>&1", "r");
-            if (!pipe)
-                return {false, "", "popen failed: " + std::string(strerror(errno))};
-            std::string raw = read_pipe(pipe);
-            pclose(pipe);
+            util::SubprocessResult r = util::run_subprocess("netstat -n", ".", 30,
+                                                            ctx.interrupt);
+            std::string raw = r.output;
+            if (r.truncated) raw += "\n[output truncated]";
+            if (r.timed_out || r.interrupted)
+                return {false, raw,
+                        r.timed_out ? "netstat timed out" : "netstat interrupted"};
 
             std::string port_str = ":" + std::to_string(port);
             std::string out;
@@ -2062,7 +2041,7 @@ public:
     std::string resource(const nlohmann::json&, const ToolContext&) const override {
         return "screen";
     }
-    ToolResult execute(const nlohmann::json& input, const ToolContext&) override {
+    ToolResult execute(const nlohmann::json& input, const ToolContext& ctx) override {
         ToolResult r;
         BPath temp_path;
         std::string tmp = "/tmp";
@@ -2078,16 +2057,15 @@ public:
         if (delay < 0) delay = 0;
         if (delay > 10) delay = 10;
 
-        std::string cmd = "timeout 15 screenshot --silent --format=png";
+        std::string cmd = "screenshot --silent --format=png";
         if (window) cmd += " --window";
         if (delay > 0) cmd += " --delay=" + std::to_string(delay);
-        cmd += " " + sq(path) + " 2>&1";
+        cmd += " " + sq(path);
 
-        std::string stderr_text;
-        if (FILE* pipe = popen(cmd.c_str(), "r")) {
-            stderr_text = read_pipe(pipe);
-            pclose(pipe);
-        }
+        util::SubprocessResult spr = util::run_subprocess(cmd, ".", 15,
+                                                          ctx.interrupt);
+        std::string stderr_text = spr.output;
+        if (spr.truncated) stderr_text += "\n[output truncated]";
 
         // The system CLI returns nonzero exit codes even on success (B_OK
         // errors reported through its own error path), so validate the output

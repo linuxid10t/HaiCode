@@ -794,8 +794,12 @@ static bool test_build_hook_inherited_pipe_timeout() {
     if (pid == 0) {
         auto begin = std::chrono::steady_clock::now();
         auto [code, output] = haicode::detail::run_build_hook(
-            "sh -c 'echo STARTED; sleep 30' & exit 0", "/tmp", 1, nullptr);
-        bool ok = code == 124 && output.find("STARTED") != std::string::npos
+            "sh -c 'echo STARTED; sleep 30' & exit 0", "/tmp", 30, nullptr);
+        // Orphan semantics: the direct child (the shell) exits 0 at once; the
+        // backgrounded sleeper keeping the pipe open must NOT hold the hook
+        // for the 30 s timeout — the runner returns after a bounded grace
+        // drain with the child's real exit code and any early output.
+        bool ok = code == 0 && output.find("STARTED") != std::string::npos
             && std::chrono::steady_clock::now() - begin < std::chrono::seconds(5);
         _exit(ok ? 0 : 1);
     }
@@ -803,15 +807,15 @@ static bool test_build_hook_inherited_pipe_timeout() {
     for (int i = 0; i < 60; ++i) {
         if (waitpid(pid, &status, WNOHANG) == pid) {
             CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
-                  "hook must time out and close inherited pipe promptly");
-            std::cout << "[OK] build hook inherited-pipe timeout\n";
+                  "hook must return promptly despite the inherited pipe");
+            std::cout << "[OK] build hook orphan-pipe prompt return\n";
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     kill(pid, SIGKILL);
     waitpid(pid, &status, 0);
-    CHECK(false, "build hook timeout exceeded test watchdog");
+    CHECK(false, "build hook return exceeded test watchdog");
     return false;
 }
 
