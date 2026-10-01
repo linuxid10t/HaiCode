@@ -266,6 +266,20 @@ in the status area also drops immediately to a post-compaction estimate
 (checkpoint block + retained tail) instead of waiting for the next model
 response to report fresh usage.
 
+### Image handling
+
+Image attachments are limited to **4 MiB** each, including programmatically
+supplied payloads. Unavailable or oversized images are recorded explicitly
+instead of silently disappearing. Raw user images and screenshots are sent
+only for the current and immediately preceding user turn; older images become
+text placeholders or available descriptions. Persisted image bytes remain
+unchanged.
+
+Text-only models receive descriptions from your configured vision fallback,
+or placeholders when no description is available—even after compaction.
+Failed description attempts are remembered across steps and reopening.
+Interrupt cancels fallback requests too; cancelled attempts can be retried.
+
 ### Prompts while running
 
 You can submit another prompt while a session is streaming, executing a tool,

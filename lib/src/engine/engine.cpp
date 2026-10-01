@@ -294,6 +294,18 @@ static bool att_is_text(const nlohmann::json& att) {
 // submit boundary so programmatic callers can't flood context either. Same
 // marker phrasing as compaction's tool-result truncation.
 static constexpr size_t MAX_TEXT_ATTACHMENT_BYTES = 256 * 1024;
+static constexpr size_t MAX_IMAGE_ATTACHMENT_BYTES = 4 * 1024 * 1024;
+
+static bool image_payload_oversize(const std::string& b64) {
+    if (b64.size() > ((MAX_IMAGE_ATTACHMENT_BYTES + 2) / 3) * 4) return true;
+    return util::base64_decode(b64).size() > MAX_IMAGE_ATTACHMENT_BYTES;
+}
+
+static nlohmann::json oversize_attachment_row(const Attachment& att) {
+    auto row = absent_attachment_row(att);
+    row["unavailable_reason"] = "image exceeds 4 MiB limit";
+    return row;
+}
 
 static std::string clamp_text_attachment(std::string raw) {
     if (raw.size() <= MAX_TEXT_ATTACHMENT_BYTES) return raw;
@@ -311,6 +323,25 @@ static std::string render_text_attachment(const nlohmann::json& att) {
     std::string path = att.value("path", "");
     return "\n\nAttached file: " + (path.empty() ? "unnamed" : path)
          + "\n```\n" + body + "\n```\n";
+}
+
+static size_t recent_image_boundary(const std::vector<SessionMessage>& messages) {
+    size_t boundary = 0;
+    int prompts = 0;
+    for (size_t i = messages.size(); i > 0; --i) {
+        if (messages[i - 1].type != "user_prompted") continue;
+        boundary = i - 1;
+        if (++prompts == 2) break;
+    }
+    return boundary;
+}
+
+static void log_row_parse_failure(const SessionMessage& msg, const std::exception& error) {
+    const auto* json_error = dynamic_cast<const nlohmann::json::exception*>(&error);
+    fprintf(stderr, "[engine] row parse failed session=%s message=%s seq=%d: %s (code=%d)\n",
+        msg.session_id.c_str(), msg.id.c_str(), msg.seq,
+        json_error ? "invalid JSON or field type" : "row assembly exception",
+        json_error ? json_error->id : 0);
 }
 
 std::vector<nlohmann::json> ContextBuilder::assemble_messages(
@@ -332,6 +363,7 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
             last_user_prompt_idx = i;
     }
 
+    const size_t image_boundary = recent_image_boundary(msgs);
     std::vector<nlohmann::json> result;
 
     for (size_t i = 0; i < msgs.size(); ++i) {
@@ -403,11 +435,13 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                         if (att.value("absent", false)) {
                             content.push_back({{"type", "text"},
                                 {"text", "[attachment unavailable: "
-                                      + att.value("path", "") + "]"}});
+                                      + att.value("path", "")
+                                      + (att.contains("unavailable_reason")
+                                          ? ": " + att.value("unavailable_reason", "") : "") + "]"}});
                         } else if (att_is_text(att)) {
                             content.push_back({{"type", "text"},
                                 {"text", render_text_attachment(att)}});
-                        } else if (model_accepts_images) {
+                        } else if (model_accepts_images && i >= image_boundary) {
                             content.push_back({
                                 {"type", "image"},
                                 {"source", {
@@ -532,7 +566,7 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                     if (!output.empty())
                         blocks.push_back({{"type", "text"}, {"text", output}});
                     for (const auto& att : data["attachments"]) {
-                        if (model_accepts_images) {
+                        if (model_accepts_images && i >= image_boundary) {
                             blocks.push_back({
                                 {"type", "image"},
                                 {"source", {
@@ -553,7 +587,9 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 m["content"] = nlohmann::json::array({content});
                 result.push_back(m);
             }
-        } catch (...) {}
+        } catch (const std::exception& error) {
+            log_row_parse_failure(msg, error);
+        }
     }
 
     std::map<size_t, std::map<std::string, nlohmann::json>> responses;
@@ -638,6 +674,8 @@ void SessionEngine::shutdown() {
             if (flag) flag->store(true);
         for (auto& [id, provider] : session_providers_)
             providers.push_back(provider);
+        for (auto& [id, provider] : fallback_providers_)
+            providers.push_back(provider);
         for (auto& [id, t] : runner_threads_)
             if (t.joinable()) threads.push_back(std::move(t));
         for (auto& [id, flag] : interrupt_flags_)
@@ -688,6 +726,7 @@ void SessionEngine::shutdown() {
         std::lock_guard<std::mutex> lock(mu_);
         interrupt_flags_.clear();
         session_providers_.clear();
+        fallback_providers_.clear();
         session_stream_tokens_.clear();
     }
 }
@@ -720,7 +759,16 @@ std::string SessionEngine::create_session(const std::string& project_dir,
     if (eff_provider.empty()) {
         if (providers_.get("anthropic"))      eff_provider = "anthropic";
         else if (providers_.get("openai"))    eff_provider = "openai";
-        else                                   eff_provider = "anthropic";
+        else {
+            auto ids = providers_.available_ids();
+            if (!ids.empty()) eff_provider = ids.front();
+        }
+    }
+
+    if (eff_provider.empty()) {
+        nlohmann::json ev = {{"session_id", ""}, {"error", "No provider available: none registered"}};
+        bus_.publish(events::EventType::StepFailed, ev);
+        return "";
     }
 
     nlohmann::json model_json;
@@ -825,6 +873,10 @@ void SessionEngine::submit_prompt(const std::string& session_id,
             // programmatic caller can't flood context either.
             const bool is_text = att.kind == "text";
             std::string b64 = att.data_b64;
+            if (!is_text && !b64.empty() && image_payload_oversize(b64)) {
+                arr.push_back(oversize_attachment_row(att));
+                continue;
+            }
             if (!b64.empty() && is_text) {
                 b64 = util::base64_encode(
                     clamp_text_attachment(util::base64_decode(b64)));
@@ -837,10 +889,20 @@ void SessionEngine::submit_prompt(const std::string& session_id,
                     arr.push_back(absent_attachment_row(att));
                     continue;
                 }
-                std::ostringstream ss;
-                ss << f.rdbuf();
-                std::string raw = ss.str();
-                if (is_text) raw = clamp_text_attachment(raw);
+                std::string raw;
+                if (is_text) {
+                    std::ostringstream ss;
+                    ss << f.rdbuf();
+                    raw = clamp_text_attachment(ss.str());
+                } else {
+                    raw.resize(MAX_IMAGE_ATTACHMENT_BYTES + 1);
+                    f.read(raw.data(), raw.size());
+                    raw.resize(static_cast<size_t>(f.gcount()));
+                    if (raw.size() > MAX_IMAGE_ATTACHMENT_BYTES) {
+                        arr.push_back(oversize_attachment_row(att));
+                        continue;
+                    }
+                }
                 b64 = util::base64_encode(raw);
             }
             if (b64.empty()) {
@@ -1014,6 +1076,7 @@ void SessionEngine::interrupt(const std::string& session_id) {
     // stream: two sessions can share one Provider object, and an unscoped
     // cancel() aborted the other session's transfer too.
     std::shared_ptr<Provider> active_provider;
+    std::shared_ptr<Provider> fallback_provider;
     std::string stream_token;
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -1030,6 +1093,8 @@ void SessionEngine::interrupt(const std::string& session_id) {
         auto prov_it = session_providers_.find(session_id);
         if (prov_it != session_providers_.end())
             active_provider = prov_it->second;
+        auto fallback = fallback_providers_.find(session_id);
+        if (fallback != fallback_providers_.end()) fallback_provider = fallback->second;
     }
 
     // 2. Cancel THIS session's in-flight stream — the provider aborts the
@@ -1039,9 +1104,10 @@ void SessionEngine::interrupt(const std::string& session_id) {
     // would deadlock the join). The thread will be joined lazily on the next
     // submit_prompt()/continue_session() call, and the Interrupted event
     // below gives the UI immediate feedback.
-    if (active_provider) {
+    if (active_provider && !stream_token.empty())
         active_provider->cancel(stream_token);
-    }
+    if (fallback_provider && !stream_token.empty())
+        fallback_provider->cancel(stream_token);
 
     // Title refinement is maintenance work, not foreground state: cancel any
     // in-flight job for THIS session (flag + scoped token) without joining.
@@ -1435,14 +1501,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // shared provider object. The token lives until the loop exits; the
     // mid-loop provider re-fetch keeps it (only the object changes).
     std::string run_token;
+    std::atomic<bool>* interrupt_flag = nullptr;
     {
         std::lock_guard<std::mutex> lock(mu_);
+        interrupt_flag = interrupt_flags_.at(session_id);
         session_providers_[session_id] = provider;
         run_token = "s:" + session_id + ":r" + std::to_string(next_run_seq_++);
         session_stream_tokens_[session_id] = run_token;
     }
 
-    auto* interrupt_flag = interrupt_flags_[session_id];
     std::string prompt_tmpl = kDefaultSystemPrompt;
     constexpr int DEFAULT_MAX_STEPS = 50;
     int max_steps = DEFAULT_MAX_STEPS;
@@ -1714,7 +1781,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         bool primary_supports_vision =
             model_supports_vision(model_id, config_.model_vision);
         if (!primary_supports_vision)
-            backfill_attachment_descriptions(session_id, messages);
+            backfill_attachment_descriptions(session_id, messages, interrupt_flag, run_token);
+        if (interrupt_flag && interrupt_flag->load()) break;
 
         ContextBuilder builder;
         auto tool_defs = tools_.definitions();
@@ -1780,25 +1848,31 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                         }
                         messages = load_context_messages(session_id);
                         req = builder.build(messages, system, system_dynamic,
-                                            tool_defs, model_id, provider_id);
+                                            tool_defs, model_id, provider_id,
+                                            primary_supports_vision);
                     }
                 }
             }
         }
 
+        if (interrupt_flag && interrupt_flag->load()) break;
+
         // Apply per-session inference params (max_tokens / temperature / top_p /
         // reasoning_effort) stored in model_json. Provider defaults win when
         // not present.
-        if (mj_now.is_object()) {
-            if (int v = mj_now.value("max_tokens", 0); v > 0)
-                req.max_tokens = v;
-            if (mj_now.contains("temperature"))
-                req.temperature = mj_now.value("temperature", 0.0);
-            if (mj_now.contains("top_p"))
-                req.top_p = mj_now.value("top_p", 0.0);
-            if (mj_now.contains("reasoning_effort"))
-                req.reasoning_effort = mj_now.value("reasoning_effort", "");
-        }
+        auto apply_inference = [&] {
+            if (mj_now.is_object()) {
+                if (int v = mj_now.value("max_tokens", 0); v > 0)
+                    req.max_tokens = v;
+                if (mj_now.contains("temperature"))
+                    req.temperature = mj_now.value("temperature", 0.0);
+                if (mj_now.contains("top_p"))
+                    req.top_p = mj_now.value("top_p", 0.0);
+                if (mj_now.contains("reasoning_effort"))
+                    req.reasoning_effort = mj_now.value("reasoning_effort", "");
+            }
+        };
+        apply_inference();
 
         std::string assistant_msg_id = haicode::util::make_id("amsg");
 
@@ -1927,7 +2001,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                 interrupt_flag, prev_total_input, 0, run_token)) {
                 messages = load_context_messages(session_id);
                 req = builder.build(messages, system, system_dynamic,
-                                    tool_defs, model_id, provider_id);
+                                    tool_defs, model_id, provider_id,
+                                    primary_supports_vision);
+                apply_inference();
                 step_failed = false;
                 step_error.clear();
                 {
@@ -2883,6 +2959,7 @@ bool SessionEngine::vision_fallback_ready()
 std::string SessionEngine::describe_image(Provider& provider,
                                           const std::string& model_id,
                                           const nlohmann::json& att,
+                                          const std::atomic<bool>* interrupted,
                                           const std::string& stream_token)
 {
     nlohmann::json content = nlohmann::json::array();
@@ -2915,7 +2992,7 @@ std::string SessionEngine::describe_image(Provider& provider,
 
     StreamCallbacks cbs;
     cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
-        text += delta;
+        if (!(interrupted && interrupted->load())) text += delta;
     };
     cbs.on_finish = [&](FinishReason, TokenUsage, std::vector<ToolCall>) {};
     cbs.on_error = [&](const std::string& error) {
@@ -2923,7 +3000,9 @@ std::string SessionEngine::describe_image(Provider& provider,
         err = error;
     };
 
+    if (interrupted && interrupted->load()) return "";
     provider.stream(req, cbs, stream_token);
+    if (interrupted && interrupted->load()) return "";
 
     if (failed) {
         fprintf(stderr, "[engine] vision fallback describe failed: %s\n",
@@ -2935,7 +3014,9 @@ std::string SessionEngine::describe_image(Provider& provider,
 
 void SessionEngine::backfill_attachment_descriptions(
     const std::string& session_id,
-    std::vector<SessionMessage>& messages)
+    std::vector<SessionMessage>& messages,
+    const std::atomic<bool>* interrupted,
+    const std::string& stream_token)
 {
     if (!vision_fallback_ready()) return;
 
@@ -2943,38 +3024,58 @@ void SessionEngine::backfill_attachment_descriptions(
     if (pid.empty()) pid = config_.provider;
     auto provider = providers_.get(pid);
     if (!provider) return;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (shutting_down_ || (interrupted && interrupted->load())) return;
+        fallback_providers_[session_id] = provider;
+    }
+    auto unregister = [&] {
+        std::lock_guard<std::mutex> lock(mu_);
+        fallback_providers_.erase(session_id);
+    };
+    try {
+        const size_t boundary = recent_image_boundary(messages);
+        for (size_t i = boundary; i < messages.size(); ++i) {
+            if (interrupted && interrupted->load()) break;
+            auto& msg = messages[i];
+            if (msg.type != "user_prompted" && msg.type != "tool_result") continue;
+            auto data = nlohmann::json::parse(msg.data_json, nullptr, false);
+            if (!data.is_object() || !data.contains("attachments")
+                    || !data["attachments"].is_array()) continue;
 
-    for (auto& msg : messages) {
-        if (msg.type != "user_prompted" && msg.type != "tool_result") continue;
-        auto data = nlohmann::json::parse(msg.data_json, nullptr, false);
-        if (!data.is_object() || !data.contains("attachments")
-                || !data["attachments"].is_array())
-            continue;
-
-        bool changed = false;
-        for (auto& att : data["attachments"]) {
-            if (!att.is_object()) continue;
-            if (att.value("absent", false)) continue;  // nothing to describe
-            if (att_is_text(att)) continue;  // no vision needed
-            if (att.contains("description")) continue;  // describe once
-            std::string desc = describe_image(*provider,
-                                              config_.vision_fallback_model,
-                                              att);
-            if (!desc.empty()) {
-                // Clamp persisted descriptions so one verbose image can't
-                // bloat every future request.
-                if (desc.size() > 4096)
-                    desc = util::truncate_utf8(desc, 4096);
-                att["description"] = desc;
+            bool changed = false;
+            for (auto& att : data["attachments"]) {
+                if (interrupted && interrupted->load()) break;
+                if (!att.is_object()) continue;
+                if (att.value("absent", false) || att_is_text(att)) continue;
+                if (att.contains("description") || att.contains("description_status")) continue;
+                std::string desc;
+                try {
+                    desc = describe_image(*provider, config_.vision_fallback_model,
+                        att, interrupted, stream_token);
+                } catch (const std::exception&) {
+                    fprintf(stderr, "[engine] vision fallback describe threw\n");
+                }
+                if (interrupted && interrupted->load()) break;
+                if (!desc.empty()) {
+                    att["description"] = util::truncate_utf8(util::sanitize_utf8(desc), 4096);
+                    att["description_status"] = "complete";
+                } else {
+                    att["description_status"] = "failed";
+                }
                 changed = true;
             }
+            if (changed) {
+                std::string updated = data.dump();
+                store_.update_message_data(session_id, msg.seq, updated);
+                msg.data_json = std::move(updated);
+            }
         }
-        if (changed) {
-            std::string updated = data.dump();
-            store_.update_message_data(session_id, msg.seq, updated);
-            msg.data_json = std::move(updated);
-        }
+    } catch (...) {
+        unregister();
+        throw;
     }
+    unregister();
 }
 
 void SessionEngine::seed_todos(const std::string& session_id,

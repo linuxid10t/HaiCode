@@ -12,7 +12,7 @@ cmake -B build -S .
 # Build everything
 make -C build -j4
 
-# Run the full test suite (26 binaries, registered with CTest)
+# Run the full test suite (27 binaries, registered with CTest)
 ctest --test-dir build --output-on-failure
 
 # Build individual targets
@@ -62,11 +62,16 @@ Build type defaults to `RelWithDebInfo` when none is given; all targets compile 
 
 **Prompt scheduling:** `submit_prompt` captures attachments and slash-skill metadata immediately, then claims an idle session or queues the prepared row under `mu_`. Only the worker persists `user_prompted` and publishes `Prompted`; each queued prompt runs as a distinct FIFO turn after the current exchange is complete. The drain re-arms interruption/permission state and atomically checks the queue when clearing the running flag. Shutdown discards queued work. `PromptQueued` updates GUI feedback without resetting current counters/todos; `Prompted` resets per-turn counters when the turn starts. `TurnEnded` signals the foreground completion boundary; `StepEnded` reports usage, not idle state. Completed todos clear only when a new prompt actually starts.
 
+**Image correctness:** user images and screenshot results stay raw only for the current and immediately preceding user turn. Older images become placeholders or persisted descriptions on the wire; DB payloads are unchanged, and expired images are not backfilled. Text-only primaries remain image-free after automatic/overflow compaction rebuilds; overflow retries reapply inference overrides. Fallback activity uses the foreground run token and is separately registered for interrupt/shutdown cancellation. Non-cancelled description attempts persist `description_status` (`complete`/`failed`) so failures are not retried after every step or reopening; cancelled attempts stay retryable. User image ingestion enforces a 4 MiB decoded cap for paths and supplied base64, bounds image reads, and persists explicit oversize/unavailable markers. Malformed context rows log session/message/sequence plus a payload-free JSON diagnostic; result repair remains effective.
+
+**Provider selection:** session creation prefers registered Anthropic, then OpenAI, then the first `available_ids()` entry. With none registered it publishes a clear error and returns an empty session id.
+
 ## Test
 
 | Binary | What it tests |
 |--------|--------------|
 | `test_turn_integrity` | Complete batches on denial, plan proposal, and interruption before/during execution; skipped tools have no side effects; subsequent prompts remain valid. Legacy missing/late/duplicate/orphan result repair, grouped Anthropic results with `is_error`, and OpenAI translated call-response matching. FIFO submissions during tools/approval/compaction, submission after interrupt and from final-step/runner-exit events, prepared payload ownership, shutdown rejection/discard, concurrent sessions, independent title maintenance with cancellation and atomic stale-title refusal |
+| `test_engine_correctness` | Text-only automatic/overflow compaction rebuilds preserve vision gates and inference overrides; custom-only provider selection and no-provider errors; scoped fallback cancellation, cancelled attempt retry, durable failure status across steps/reopen; 4 MiB path/base64 boundary and oversize markers; two-turn user/screenshot image retention without DB mutation or expired backfill; malformed-row metadata diagnostics without payload leakage and missing-result repair |
 | `test_db` | Phase 1 smoke: session create/list, message append/reload, get-by-ID |
 | `test_db_upgrade` | Numbered migrations: hand-built version-0 DB (no `tok_last_input`, `permission` table with a row, two messages) migrates to `user_version` 2 with rows/title/seq intact and `permission` dropped; re-migrate is a no-op; fresh DB lands at v2 with no `permission` table. Failure surfacing: `DbStmt` on invalid SQL throws `DbError`; with a second connection holding `BEGIN EXCLUSIVE` and `set_busy_timeout(100)`, `SessionStore::create` throws promptly instead of silently succeeding; writes recover after `ROLLBACK` |
 | `test_db_concurrency` | Concurrent-append sequencing: 2 threads x 50 appends to one session, looped 20x — exactly 100 rows, seqs a unique 1..N permutation, no losses (regression for the two-step `next_seq()` + INSERT collision on `UNIQUE(session_id, seq)`). Transaction isolation: two sessions replacing todos concurrently, looped 50x — each session's final list is exactly its own last write (regression for a second writer's failed `BEGIN` silently absorbing into the first's open transaction on the shared connection). Cross-shape race: 100 appends vs 100 todo replaces on the shared connection — both intact |

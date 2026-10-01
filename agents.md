@@ -10,7 +10,7 @@ tools with per-action permissions, and persists every session to SQLite.
 ```bash
 cmake -B build -S .            # only needed once
 make -C build -j4              # builds lib + gui + tests
-ctest --test-dir build         # runs all 26 test binaries
+ctest --test-dir build         # runs all 27 test binaries
 
 ./build/gui/haicode-gui [project_dir]
 ```
@@ -57,6 +57,16 @@ Rules:
   state behind title requests. Use scoped cancellation, skip interrupted
   turns, atomically reject stale baseline writes, and join outside engine/UI
   locks on shutdown or retirement; no detached workers.
+
+- **Image retention is wire-only.** Keep raw user/screenshot images for the
+  current and immediately preceding user turn; replace older images with
+  placeholders/descriptions without changing DB bytes. Do not backfill
+  expired images. Fallback requests share the foreground scoped token and
+  register their provider for cancellation. Persist failed description
+  attempts once; cancellation stays retryable. Enforce the 4 MiB decoded
+  user-image cap at engine ingestion, with bounded image reads and explicit
+  unavailable markers. Every compaction rebuild retains vision and inference
+  settings. Malformed-row diagnostics must never include raw payloads.
 
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of

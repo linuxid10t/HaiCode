@@ -214,10 +214,7 @@ private:
                           const std::atomic<bool>* cancel,
                           const std::string& stream_token = "");
 
-    // Vision fallback: true when a usable fallback (provider registered +
-    // model vision-capable per model_supports_vision) is configured. Warns
-    // once on stderr when the configured fallback itself isn't vision-capable
-    // (treated as not ready — fail-safe).
+    // Vision fallback: explicit user-selected model and registered provider.
     bool vision_fallback_ready();
 
     // One-shot describer call: sends the image to the fallback model and
@@ -227,16 +224,15 @@ private:
     std::string describe_image(Provider& provider,
                                const std::string& model_id,
                                const nlohmann::json& att,
-                               const std::string& stream_token = "");
+                               const std::atomic<bool>* interrupted,
+                               const std::string& stream_token);
 
-    // Describe-once backfill: when the session's primary model is text-only
-    // and a vision fallback is configured, find every persisted attachment
-    // (user_prompted and tool_result rows) lacking a "description" key and
-    // fill it via describe_image, persisting through update_message_data and
-    // updating the in-memory copies so this step's request sees them.
-    // Failures are skipped individually (placeholder rendering covers them).
+    // Backfill recent images once; persist complete/failed attempt status,
+    // but leave cancellation retryable. Expired images need no description.
     void backfill_attachment_descriptions(const std::string& session_id,
-                                          std::vector<SessionMessage>& messages);
+                                          std::vector<SessionMessage>& messages,
+                                          const std::atomic<bool>* interrupted,
+                                          const std::string& stream_token);
 
     // Persist one prepared prompt row (shared by the immediate and queued
     // paths): append + heuristic autonaming + compaction rearm + Prompted.
@@ -293,6 +289,9 @@ private:
     std::map<std::string, std::atomic<bool>*> interrupt_flags_;
     std::map<std::string, bool> session_running_;  // true while agentic_loop is executing
     std::map<std::string, SessionMode> session_modes_;
+    // Fallback activity shares the foreground run token; interrupt/shutdown
+    // must cancel this provider too, not just the primary. Guarded by mu_.
+    std::map<std::string, std::shared_ptr<Provider>> fallback_providers_;
     std::map<std::string, std::shared_ptr<Provider>> session_providers_;
     // Per-run stream token currently registered for a session (see
     // Provider::stream/cancel). A token is present only while that session's
