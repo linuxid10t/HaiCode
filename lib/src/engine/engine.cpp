@@ -504,6 +504,7 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 nlohmann::json content;
                 content["type"] = "tool_result";
                 content["tool_use_id"] = data.value("call_id", "");
+                content["is_error"] = !data.value("success", true);
                 std::string output = data.value("output", "");
                 // Truncate outputs from previous user turns. The model already
                 // acted on them; keeping them full inflates context on every step.
@@ -555,7 +556,51 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
         } catch (...) {}
     }
 
-    return result;
+    std::map<size_t, std::map<std::string, nlohmann::json>> responses;
+    std::map<std::string, size_t> owners;
+    std::set<size_t> result_rows;
+    for (size_t i = 0; i < result.size(); ++i) {
+        const auto& message = result[i];
+        if (!message["content"].is_array()) continue;
+        for (const auto& block : message["content"]) {
+            if (message.value("role", "") == "assistant"
+                    && block.value("type", "") == "tool_use") {
+                owners[block.value("id", "")] = i;
+            } else if (block.value("type", "") == "tool_result") {
+                result_rows.insert(i);
+                auto owner = owners.find(block.value("tool_use_id", ""));
+                if (owner != owners.end()) {
+                    auto& batch = responses[owner->second];
+                    batch.emplace(block.value("tool_use_id", ""), block);
+                }
+            }
+        }
+    }
+
+    std::vector<nlohmann::json> repaired;
+    for (size_t i = 0; i < result.size(); ++i) {
+        if (result_rows.count(i)) continue;
+        repaired.push_back(result[i]);
+        const auto& message = result[i];
+        if (message.value("role", "") != "assistant"
+                || !message["content"].is_array()) continue;
+        nlohmann::json blocks = nlohmann::json::array();
+        for (const auto& call : message["content"]) {
+            if (call.value("type", "") != "tool_use") continue;
+            std::string id = call.value("id", "");
+            auto found = responses[i].find(id);
+            if (found != responses[i].end()) {
+                blocks.push_back(found->second);
+            } else {
+                blocks.push_back({{"type", "tool_result"}, {"tool_use_id", id},
+                    {"is_error", true},
+                    {"content", "not run: missing result in stored history"}});
+            }
+        }
+        if (!blocks.empty())
+            repaired.push_back({{"role", "user"}, {"content", std::move(blocks)}});
+    }
+    return repaired;
 }
 
 SessionEngine::SessionEngine(SessionStore& store,
@@ -1780,19 +1825,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             else full_text += note;
         }
 
-        // Persist assistant turn (text and/or valid tool calls only).
-        // On interrupt, omit tool_calls: they won't be executed, so recording
-        // them would leave an assistant(tool_calls) with no following
-        // tool_result — the model's chat template rejects that as a
-        // role-alternation violation on the next request.
-        const bool interrupted = interrupt_flag && interrupt_flag->load();
-        if (!full_text.empty() || (!tool_calls.empty() && !interrupted)) {
+        // Persist the complete batch even when interrupted; every recorded call
+        // receives either its real result or an explicit skipped result below.
+        if (!full_text.empty() || !tool_calls.empty()) {
             nlohmann::json data;
             data["role"] = "assistant";
             data["text"] = full_text;
             if (!full_reasoning.empty())
                 data["reasoning"] = full_reasoning;
-            if (!tool_calls.empty() && !interrupted) {
+            if (!tool_calls.empty()) {
                 auto calls_arr = nlohmann::json::array();
                 for (auto& tc : tool_calls)
                     calls_arr.push_back({{"id",tc.id},{"name",tc.name},{"input",tc.input}});
@@ -1837,12 +1878,14 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // continue the loop so the model gets another turn to retry.
         if (finish_reason != FinishReason::ToolUse) break;
         if (tool_calls.empty() && !had_parse_failure) break;
-        if (interrupt_flag && interrupt_flag->load()) break;
 
         // Execute tool calls
         bool any_denied = false;
         bool any_proposed = false;
+        std::string stopped_reason;
         for (auto& call : tool_calls) {
+            if (stopped_reason.empty() && interrupt_flag && interrupt_flag->load())
+                stopped_reason = "interrupted";
             {
                 nlohmann::json ev;
                 ev["session_id"] = session_id;
@@ -1861,7 +1904,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ctx.mode = mode;
             ctx.interrupt = interrupt_flag;
 
-            auto result = tools_.execute(call.name, call.input, ctx, permissions_);
+            ToolResult result;
+            if (stopped_reason.empty() && interrupt_flag && interrupt_flag->load())
+                stopped_reason = "interrupted";
+            if (stopped_reason.empty())
+                result = tools_.execute(call.name, call.input, ctx, permissions_);
+            else
+                result = {false, "", "not run: " + stopped_reason};
 
             // After a successful write or edit, run the configured build command
             // so compile errors reach the model in the same tool result.
@@ -1929,14 +1978,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["call_id"] = call.id;
                 ev["output"] = data["output"];
                 ev["success"] = result.success;
+                if (!result.success) ev["error"] = data["output"];
                 bus_.publish(result.success ? events::EventType::ToolSuccess
                                             : events::EventType::ToolFailed, ev);
             }
 
-            // Plan mode sentinel: a successful propose_plan ends the turn.
-            // Publish PlanProposed so the UI can show its review window,
-            // then break out of both the tool-call loop and (via the outer
-            // `if (any_proposed)` check) the step loop.
+            // A successful plan proposal stops execution, but the remaining
+            // calls still need skipped results before the turn ends.
             if (call.name == "propose_plan" && result.success) {
                 std::string plan_path;
                 try {
@@ -1951,7 +1999,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["plan"]       = call.input.value("plan", "");
                 bus_.publish(events::EventType::PlanProposed, ev);
                 any_proposed = true;
-                break;
+                stopped_reason = "plan proposed";
+                continue;
             }
 
             // ask_user: the tool returned a placeholder. Publish
@@ -2109,8 +2158,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 }
             }
 
-            if (result.denied) { any_denied = true; break; }
-            if (interrupt_flag && interrupt_flag->load()) break;
+            if (result.denied) {
+                any_denied = true;
+                stopped_reason = interrupt_flag && interrupt_flag->load()
+                    ? "interrupted" : "permission denied";
+            }
         }
 
         if (any_proposed) break;

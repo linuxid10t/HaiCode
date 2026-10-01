@@ -604,12 +604,17 @@ static bool crash_repro_old_tool_result_truncation() {
     up.seq = 2; up.type = "user_prompted";
     up.data_json = nlohmann::json{{"text", "next turn"}}.dump();
 
+    SessionMessage assistant;
+    assistant.type = "assistant_text";
+    assistant.data_json = nlohmann::json{{"tool_calls", nlohmann::json::array({
+        {{"id", "tc1"}, {"name", "read"}, {"input", nlohmann::json::object()}}
+    })}}.dump();
     haicode::ContextBuilder builder;
-    auto assembled = builder.assemble_messages({tr, up});
-    CHECK(assembled.size() == 2, "two provider messages assembled");
+    auto assembled = builder.assemble_messages({assistant, tr, up});
+    CHECK(assembled.size() == 3, "complete tool exchange and next prompt assembled");
 
     // The truncated tool result must be valid UTF-8 with the marker intact.
-    std::string out = assembled[0]["content"][0]["content"].get<std::string>();
+    std::string out = assembled[1]["content"][0]["content"].get<std::string>();
     CHECK(haicode::util::sanitize_utf8(out) == out,
           "truncated old tool result must be valid UTF-8");
     CHECK(out.find("[truncated: 603 more bytes]") != std::string::npos,

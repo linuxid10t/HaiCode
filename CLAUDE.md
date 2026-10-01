@@ -12,7 +12,7 @@ cmake -B build -S .
 # Build everything
 make -C build -j4
 
-# Run the full test suite (25 binaries, registered with CTest)
+# Run the full test suite (26 binaries, registered with CTest)
 ctest --test-dir build --output-on-failure
 
 # Build individual targets
@@ -58,10 +58,13 @@ Build type defaults to `RelWithDebInfo` when none is given; all targets compile 
 
 **`/retry` command:** typing `/retry` (exact match) in the GUI input deletes the last turn's assistant output and re-runs the agentic loop on the stored prompt. Intercepted in `MainWindow::_SubmitPrompt` before submission (never stored, never matched against skills); the engine side is `SessionEngine::retry_last_turn` — keeps the `user_prompted` row (so attachments/skill blocks/mode notices re-apply automatically), deletes only `seq > last_prompt_seq`, refuses while running.
 
+**Tool-exchange integrity:** every persisted assistant tool batch receives a result for every call, including `success=false` / `not run: <reason>` for calls skipped after denial, plan proposal, or interruption. `ContextBuilder::assemble_messages` groups all responses into one following user message and sets `is_error` on failures. Its provider-only repair associates late legacy responses with their originating calls, removes duplicate/orphan responses, and synthesizes missing results; stored history stays unchanged.
+
 ## Test
 
 | Binary | What it tests |
 |--------|--------------|
+| `test_turn_integrity` | Complete batches on denial, plan proposal, and interruption before/during execution; skipped tools have no side effects; subsequent prompts remain valid. Legacy missing/late/duplicate/orphan result repair, grouped Anthropic results with `is_error`, and OpenAI translated call-response matching |
 | `test_db` | Phase 1 smoke: session create/list, message append/reload, get-by-ID |
 | `test_db_upgrade` | Numbered migrations: hand-built version-0 DB (no `tok_last_input`, `permission` table with a row, two messages) migrates to `user_version` 2 with rows/title/seq intact and `permission` dropped; re-migrate is a no-op; fresh DB lands at v2 with no `permission` table. Failure surfacing: `DbStmt` on invalid SQL throws `DbError`; with a second connection holding `BEGIN EXCLUSIVE` and `set_busy_timeout(100)`, `SessionStore::create` throws promptly instead of silently succeeding; writes recover after `ROLLBACK` |
 | `test_db_concurrency` | Concurrent-append sequencing: 2 threads x 50 appends to one session, looped 20x — exactly 100 rows, seqs a unique 1..N permutation, no losses (regression for the two-step `next_seq()` + INSERT collision on `UNIQUE(session_id, seq)`). Transaction isolation: two sessions replacing todos concurrently, looped 50x — each session's final list is exactly its own last write (regression for a second writer's failed `BEGIN` silently absorbing into the first's open transaction on the shared connection). Cross-shape race: 100 appends vs 100 todo replaces on the shared connection — both intact |

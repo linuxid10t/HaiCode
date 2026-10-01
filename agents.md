@@ -10,7 +10,7 @@ tools with per-action permissions, and persists every session to SQLite.
 ```bash
 cmake -B build -S .            # only needed once
 make -C build -j4              # builds lib + gui + tests
-ctest --test-dir build         # runs all 24 test binaries
+ctest --test-dir build         # runs all 26 test binaries
 
 ./build/gui/haicode-gui [project_dir]
 ```
@@ -38,6 +38,12 @@ Rules:
 - Sections after `## Tasks` terminate the list, so keep it last.
 
 # Conventions
+
+- **Tool exchanges stay complete.** Persist failed `not run: <reason>` results
+  for every skipped call after denial, plan proposal, or interruption. Context
+  assembly groups one batch's responses in one user message, marks failures
+  with `is_error`, and repairs legacy missing/late results without rewriting
+  stored history; orphan and duplicate responses never go on the wire.
 
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of
