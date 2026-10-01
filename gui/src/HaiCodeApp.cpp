@@ -26,6 +26,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdlib>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -314,11 +315,29 @@ HaiCodeApp::RefsReceived(BMessage* msg)
 bool
 HaiCodeApp::QuitRequested()
 {
+    // Any still-running confirmation already happened in MainWindow's
+    // QuitRequested (the window is queried before B_QUIT_REQUESTED reaches
+    // the app; vetoing there vetoed the quit).
     if (relay_) bus_->unsubscribe_all();
-    // Engine threads may be blocked in network I/O; joining them would hang.
-    // Use exit() so the OS cleans up all threads immediately.
-    std::exit(0);
-    return true; // unreachable
+
+    // Orderly shutdown with a hard bound: the engine's workers are now
+    // cancellable (subprocess runner + HTTP abort-on-cancel), so shutdown()
+    // normally joins within ~1 s. On the normal path returning true lets
+    // Run() unwind — members destruct in safe order and ~Database closes
+    // SQLite cleanly. A shutdown wedged past 10 s falls back to _exit(0)
+    // (no static destructors) rather than hanging the quit.
+    std::atomic<bool> done{false};
+    std::thread shut([&] {
+        if (engine_) engine_->shutdown();
+        done = true;
+    });
+    for (int i = 0; i < 100 && !done; i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    if (done) {
+        shut.join();
+        return true;
+    }
+    _exit(0);
 }
 
 void

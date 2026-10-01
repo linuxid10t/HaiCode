@@ -615,6 +615,22 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 bool
 MainWindow::QuitRequested()
 {
+    // Warn before quitting with live sessions: quitting interrupts their
+    // in-flight runs. Cancel (default, Escape) aborts the quit.
+    if (engine_) {
+        auto running = engine_->running_sessions();
+        if (!running.empty()) {
+            BString text;
+            text << running.size() << " session(s) are still running — "
+                    "interrupt and quit?";
+            BAlert* alert = new BAlert("Quit while sessions run",
+                                       text.String(), "Cancel",
+                                       "Interrupt and quit", nullptr,
+                                       B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+            if (alert->Go() == 0)
+                return false;
+        }
+    }
     delete dir_panel_;
     dir_panel_ = nullptr;
     delete attach_panel_;

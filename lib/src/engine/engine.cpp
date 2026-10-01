@@ -1037,6 +1037,14 @@ bool SessionEngine::is_running(const std::string& session_id) {
     return it != session_running_.end() && it->second;
 }
 
+std::vector<std::string> SessionEngine::running_sessions() {
+    std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> ids;
+    for (const auto& [id, running] : session_running_)
+        if (running) ids.push_back(id);
+    return ids;
+}
+
 void SessionEngine::set_mode(const std::string& session_id, SessionMode mode) {
     // Resolve the previous mode before either copy is overwritten (get_mode
     // reads the in-memory cache, else the DB value update_mode is about to

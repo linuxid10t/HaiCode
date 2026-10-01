@@ -93,6 +93,10 @@ public:
     // the running/interrupt state when switching back to a background session.
     bool is_running(const std::string& session_id);
 
+    // Ids of every session whose agentic loop is currently executing (under
+    // mu_). Used by the quit path to warn before interrupting live runs.
+    std::vector<std::string> running_sessions();
+
     // Per-session Plan/Build mode. Persisted into model_json so it survives
     // process restarts; also cached in session_modes_ for synchronous reads.
     void      set_mode(const std::string& session_id, SessionMode mode);
