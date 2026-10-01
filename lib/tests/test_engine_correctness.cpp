@@ -13,7 +13,9 @@ using namespace haicode;
 using json = nlohmann::json;
 
 static void wait_idle(SessionEngine& engine, const std::string& sid) {
-    for (int i = 0; i < 500 && engine.is_running(sid); ++i)
+    // 30 s ceiling: test_limits does four sequential turns with 4 MiB
+    // base64 work, which is several times slower in unoptimized Debug.
+    for (int i = 0; i < 3000 && engine.is_running(sid); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     TEST_REQUIRE(!engine.is_running(sid), "bounded worker completion");
 }

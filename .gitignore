@@ -1,5 +1,7 @@
 # Build artifacts
 build/
+build-debug/
+build-release/
 # In-source cmake configure output (stray CMakeCache/CMakeFiles in src dirs)
 CMakeCache.txt
 CMakeFiles/
