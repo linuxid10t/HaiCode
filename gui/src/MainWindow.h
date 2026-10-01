@@ -72,6 +72,8 @@ private:
     void _SwitchToSession(int idx); // loads content + updates list selection (suppressed)
     void _SubmitPrompt();
     void _HandleRetryCommand();
+    // Window-side half of an accepted directory change (label, skills, DB row).
+    void _ApplyDirectory(const std::string& path);
     void _LoadHistory(const std::string& session_id);
     void _RestoreSessionTotals(const std::string& session_id);
     void _RefreshSessionList();

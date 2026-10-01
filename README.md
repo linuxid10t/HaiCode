@@ -116,6 +116,8 @@ If no project directory is given, the GUI opens the last-used project from globa
 
 **Single instance.** The app signature (`application/x-vnd.haicode`) carries `B_SINGLE_LAUNCH`: launching HaiCode again while it is running does not start a second process — the existing instance is activated and, if the new launch named a project directory (command line, Tracker "Open With", or drag-onto-icon), that directory is forwarded to the running window and becomes the active project.
 
+**Disruptive changes ask first.** Saving settings, changing providers, or switching the project directory replaces the engine, which stops every running session. When any session is running, HaiCode asks first: it lists them all (including background sessions) and offers *Cancel* (the default — nothing changes) or *Interrupt and Apply*. An accepted change stops all runs deliberately.
+
 ## Permissions
 
 Authorization is layered, evaluated per session in this order (first decisive layer wins):

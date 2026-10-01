@@ -103,6 +103,12 @@ private:
     void _RefreshPermissionsCenter();
     bool _ApplyProviders(const BMessage* msg);
     void _RefreshProviders();
+    // Warn-and-ask before a change that would interrupt every running
+    // session (settings save, provider update, directory switch). Lists ALL
+    // running sessions, including background ones. Returns true only for the
+    // explicit "Interrupt and apply" choice; Cancel leaves app, window, DB,
+    // and config files untouched.
+    bool _ConfirmDisruptiveChange(const char* what);
 
     // Replace the engine after handing the window its new pointer. When supplied,
     // keep the old provider registry alive until the retiring engine is destroyed.

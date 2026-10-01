@@ -58,6 +58,13 @@ Rules:
   turns, atomically reject stale baseline writes, and join outside engine/UI
   locks on shutdown or retirement; no detached workers.
 
+- **Disruptive changes warn and ask.** Settings saves, provider updates, and
+  directory switches go through `HaiCodeApp::_ConfirmDisruptiveChange` before
+  mutating anything; directory selection is proposed (`MSG_DIR_PROPOSED`),
+  not applied, until accepted. Cancel leaves app, window, DB, and config
+  files unchanged. Accepted replacements interrupt every running session —
+  background ones included.
+
 - **Image retention is wire-only.** Keep raw user/screenshot images for the
   current and immediately preceding user turn; replace older images with
   placeholders/descriptions without changing DB bytes. Do not backfill

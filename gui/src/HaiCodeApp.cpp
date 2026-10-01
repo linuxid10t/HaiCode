@@ -422,6 +422,22 @@ HaiCodeApp::MessageReceived(BMessage* msg)
                 });
             break;
         }
+        case MSG_DIR_PROPOSED: {
+            // Window-side selection arrived. Nothing has mutated yet; the
+            // app owns acceptance. On confirm, the window applies its half
+            // (label, skills, DB row) and replies MSG_DIR_CHANGED, whose
+            // handler does the app-side reload + recreate. On cancel the
+            // silence IS the veto — no state moved anywhere.
+            const char* path = nullptr;
+            if (msg->FindString("path", &path) != B_OK || !path) break;
+            if (!_ConfirmDisruptiveChange("Changing the project directory")) break;
+            if (main_window_) {
+                BMessage apply(MSG_DIR_APPLY);
+                apply.AddString("path", path);
+                main_window_->PostMessage(&apply);
+            }
+            break;
+        }
         case MSG_DIR_CHANGED: {
             const char* path = nullptr;
             if (msg->FindString("path", &path) != B_OK || !path) break;
@@ -506,6 +522,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_PROVIDERS_UPDATED: {
+            if (!_ConfirmDisruptiveChange("Updating providers")) break;
             if (!_ApplyProviders(msg)) break;
             auto providers = haicode::providers_to_json(
                 global_layer_.values.providers);
@@ -533,6 +550,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_SETTINGS_SAVED: {
+            if (!_ConfirmDisruptiveChange("Applying new settings")) break;
             if (!_ApplyProviders(msg)) break;
 
             // Settings edits the GLOBAL layer; the merged config_ is
@@ -739,6 +757,42 @@ HaiCodeApp::_MaybePromptProjectTrust()
 }
 
 bool
+HaiCodeApp::_ConfirmDisruptiveChange(const char* what)
+{
+    if (!engine_) return true;
+    auto running = engine_->running_sessions();
+    if (running.empty()) return true;
+
+    // Name every running session — background ones included, not just the
+    // active window's. Titles over raw ids so the user recognizes their work.
+    std::string names;
+    int shown = 0;
+    for (const auto& sid : running) {
+        if (shown == 6) {
+            names += "…and " + std::to_string(running.size() - shown) + " more\n";
+            break;
+        }
+        auto si = store_->get(sid);
+        std::string title = (si && !si->title.empty()) ? si->title : sid;
+        if (!names.empty()) names += "\n";
+        names += "• " + title;
+        ++shown;
+    }
+
+    BString text;
+    text << what << " stops every running session:\n\n"
+         << names.c_str()
+         << "\n\nInterrupt them and apply anyway?";
+    // Cancel is the safe choice: Escape and the default button leave the app,
+    // the window, the DB, and the config files completely unchanged.
+    BAlert* alert = new BAlert("Running sessions", text.String(),
+                               "Cancel", "Interrupt and Apply", nullptr,
+                               B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+    alert->SetShortcut(0, B_ESCAPE);
+    return alert->Go() == 1;
+}
+
+bool
 HaiCodeApp::_ApplyProviders(const BMessage* msg)
 {
     const char* text = nullptr;
@@ -783,15 +837,12 @@ HaiCodeApp::_RefreshProviders()
 void
 HaiCodeApp::_RecreateEngine(std::unique_ptr<haicode::ProviderRegistry> next_providers)
 {
-    std::string sid;
-    if (main_window_) {
-        main_window_->Lock();
-        sid = main_window_->active_session_id();
-        main_window_->Unlock();
-    }
     if (engine_) {
         engine_->cancel_pending_asks();
-        if (!sid.empty()) engine_->interrupt(sid);
+        // Accepted replacement stops every run deliberately — background
+        // sessions too, matching what the confirmation dialog promised.
+        for (auto& sid : engine_->running_sessions())
+            engine_->interrupt(sid);
         engine_->shutdown();
     }
 

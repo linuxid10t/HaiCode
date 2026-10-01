@@ -757,16 +757,21 @@ MainWindow::MessageReceived(BMessage* msg)
                 BEntry entry(&ref, true);
                 BPath path;
                 if (entry.GetPath(&path) == B_OK && entry.IsDirectory()) {
-                    project_dir_ = path.Path();
-                    dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
-                    _RefreshSkills();  // project skill dir is relative
-                    if (!active_session_id_.empty())
-                        store_.update_directory(active_session_id_, project_dir_);
-                    BMessage notify(MSG_DIR_CHANGED);
-                    notify.AddString("path", project_dir_.c_str());
-                    be_app->PostMessage(&notify);
+                    // Propose only: the app warns about running sessions and
+                    // vetoes by silence. Window state, the session's DB
+                    // directory row, and config files must stay untouched
+                    // until the change is accepted.
+                    BMessage propose(MSG_DIR_PROPOSED);
+                    propose.AddString("path", path.Path());
+                    be_app->PostMessage(&propose);
                 }
             }
+            break;
+        }
+        case MSG_DIR_APPLY: {
+            const char* path = nullptr;
+            if (msg->FindString("path", &path) == B_OK && path)
+                _ApplyDirectory(path);
             break;
         }
         case MSG_SELECT_SESSION: {
@@ -1570,6 +1575,19 @@ MainWindow::_SubmitPrompt()
     _SaveActiveDraft();
 
     engine_->submit_prompt(active_session_id_, text, attachments);
+}
+
+void
+MainWindow::_ApplyDirectory(const std::string& path)
+{
+    project_dir_ = path;
+    dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
+    _RefreshSkills();  // project skill dir is relative
+    if (!active_session_id_.empty())
+        store_.update_directory(active_session_id_, project_dir_);
+    BMessage notify(MSG_DIR_CHANGED);
+    notify.AddString("path", project_dir_.c_str());
+    be_app->PostMessage(&notify);
 }
 
 void

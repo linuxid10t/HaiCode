@@ -69,7 +69,9 @@ static const uint32 MSG_MODEL_CONTEXT   = 'MDcx';  // discovery thread → MainW
 
 // Working directory
 static const uint32 MSG_CHOOSE_DIR      = 'CHdr';  // dir button pressed → open BFilePanel
-static const uint32 MSG_DIR_CHANGED     = 'DChr';  // MainWindow → be_app; "path" string
+static const uint32 MSG_DIR_PROPOSED    = 'DPpr';  // MainWindow → be_app: directory picked; app confirms before anything mutates
+static const uint32 MSG_DIR_APPLY       = 'Dapl';  // be_app → MainWindow: confirmed; apply the window-side directory change
+static const uint32 MSG_DIR_CHANGED     = 'DChr';  // be_app internal: apply app-side config reload + engine recreate
 
 // Image attachments
 static const uint32 MSG_ATTACH          = 'ATch';  // "+" button pressed → open image BFilePanel
