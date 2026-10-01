@@ -92,6 +92,16 @@ Rules:
   of the anonymous `"prompt"` default — rely on that distinction, not on
   effect alone.
 
+- **Bash Allow patterns are segment-aware; read-only git ignores repo
+  config.** A bash Allow rule with glob metacharacters must cover every
+  `;`/`&&`/`||`/`|`/newline/`&`-separated segment
+  (`bash_pattern_authorizes` in `lib/src/permission/permission.cpp`);
+  segments with command substitution never match a pattern. Deny patterns
+  and non-bash actions keep whole-string fnmatch. GitTool runs read-only
+  invocations with `-c core.fsmonitor= -c core.hooksPath=/dev/null` plus
+  `--no-ext-diff --no-textconv` (diff/log/show only), so repo-local config
+  can't execute programs through the bypass path.
+
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of
   `"anthropic"`, `"openai"`, `"chatgpt"`, or one of the flavored

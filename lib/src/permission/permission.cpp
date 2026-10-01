@@ -199,11 +199,23 @@ AuthorizationDecision PermissionGate::evaluate(const std::string& session_id,
             return {PermissionEffect::Allow, "Exact temporary session grant",
                 "temporary_exact", static_cast<int>(i)};
     }
+    // Task 20: a bash Allow pattern carrying glob metacharacters must cover
+    // EVERY ;/&&/||/|-separated segment of the command, not just its first
+    // word — whole-string fnmatch would let `make*` authorize
+    // `make; rm -rf ~`. Deny patterns keep whole-string matching
+    // (over-matching a Deny is the safe direction); literal patterns are
+    // exact-match by nature.
+    auto resource_matches = [&](const PermissionRule& rule) {
+        if (action == "bash" && rule.effect == PermissionEffect::Allow
+                && rule.resource.find_first_of("*?[") != std::string::npos)
+            return bash_pattern_authorizes(rule.resource, resource);
+        return fnmatch(rule.resource.c_str(), resource.c_str(), 0) == 0;
+    };
     auto match = [&](const auto& rules, const std::string& source, bool& matched) {
         for (int i = static_cast<int>(rules.size()) - 1; i >= 0; --i) {
             const auto& rule = rules[i];
             if (fnmatch(rule.action.c_str(), action.c_str(), 0) == 0
-                && fnmatch(rule.resource.c_str(), resource.c_str(), 0) == 0) {
+                && resource_matches(rule)) {
                 matched = true;
                 return AuthorizationDecision{rule.effect, "Matched " + source + " rule",
                     source, i};
@@ -415,6 +427,92 @@ bool git_invocation_is_readonly(const std::string& subcommand,
     }
 
     return false;
+}
+
+// ---- bash_pattern_authorizes ----
+//
+// A bash Allow pattern carrying glob metacharacters must cover EVERY
+// command in the invocation, not just its first word: fnmatch on the whole
+// string lets `make*` authorize `make; rm -rf ~` (the `*` happily matches
+// the rest). The command is split quote-aware at the shell's command
+// separators and each segment must fnmatch the pattern. Command
+// substitution (`$(...)`, backticks) produces unknowable text, so a
+// segment containing it never matches any pattern except the universal
+// `*` — the safe direction is to ask.
+bool bash_pattern_authorizes(const std::string& pattern, const std::string& command) {
+    if (pattern == "*") return true;
+
+    std::vector<std::string> segments;
+    std::vector<bool> has_subst;
+    std::string cur;
+    bool cur_subst = false;
+    char quote = 0;
+    auto flush = [&]() {
+        size_t b = cur.find_first_not_of(" \t\r");
+        if (b == std::string::npos) { cur.clear(); cur_subst = false; return; }
+        size_t e = cur.find_last_not_of(" \t\r");
+        segments.push_back(cur.substr(b, e - b + 1));
+        has_subst.push_back(cur_subst);
+        cur.clear();
+        cur_subst = false;
+    };
+    auto marks_subst = [&](const std::string& s, size_t i) {
+        return s[i] == '`'
+            || (s[i] == '$' && i + 1 < s.size() && s[i + 1] == '(');
+    };
+    for (size_t i = 0; i < command.size(); ++i) {
+        char c = command[i];
+        if (quote) {
+            // Substitution inside double quotes really executes; inside
+            // single quotes it is literal — flagging both is over-strict,
+            // which is the safe direction.
+            if (marks_subst(command, i)) cur_subst = true;
+            if (quote == '"' && c == '\\' && i + 1 < command.size()) {
+                cur += c;
+                cur += command[++i];
+                continue;
+            }
+            if (c == quote) quote = 0;
+            cur += c;
+            continue;
+        }
+        if (c == '\\') {
+            if (i + 1 < command.size()) { cur += c; cur += command[++i]; }
+            continue;
+        }
+        if (c == '\'' || c == '"') { quote = c; cur += c; continue; }
+        if (c == ';' || c == '\n') { flush(); continue; }
+        if (c == '|') {
+            flush();
+            if (i + 1 < command.size() && command[i + 1] == '|') ++i;
+            continue;
+        }
+        if (c == '&') {
+            if (i + 1 < command.size() && command[i + 1] == '&') {
+                flush();
+                ++i;
+                continue;
+            }
+            // A whitespace-delimited `&` backgrounds the left side and starts
+            // a new command. Redirect forms (2>&1, &>, >&) must not split.
+            bool prev_sp = i > 0 && (command[i - 1] == ' ' || command[i - 1] == '\t');
+            bool next_sp = i + 1 >= command.size() || command[i + 1] == ' '
+                        || command[i + 1] == '\t' || command[i + 1] == '\n';
+            if (prev_sp && next_sp) { flush(); continue; }
+            cur += c;
+            continue;
+        }
+        if (marks_subst(command, i)) cur_subst = true;
+        cur += c;
+    }
+    flush();
+
+    if (segments.empty()) return true;
+    for (size_t i = 0; i < segments.size(); ++i) {
+        if (has_subst[i]) return false;
+        if (fnmatch(pattern.c_str(), segments[i].c_str(), 0) != 0) return false;
+    }
+    return true;
 }
 
 // ---- ToolRegistry ----

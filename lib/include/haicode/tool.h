@@ -169,6 +169,15 @@ bool tool_available(const std::string& tool_name, SessionMode mode);
 bool git_invocation_is_readonly(const std::string& subcommand,
                                 const std::vector<std::string>& args);
 
+// True when a bash Allow pattern carrying glob metacharacters authorizes the
+// whole `command`: the command is split quote-aware at `;`, `&&`/`||`, `|`,
+// and newline separators, and EVERY non-empty segment must fnmatch the
+// pattern — so `make*` allows `make -j4` but not `make; rm -rf ~`. A segment
+// containing command substitution (`$(...)`, backticks) only ever matches the
+// pattern `*` (its output is unknowable at match time). Literal patterns
+// (no `*?[`) are exact-match by nature and must not be routed here.
+bool bash_pattern_authorizes(const std::string& pattern, const std::string& command);
+
 // Symlink-aware readability check shared by the gate's read-only always-allow
 // path and ReadTool's O_NOFOLLOW fallback: true when `path` resolves (realpath
 // on both sides) inside `working_dir` or one of the always-readable system

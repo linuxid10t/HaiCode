@@ -46,7 +46,10 @@ PermissionRuleEditWindow::PermissionRuleEditWindow(BMessenger target,
 
     auto* syntax = new BStringView("syntax",
         "Patterns use shell globbing (* and ?). Within one source, the LAST\n"
-        "matching rule decides; Ask falls through to the next source.");
+        "matching rule decides; Ask falls through to the next source.\n"
+        "A bash Allow pattern must cover every ;, &&, || and | segment of\n"
+        "the command. A git Allow covers the subcommand's mutating forms\n"
+        "too (e.g. branch also covers branch -D).");
     BFont small(*be_plain_font);
     small.SetSize(10.0f);
     syntax->SetFont(&small);

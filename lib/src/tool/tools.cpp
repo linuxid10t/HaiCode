@@ -1380,12 +1380,29 @@ public:
         if (!is_allowed(sub))
             return {false, "", "git: subcommand not allowed: " + sub};
 
-        std::string cmd = "git -C " + sq(ctx.working_dir) + " " + sub;
+        std::vector<std::string> args;
         if (input.contains("args") && input["args"].is_array()) {
-            for (const auto& a : input["args"]) {
-                if (a.is_string()) cmd += " " + sq(a.get<std::string>());
-            }
+            for (const auto& a : input["args"])
+                if (a.is_string()) args.push_back(a.get<std::string>());
         }
+
+        // Read-only invocations (the gate's bypass path) must not honor
+        // repo-local config that can execute programs: blank core.fsmonitor
+        // and core.hooksPath via global -c, and disable external diff
+        // drivers / textconv filters for the diff-rendering subcommands —
+        // a repo that sets diff.external to a script must not have it run
+        // by `git diff`. Global -c precedes the subcommand; --no-ext-diff
+        // and --no-textconv are diff-porcelain options, not global ones.
+        std::string cmd;
+        if (git_invocation_is_readonly(sub, args)) {
+            cmd = "git -c core.fsmonitor= -c core.hooksPath=/dev/null -C "
+                + sq(ctx.working_dir) + " " + sub;
+            if (sub == "diff" || sub == "log" || sub == "show")
+                cmd += " --no-ext-diff --no-textconv";
+        } else {
+            cmd = "git -C " + sq(ctx.working_dir) + " " + sub;
+        }
+        for (const auto& a : args) cmd += " " + sq(a);
 
         // GIT_TERMINAL_PROMPT=0: a credential prompt (push/pull/fetch over
         // https) must fail fast instead of hanging the 300 s timeout on a

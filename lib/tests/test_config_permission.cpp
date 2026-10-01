@@ -960,6 +960,161 @@ static bool registry_git_mutating_invocations_denied() {
 }
 
 // ============================================================
+// Task 20: bash rule segmentation + read-only git hardening
+// ============================================================
+
+static bool bash_segmentation_unit() {
+    using haicode::bash_pattern_authorizes;
+    CHECK(bash_pattern_authorizes("make*", "make -j4"),
+          "make* allows the single command it names");
+    CHECK(!bash_pattern_authorizes("make*", "make; rm -rf ~"),
+          "make* must not authorize a ; compound");
+    CHECK(!bash_pattern_authorizes("make*", "make && rm x"),
+          "make* must not authorize an && compound");
+    CHECK(!bash_pattern_authorizes("make*", "make | tee log"),
+          "make* must not authorize a pipeline");
+    CHECK(!bash_pattern_authorizes("make*", "make\nrm -rf ~"),
+          "make* must not authorize a newline compound");
+    CHECK(!bash_pattern_authorizes("make*", "make & sleep 60"),
+          "make* must not authorize a backgrounded follow-up command");
+    CHECK(!bash_pattern_authorizes("make*", "$(rm -rf ~)"),
+          "command substitution never matches a pattern");
+    CHECK(!bash_pattern_authorizes("make*", "make `touch /tmp/x`"),
+          "backtick substitution never matches a pattern");
+    CHECK(bash_pattern_authorizes("make*", "make 2>&1"),
+          "redirect operators are not command separators");
+    CHECK(bash_pattern_authorizes("echo*", "echo \"a;b\""),
+          "a quoted ; is not a command separator");
+    CHECK(bash_pattern_authorizes("*", "make; rm -rf ~"),
+          "the universal pattern still covers compounds");
+    std::cout << "[OK] bash_pattern_authorizes segmentation matrix\n";
+    return true;
+}
+
+static bool bash_segmentation_gate_integration() {
+    const nlohmann::json no_input = nlohmann::json::object();
+
+    haicode::PermissionGate gate;
+    gate.set_rules({{"bash", "make*", haicode::PermissionEffect::Allow}});
+    CHECK(gate.check("s", "bash", "make -j4", no_input)
+              == haicode::PermissionEffect::Allow,
+          "pattern Allow covers the command it names");
+    CHECK(gate.check("s", "bash", "make; rm -rf ~", no_input)
+              == haicode::PermissionEffect::Ask,
+          "pattern Allow must not cover an unauthorized second segment");
+
+    // Session bypass ({"*","*",Allow}) still covers compounds.
+    gate.set_session_rules("s", {{"*", "*", haicode::PermissionEffect::Allow}});
+    CHECK(gate.check("s", "bash", "make; rm -rf ~", no_input)
+              == haicode::PermissionEffect::Allow,
+          "session bypass still authorizes compounds");
+    gate.set_session_rules("s", {});
+
+    // Deny patterns keep whole-string matching: over-matching a Deny is the
+    // safe direction.
+    haicode::PermissionGate deny_gate;
+    deny_gate.set_rules({{"bash", "make*", haicode::PermissionEffect::Deny}});
+    CHECK(deny_gate.check("s", "bash", "make; rm x", no_input)
+              == haicode::PermissionEffect::Deny,
+          "Deny pattern still matches whole compound commands");
+
+    // Literal (metachar-free) resources stay exact-equality both ways.
+    haicode::PermissionGate lit_gate;
+    lit_gate.set_rules({{"bash", "make", haicode::PermissionEffect::Allow}});
+    CHECK(lit_gate.check("s", "bash", "make", no_input)
+              == haicode::PermissionEffect::Allow,
+          "literal Allow matches the exact command");
+    CHECK(lit_gate.check("s", "bash", "make -j4", no_input)
+              == haicode::PermissionEffect::Ask,
+          "literal Allow must not match a longer command");
+    CHECK(lit_gate.check("s", "bash", "make; rm x", no_input)
+              == haicode::PermissionEffect::Ask,
+          "literal Allow must not match a compound");
+    std::cout << "[OK] gate applies segmentation to bash pattern Allows\n";
+    return true;
+}
+
+static bool bash_segmentation_execute_denied() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"bash", "echo*", haicode::PermissionEffect::Allow}});
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                              const std::string&, const nlohmann::json&) {
+        return haicode::PermissionEffect::Deny;
+    });
+
+    const std::string marker = "/tmp/tfc_seg_marker";
+    std::remove(marker.c_str());
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+
+    // Second segment is not covered by the pattern: denied, never executed.
+    auto r = reg.execute("bash",
+                         {{"command", "echo hi; touch " + marker}}, ctx, gate);
+    CHECK(!r.success && r.denied,
+          "compound not fully covered by the pattern must be denied");
+    struct stat st;
+    CHECK(::stat(marker.c_str(), &st) != 0,
+          "denied compound must not have executed its second segment");
+
+    // Session bypass still runs compounds end to end.
+    gate.set_session_rules("s1", {{"*", "*", haicode::PermissionEffect::Allow}});
+    ctx.session_id = "s1";
+    auto ok = reg.execute("bash", {{"command", "echo a; echo b"}}, ctx, gate);
+    CHECK(ok.success, "session bypass executes compound commands");
+    std::remove(marker.c_str());
+    std::cout << "[OK] execute denies uncovered compounds, bypass runs them\n";
+    return true;
+}
+
+// Repo-local `diff.external` pointing at a script: the read-only bypass must
+// not honor it (blanked fsmonitor/hooksPath, --no-ext-diff --no-textconv) —
+// a hostile repo must not get its driver executed by `git diff`.
+static bool git_readonly_ignores_repo_diff_drivers() {
+    const std::string repo = "/tmp/tfc_git_ext_repo";
+    const std::string script = "/tmp/tfc_git_ext.sh";
+    const std::string marker = "/tmp/tfc_git_ext_marker";
+    system(("rm -rf " + repo).c_str());
+    std::remove(marker.c_str());
+    ::mkdir(repo.c_str(), 0755);
+    write_file(repo + "/file.txt", "one\n");
+    system(("cd " + repo + " && git init -q -b main && "
+            "git -c user.name=t -c user.email=t@t add . && "
+            "git -c user.name=t -c user.email=t@t commit -q -m init").c_str());
+    write_file(repo + "/file.txt", "one\ntwo\n");
+    write_file(script, "#!/bin/sh\necho pwned > " + marker + "\n");
+    system(("chmod +x " + script + " && cd " + repo
+            + " && git config diff.external " + script).c_str());
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_callback_deny_gate();  // rules-free: bypass path applies
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = repo;
+
+    auto d = reg.execute("git", {{"subcommand", "diff"}}, ctx, gate);
+    CHECK(d.success, "read-only git diff should bypass the gate: " + d.error);
+    CHECK(d.output.find("+two") != std::string::npos,
+          "hardened diff must return the real diff text");
+    struct stat st;
+    CHECK(::stat(marker.c_str(), &st) != 0,
+          "diff.external driver must not run on the read-only bypass path");
+
+    auto lg = reg.execute("git", {{"subcommand", "log"}}, ctx, gate);
+    CHECK(lg.success && lg.output.find("init") != std::string::npos,
+          "hardened git log still returns history");
+
+    system(("rm -rf " + repo).c_str());
+    std::remove(script.c_str());
+    std::remove(marker.c_str());
+    std::cout << "[OK] read-only git ignores repo diff drivers/hooks config\n";
+    return true;
+}
+
+// ============================================================
 // Symlink-aware containment
 // ============================================================
 
@@ -1578,6 +1733,12 @@ int main() {
     std::cout << "\n-- git invocation classifier --\n";
     ok &= git_classifier_unit();
     ok &= registry_git_mutating_invocations_denied();
+
+    std::cout << "\n-- bash segmentation + git hardening (Task 20) --\n";
+    ok &= bash_segmentation_unit();
+    ok &= bash_segmentation_gate_integration();
+    ok &= bash_segmentation_execute_denied();
+    ok &= git_readonly_ignores_repo_diff_drivers();
 
     std::cout << "\n-- symlink containment --\n";
     ok &= registry_symlink_escape_denied();
