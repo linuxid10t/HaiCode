@@ -493,9 +493,9 @@ static bool registry_read_inside_workdir_bypasses_gate() {
     haicode::ToolRegistry reg;
     haicode::register_builtin_tools(reg);
 
-    // Gate denies everything — but read inside working_dir should bypass it
+    // No rules: the ask callback denies, so only the working-dir exemption
+    // can let the read through.
     haicode::PermissionGate gate;
-    gate.set_rules({{"read", "*", haicode::PermissionEffect::Deny}});
     gate.set_ask_callback([](const std::string&, const std::string&,
                               const std::string&, const nlohmann::json&) {
         return haicode::PermissionEffect::Deny;
@@ -507,10 +507,16 @@ static bool registry_read_inside_workdir_bypasses_gate() {
     haicode::ToolContext ctx;
     ctx.working_dir = "/tmp";
     auto r = reg.execute("read", {{"path", p}}, ctx, gate);
-    CHECK(r.success,  "read inside working_dir should succeed despite deny rule");
+    CHECK(r.success,  "read inside working_dir should bypass callback-deny gate");
     CHECK(!r.denied,  "denied flag should not be set");
+
+    // An explicit configured Deny overrides the working-dir exemption.
+    gate.set_rules({{"read", "*", haicode::PermissionEffect::Deny}});
+    r = reg.execute("read", {{"path", p}}, ctx, gate);
+    CHECK(!r.success, "explicit read Deny rule must block in-project read");
+    CHECK(r.denied,   "explicit read Deny should set denied flag");
     std::remove(p.c_str());
-    std::cout << "[OK] registry read inside working_dir bypasses gate\n";
+    std::cout << "[OK] registry read bypasses callback-deny gate; Deny rule overrides\n";
     return true;
 }
 
@@ -558,12 +564,39 @@ static haicode::PermissionGate make_deny_all_gate() {
     return gate;
 }
 
+// Deny-callback gate with NO rules: everything unmatched resolves through
+// the callback (deny), so only the built-in exemptions can let a call
+// through. The paired rule-based form is make_deny_all_gate().
+static haicode::PermissionGate make_callback_deny_gate() {
+    haicode::PermissionGate gate;
+    gate.set_ask_callback([](const std::string&, const std::string&,
+                              const std::string&, const nlohmann::json&) {
+        return haicode::PermissionEffect::Deny;
+    });
+    return gate;
+}
+
 // First existing file among candidates, or "" if none (skip the test).
 static std::string first_existing(const std::vector<std::string>& candidates) {
     struct stat st;
     for (const auto& p : candidates)
         if (::stat(p.c_str(), &st) == 0) return p;
     return "";
+}
+
+// Small self-contained git repo (pattern from test_git_find.cpp) with a
+// feature branch that a wrongly-executed `git branch -D` would delete.
+static std::string setup_git_repo_fixture() {
+    const std::string root = "/tmp/tfc_git_gate_repo";
+    system(("rm -rf " + root).c_str());
+    ::mkdir(root.c_str(), 0755);
+    std::ofstream(root + "/README.md") << "gate fixture\n";
+    system(("cd " + root + " && "
+            "git init -q -b main && "
+            "git -c user.name=t -c user.email=t@t add . && "
+            "git -c user.name=t -c user.email=t@t commit -q -m init && "
+            "git branch feature").c_str());
+    return root;
 }
 
 static bool registry_read_system_headers_bypasses_gate() {
@@ -680,6 +713,132 @@ static bool registry_read_everywhere_allows_glob_and_grep_outside_workdir() {
 }
 
 // ============================================================
+// Task 18: explicit rules override built-in exemptions
+// ============================================================
+
+// No rules anywhere: each exempt class reports the builtin source, and an
+// unmatched non-exempt action falls through to the anonymous prompt default.
+static bool registry_exemptions_report_builtin_without_rules() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;  // no rules, no callback
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+
+    auto ws = reg.evaluate("web_search", {{"query", "x"}}, ctx, gate);
+    CHECK(ws.effect == haicode::PermissionEffect::Allow && ws.source == "builtin",
+          "web_search exemption reported as builtin without rules");
+    auto shot = reg.evaluate("screenshot", {}, ctx, gate);
+    CHECK(shot.effect == haicode::PermissionEffect::Allow && shot.source == "builtin",
+          "screenshot exemption reported as builtin without rules");
+    auto ps = reg.evaluate("process", {{"action", "list"}}, ctx, gate);
+    CHECK(ps.effect == haicode::PermissionEffect::Allow && ps.source == "builtin",
+          "process list exemption reported as builtin without rules");
+    auto ro = reg.evaluate("git", {{"subcommand", "status"}}, ctx, gate);
+    CHECK(ro.effect == haicode::PermissionEffect::Allow && ro.source == "builtin",
+          "read-only git exemption reported as builtin without rules");
+    auto rd = reg.evaluate("read", {{"path", "/tmp/tfc_builtin_probe.txt"}}, ctx, gate);
+    CHECK(rd.effect == haicode::PermissionEffect::Allow && rd.source == "builtin",
+          "in-project read exemption reported as builtin without rules");
+
+    // Non-exempt unmatched action: anonymous prompt default, not builtin.
+    auto b = reg.evaluate("bash", {{"command", "ls"}}, ctx, gate);
+    CHECK(b.effect == haicode::PermissionEffect::Ask && b.source == "prompt",
+          "unmatched non-exempt action reports prompt source");
+    std::cout << "[OK] exemptions report builtin source when no rules match\n";
+    return true;
+}
+
+// A configured Deny on each exempt class blocks it; an explicit Ask rule
+// routes to prompting instead of the silent exemption.
+static bool registry_explicit_rules_override_exemptions() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+
+    haicode::ToolContext ctx;
+    ctx.working_dir = "/tmp";
+
+    // web_search (via evaluate — no network involved).
+    haicode::PermissionGate deny_web;
+    deny_web.set_rules({{"web_search", "*", haicode::PermissionEffect::Deny}});
+    auto ws = reg.evaluate("web_search", {{"query", "x"}}, ctx, deny_web);
+    CHECK(ws.effect == haicode::PermissionEffect::Deny && ws.source == "configuration",
+          "configured web_search Deny overrides the web exemption");
+
+    // Explicit Ask rule on web_search: prompts (source names the rule layer)
+    // rather than silently allowing.
+    haicode::PermissionGate ask_web;
+    ask_web.set_rules({{"web_search", "*", haicode::PermissionEffect::Ask}});
+    auto wa = reg.evaluate("web_search", {{"query", "x"}}, ctx, ask_web);
+    CHECK(wa.effect == haicode::PermissionEffect::Ask && wa.source == "configuration",
+          "configured web_search Ask overrides the web exemption and prompts");
+
+    // process list (via evaluate; execute would need a live process table).
+    haicode::PermissionGate deny_proc;
+    deny_proc.set_rules({{"process", "*", haicode::PermissionEffect::Deny}});
+    auto ps = reg.evaluate("process", {{"action", "list"}}, ctx, deny_proc);
+    CHECK(ps.effect == haicode::PermissionEffect::Deny && ps.source == "configuration",
+          "configured process Deny overrides the read-only inspection exemption");
+
+    // screenshot.
+    haicode::PermissionGate deny_shot;
+    deny_shot.set_rules({{"screenshot", "*", haicode::PermissionEffect::Deny}});
+    auto shot = reg.evaluate("screenshot", {}, ctx, deny_shot);
+    CHECK(shot.effect == haicode::PermissionEffect::Deny && shot.source == "configuration",
+          "configured screenshot Deny overrides the screenshot exemption");
+
+    // Read-only git (listing) and in-project read, proven through execute so
+    // the denial (not execution) is observable.
+    const std::string repo = setup_git_repo_fixture();
+    ctx.working_dir = repo;
+    haicode::PermissionGate deny_git;
+    deny_git.set_rules({{"git", "*", haicode::PermissionEffect::Deny}});
+    auto g = reg.execute("git", {{"subcommand", "branch"}}, ctx, deny_git);
+    CHECK(!g.success && g.denied, "configured git Deny blocks read-only branch listing");
+
+    const std::string p = "/tmp/tfc_rule_read.txt";
+    write_file(p, "x\n");
+    ctx.working_dir = "/tmp";
+    haicode::PermissionGate deny_read;
+    deny_read.set_rules({{"read", "*", haicode::PermissionEffect::Deny}});
+    auto r = reg.execute("read", {{"path", p}}, ctx, deny_read);
+    CHECK(!r.success && r.denied, "configured read Deny blocks in-project read");
+    std::remove(p.c_str());
+    system(("rm -rf " + repo).c_str());
+
+    std::cout << "[OK] explicit Deny/Ask rules override built-in exemptions\n";
+    return true;
+}
+
+// Session layers keep their precedence over configured rules even for
+// exempt tools: a session Allow beats a configured Deny on web_search.
+static bool registry_session_allow_beats_configured_deny_for_exempt() {
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+
+    haicode::PermissionGate gate;
+    gate.set_rules({{"web_search", "*", haicode::PermissionEffect::Deny}});
+    gate.set_session_rules("s1", {{"web_search", "*", haicode::PermissionEffect::Allow}});
+
+    haicode::ToolContext ctx;
+    ctx.session_id = "s1";
+    ctx.working_dir = "/tmp";
+
+    auto d = reg.evaluate("web_search", {{"query", "x"}}, ctx, gate);
+    CHECK(d.effect == haicode::PermissionEffect::Allow && d.source == "session",
+          "session Allow still overrides configured Deny for an exempt tool");
+
+    // Another session still sees the configured Deny.
+    ctx.session_id = "s2";
+    d = reg.evaluate("web_search", {{"query", "x"}}, ctx, gate);
+    CHECK(d.effect == haicode::PermissionEffect::Deny && d.source == "configuration",
+          "configured Deny applies to sessions without an overriding Allow");
+    std::cout << "[OK] session Allow overrides configured Deny for exempt tools\n";
+    return true;
+}
+
+// ============================================================
 // Git invocation classifier
 // ============================================================
 
@@ -754,48 +913,40 @@ static bool git_classifier_unit() {
     return true;
 }
 
-// Small self-contained git repo (pattern from test_git_find.cpp) with a
-// feature branch that a wrongly-executed `git branch -D` would delete.
-static std::string setup_git_repo_fixture() {
-    const std::string root = "/tmp/tfc_git_gate_repo";
-    system(("rm -rf " + root).c_str());
-    ::mkdir(root.c_str(), 0755);
-    std::ofstream(root + "/README.md") << "gate fixture\n";
-    system(("cd " + root + " && "
-            "git init -q -b main && "
-            "git -c user.name=t -c user.email=t@t add . && "
-            "git -c user.name=t -c user.email=t@t commit -q -m init && "
-            "git branch feature").c_str());
-    return root;
-}
-
 static bool registry_git_mutating_invocations_denied() {
     const std::string repo = setup_git_repo_fixture();
 
     haicode::ToolRegistry reg;
     haicode::register_builtin_tools(reg);
-    auto gate = make_deny_all_gate();
+    auto gate = make_callback_deny_gate();
 
     haicode::ToolContext ctx;
     ctx.working_dir = repo;
 
-    // Bare `git branch` (listing) bypasses the deny-all gate.
+    // Bare `git branch` (listing) bypasses the rules-free deny-callback gate.
     auto list = reg.execute("git", {{"subcommand", "branch"}}, ctx, gate);
-    CHECK(list.success, "git branch listing should bypass deny-all gate");
+    CHECK(list.success, "git branch listing should bypass deny-callback gate");
     CHECK(!list.denied,  "git branch listing must not set denied flag");
     CHECK(list.output.find("feature") != std::string::npos,
           "branch listing should show the feature branch");
 
+    // A configured Deny on git overrides the read-only exemption.
+    haicode::PermissionGate deny_gate;
+    deny_gate.set_rules({{"git", "*", haicode::PermissionEffect::Deny}});
+    auto denied = reg.execute("git", {{"subcommand", "branch"}}, ctx, deny_gate);
+    CHECK(!denied.success, "configured git Deny must block read-only branch listing");
+    CHECK(denied.denied,   "configured git Deny should set denied flag");
+
     // `git branch -D feature` is gated: denied, never executed.
     auto del = reg.execute("git", {{"subcommand", "branch"},
                                    {"args", {"-D", "feature"}}}, ctx, gate);
-    CHECK(!del.success, "git branch -D must be denied under deny-all rules");
+    CHECK(!del.success, "git branch -D must be denied under deny-callback gate");
     CHECK(del.denied,   "git branch -D must set denied flag");
 
     // `git stash clear` is gated too.
     auto stash = reg.execute("git", {{"subcommand", "stash"},
                                      {"args", {"clear"}}}, ctx, gate);
-    CHECK(!stash.success, "git stash clear must be denied under deny-all rules");
+    CHECK(!stash.success, "git stash clear must be denied under deny-callback gate");
     CHECK(stash.denied,   "git stash clear must set denied flag");
 
     // The branch survived both denied calls — nothing executed.
@@ -812,7 +963,7 @@ static bool registry_git_mutating_invocations_denied() {
 // Symlink-aware containment
 // ============================================================
 
-// Deny-all gate + in-project symlink pointing outside the tree: the read
+// First existing file among candidates, or "" if none (skip the test).
 // must be gated (review #4 repro). An in-project symlink to an in-project
 // file still bypasses (the trusted-tree contract is about the resolved
 // target, not the link's location).
@@ -840,7 +991,11 @@ static bool registry_symlink_escape_denied() {
     CHECK(!esc.success, "read through symlink to outside file must be denied");
     CHECK(esc.denied,   "denied flag must be set for symlink escape read");
 
-    auto okr = reg.execute("read", {{"path", wd + "/alias.txt"}}, ctx, gate);
+    // The in-project alias read is asserted against a rules-free gate: an
+    // explicit read Deny (as in make_deny_all_gate) now overrides the
+    // working-dir exemption by design.
+    auto ok_gate = make_callback_deny_gate();
+    auto okr = reg.execute("read", {{"path", wd + "/alias.txt"}}, ctx, ok_gate);
     CHECK(okr.success, "read through in-project symlink to in-project file bypasses");
     CHECK(!okr.denied, "in-project symlink read must not set denied flag");
     CHECK(okr.output.find("public") != std::string::npos,
@@ -913,6 +1068,8 @@ static bool registry_symlinked_dir_gates_glob_grep() {
 
 // Broken symlink: nothing to leak — the read executes (not denied) and fails
 // with a cannot-open error, keeping the not-gated vs failed distinction.
+// Rules-free callback-deny gate: an explicit read Deny would now (by design)
+// override the working-dir exemption.
 static bool registry_broken_symlink_not_denied() {
     const std::string wd = "/tmp/tfc_broken_wd";
     system(("rm -rf " + wd).c_str());
@@ -921,7 +1078,7 @@ static bool registry_broken_symlink_not_denied() {
 
     haicode::ToolRegistry reg;
     haicode::register_builtin_tools(reg);
-    auto gate = make_deny_all_gate();
+    auto gate = make_callback_deny_gate();
 
     haicode::ToolContext ctx;
     ctx.working_dir = wd;
@@ -1412,6 +1569,11 @@ int main() {
     ok &= registry_read_everywhere_allows_glob_and_grep_outside_workdir();
     ok &= registry_write_denied_sets_flag();
     ok &= registry_unknown_tool();
+
+    std::cout << "\n-- explicit rules override exemptions (Task 18) --\n";
+    ok &= registry_exemptions_report_builtin_without_rules();
+    ok &= registry_explicit_rules_override_exemptions();
+    ok &= registry_session_allow_beats_configured_deny_for_exempt();
 
     std::cout << "\n-- git invocation classifier --\n";
     ok &= git_classifier_unit();

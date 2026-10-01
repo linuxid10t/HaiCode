@@ -199,19 +199,37 @@ AuthorizationDecision PermissionGate::evaluate(const std::string& session_id,
             return {PermissionEffect::Allow, "Exact temporary session grant",
                 "temporary_exact", static_cast<int>(i)};
     }
-    auto match = [&](const auto& rules, const std::string& source) {
+    auto match = [&](const auto& rules, const std::string& source, bool& matched) {
         for (int i = static_cast<int>(rules.size()) - 1; i >= 0; --i) {
             const auto& rule = rules[i];
             if (fnmatch(rule.action.c_str(), action.c_str(), 0) == 0
-                && fnmatch(rule.resource.c_str(), resource.c_str(), 0) == 0)
+                && fnmatch(rule.resource.c_str(), resource.c_str(), 0) == 0) {
+                matched = true;
                 return AuthorizationDecision{rule.effect, "Matched " + source + " rule",
                     source, i};
+            }
         }
+        matched = false;
         return AuthorizationDecision{};
     };
-    for (auto decision : {match(state.temporary_patterns, "temporary_pattern"),
-            match(state.session, "session"), match(state.configured, "configuration")})
+    // An Ask match falls through to the next layer (precedence unchanged),
+    // but the highest-precedence matched Ask is remembered and reported
+    // instead of the anonymous no-match default: ToolRegistry::evaluate
+    // distinguishes "an explicit rule said Ask" from "nothing matched" so a
+    // configured Ask rule can override a built-in exemption.
+    const std::vector<PermissionRule>* layers[] = {
+        &state.temporary_patterns, &state.session, &state.configured};
+    const char* sources[] = {"temporary_pattern", "session", "configuration"};
+    AuthorizationDecision ask_decision;
+    bool have_ask = false;
+    for (size_t l = 0; l < 3; ++l) {
+        bool matched = false;
+        auto decision = match(*layers[l], sources[l], matched);
+        if (!matched) continue;
         if (decision.effect != PermissionEffect::Ask) return decision;
+        if (!have_ask) { ask_decision = decision; have_ask = true; }
+    }
+    if (have_ask) return ask_decision;
     return {PermissionEffect::Ask, "No applicable Allow or Deny; approval required", "prompt"};
 }
 
@@ -466,11 +484,14 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
     auto builtin = [](const std::string& reason) {
         return AuthorizationDecision{PermissionEffect::Allow, reason, "builtin"};
     };
+    // Absolute exemption: Haiku's system header/doc roots are ground truth
+    // for BeAPI work and live outside every project — no rule layer may
+    // deny them. Returns immediately.
     if (!ctx.working_dir.empty()) {
         if (name == "read" || name == "ls" || name == "grep" ||
             name == "diff" || name == "find" || name == "symbols") {
-            if (path_is_always_readable(tool->resource(input, ctx), ctx.working_dir))
-                return builtin("Read within project or trusted system root");
+            if (is_within_always_readable_root(tool->resource(input, ctx)))
+                return builtin("Read within trusted system root");
         }
         if (name == "glob") {
             std::string pattern = input.value("pattern", "");
@@ -483,29 +504,80 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
             }
             if (prefix.empty()) prefix = ctx.working_dir;
             std::string base = normalize_path(prefix);
-            if (path_resolves_within(base, ctx.working_dir) || is_within_always_readable_root(base))
-                return builtin("Glob within project or trusted system root");
+            if (is_within_always_readable_root(base))
+                return builtin("Glob within trusted system root");
+        }
+    }
+    // Overridable exemptions: working-dir containment, read-only git, web
+    // and interaction tools, screenshot, read-only process inspection. Held
+    // as a fallback and returned only when no explicit rule layer matched,
+    // so a configured Deny/Ask on any of these takes effect.
+    AuthorizationDecision exemption;
+    bool has_exemption = false;
+    if (!ctx.working_dir.empty()) {
+        if (name == "read" || name == "ls" || name == "grep" ||
+            name == "diff" || name == "find" || name == "symbols") {
+            if (path_resolves_within(tool->resource(input, ctx), ctx.working_dir)) {
+                exemption = builtin("Read within project directory");
+                has_exemption = true;
+            }
+        }
+        if (name == "glob") {
+            std::string pattern = input.value("pattern", "");
+            size_t wild = pattern.find_first_of("*?[");
+            std::string prefix = wild == std::string::npos ? pattern : pattern.substr(0, wild);
+            if (!prefix.empty() && prefix[0] != '/') {
+                std::string base = ctx.working_dir;
+                while (!base.empty() && base.back() == '/') base.pop_back();
+                prefix = base + "/" + prefix;
+            }
+            if (prefix.empty()) prefix = ctx.working_dir;
+            std::string base = normalize_path(prefix);
+            if (path_resolves_within(base, ctx.working_dir)) {
+                exemption = builtin("Glob within project directory");
+                has_exemption = true;
+            }
         }
         if (name == "git") {
             std::vector<std::string> args;
             if (input.contains("args") && input["args"].is_array())
                 for (const auto& arg : input["args"])
                     if (arg.is_string()) args.push_back(arg.get<std::string>());
-            if (git_invocation_is_readonly(input.value("subcommand", ""), args))
-                return builtin("Read-only Git invocation");
+            if (git_invocation_is_readonly(input.value("subcommand", ""), args)) {
+                exemption = builtin("Read-only Git invocation");
+                has_exemption = true;
+            }
         }
     }
-    if (name == "web_search" || name == "web_extract")
-        return builtin("Built-in web tool exemption");
-    if (name == "propose_plan" || name == "todo_write" || name == "ask_user")
-        return builtin("Built-in interaction tool exemption");
-    if (name == "screenshot") return builtin("Built-in screenshot exemption");
+    if (name == "web_search" || name == "web_extract") {
+        exemption = builtin("Built-in web tool exemption");
+        has_exemption = true;
+    }
+    if (name == "propose_plan" || name == "todo_write" || name == "ask_user") {
+        exemption = builtin("Built-in interaction tool exemption");
+        has_exemption = true;
+    }
+    if (name == "screenshot") {
+        exemption = builtin("Built-in screenshot exemption");
+        has_exemption = true;
+    }
     if (name == "process") {
         std::string action = input.value("action", "");
-        if (action == "list" || action == "check_port")
-            return builtin("Read-only process inspection");
+        if (action == "list" || action == "check_port") {
+            exemption = builtin("Read-only process inspection");
+            has_exemption = true;
+        }
     }
-    return gate.evaluate(ctx.session_id, tool->required_permission(), tool->resource(input, ctx));
+    auto g = gate.evaluate(ctx.session_id, tool->required_permission(),
+                           tool->resource(input, ctx));
+    // Anything other than the anonymous no-match default is an explicit
+    // Allow/Deny/Ask from some rule layer (the gate reports a matched Ask
+    // with that layer's source). Explicit rules override the built-in
+    // exemptions; with no matching rule the exemption — if any — applies.
+    if (g.effect != PermissionEffect::Ask || g.source != "prompt")
+        return g;
+    if (has_exemption) return exemption;
+    return g;
 }
 
 ToolResult ToolRegistry::execute_impl(const std::string& name,

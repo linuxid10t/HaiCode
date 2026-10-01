@@ -83,6 +83,15 @@ Rules:
   unavailable markers. Every compaction rebuild retains vision and inference
   settings. Malformed-row diagnostics must never include raw payloads.
 
+- **Built-in permission exemptions are fallbacks.** Mode/offline checks sit
+  above everything; the always-readable system roots are absolute; every
+  other built-in allow (in-project reads, read-only git, web tools,
+  screenshot, process list/check_port) applies only when no rule layer
+  matched, so a configured or session Deny/Ask rule on those tools takes
+  effect. The gate reports a matched Ask rule with its layer source instead
+  of the anonymous `"prompt"` default — rely on that distinction, not on
+  effect alone.
+
 - **Provider registration is generic.** `AppConfig::providers` is a
   `map<id, ProviderConfig>`; each `ProviderConfig` has a `type` of
   `"anthropic"`, `"openai"`, `"chatgpt"`, or one of the flavored
