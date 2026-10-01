@@ -52,9 +52,11 @@ AppConfig ConfigLoader::load(const std::string& project_dir) {
 }
 
 AppConfig load_with_layers(const ConfigLayer& global_layer,
-                           const std::string& project_dir) {
-    // Project config
-    ConfigLayer project_layer = load_layer(project_dir + "/.haicode/config.json");
+                           const std::string& project_dir,
+                           ProjectTrust* trust_state) {
+    // Project config, with the trust boundary applied.
+    ConfigLayer project_layer = load_project_layer(project_dir, "",
+                                                   trust_state);
 
     AppConfig result = merge(global_layer, project_layer);
 
@@ -720,6 +722,205 @@ bool update_config_file(const std::string& path,
         return false;
     }
     return true;
+}
+
+// ---- Project trust boundary ----
+
+// Gated keys grant authority; providers are never project-configurable.
+static const std::string kWsKeyPrefix = "web_search/api_keys/";
+
+bool has_gated_keys(const ConfigLayer& project) {
+    if (project.has("permissions") && !project.values.permissions.empty())
+        return true;
+    if (project.has("build_command") && !project.values.build_command.empty())
+        return true;
+    if (project.has("agents") && !project.values.agents.empty())
+        return true;
+    for (const auto& k : project.present)
+        if (k.rfind(kWsKeyPrefix, 0) == 0)
+            return true;
+    return false;
+}
+
+std::string project_gated_fingerprint(const ConfigLayer& project) {
+    // Canonical JSON of the gated content AS PARSED: cosmetic reformatting
+    // or reordering of the file keeps the fingerprint stable (nlohmann
+    // objects serialize in key order), while any semantic change to a
+    // gated key invalidates it and re-prompts.
+    nlohmann::json j = nlohmann::json::object();
+    if (project.has("permissions") && !project.values.permissions.empty()) {
+        nlohmann::json arr = nlohmann::json::array();
+        for (const auto& r : project.values.permissions)
+            arr.push_back({{"action", r.action}, {"resource", r.resource},
+                           {"effect", effect_string(r.effect)}});
+        j["permissions"] = arr;
+    }
+    if (project.has("build_command") && !project.values.build_command.empty())
+        j["build_command"] = project.values.build_command;
+    if (project.has("agents") && !project.values.agents.empty()) {
+        nlohmann::json agents = nlohmann::json::object();
+        for (const auto& [id, ag] : project.values.agents) {
+            nlohmann::json o = nlohmann::json::object();
+            if (ag.model)         o["model"]         = *ag.model;
+            if (ag.system_prompt) o["system_prompt"] = *ag.system_prompt;
+            if (ag.max_steps)     o["max_steps"]     = *ag.max_steps;
+            if (!ag.color.empty()) o["color"]        = ag.color;
+            if (!ag.permissions.empty()) {
+                nlohmann::json parr = nlohmann::json::array();
+                for (const auto& r : ag.permissions)
+                    parr.push_back({{"action", r.action},
+                                    {"resource", r.resource},
+                                    {"effect", effect_string(r.effect)}});
+                o["permissions"] = parr;
+            }
+            agents[id] = o;
+        }
+        j["agents"] = agents;
+    }
+    nlohmann::json keys = nlohmann::json::object();
+    for (const auto& k : project.present) {
+        if (k.rfind(kWsKeyPrefix, 0) != 0) continue;
+        std::string engine = k.substr(kWsKeyPrefix.size());
+        auto it = project.values.web_search_api_keys.find(engine);
+        if (it != project.values.web_search_api_keys.end())
+            keys[engine] = it->second;
+    }
+    if (!keys.empty()) j["web_search_api_keys"] = keys;
+    return util::sha256_hex(j.dump());
+}
+
+void strip_untrusted(ConfigLayer& project) {
+    project.values.permissions.clear();
+    project.present.erase("permissions");
+    project.values.build_command.clear();
+    project.present.erase("build_command");
+    project.values.agents.clear();
+    project.present.erase("agents");
+    project.values.web_search_api_keys.clear();
+    for (auto it = project.present.begin(); it != project.present.end();) {
+        if (it->rfind(kWsKeyPrefix, 0) == 0)
+            it = project.present.erase(it);
+        else
+            ++it;
+    }
+}
+
+// Credentials and endpoints are global-only: a project config can never
+// register, re-point, or re-key a provider — not even a trusted one.
+static void strip_project_providers(ConfigLayer& project) {
+    project.values.providers.clear();
+    for (auto it = project.present.begin(); it != project.present.end();) {
+        if (it->rfind("providers/", 0) == 0)
+            it = project.present.erase(it);
+        else
+            ++it;
+    }
+}
+
+// Trust records key on the resolved path so aliases (/boot/home/... vs ~/...)
+// can't mint separate identities; an unresolvable path falls back to itself.
+static std::string canonical_project_key(const std::string& project_dir) {
+    char* resolved = realpath(project_dir.c_str(), nullptr);
+    if (!resolved) return project_dir;
+    std::string key(resolved);
+    free(resolved);
+    return key;
+}
+
+// What the trust prompt shows: exactly what the gated keys would enable.
+// Engine NAMES only for search keys — never the secret values.
+static std::string trust_summary(const ConfigLayer& project) {
+    std::string out;
+    if (!project.values.permissions.empty()) {
+        size_t n = project.values.permissions.size();
+        bool allow_all = false;
+        for (const auto& r : project.values.permissions)
+            if (r.effect == PermissionEffect::Allow && r.resource == "*")
+                allow_all = true;
+        out += std::to_string(n) + " permission rule" + (n == 1 ? "" : "s");
+        if (allow_all) out += " (including an allow-all rule)";
+        out += "\n";
+    }
+    if (!project.values.build_command.empty())
+        out += "build command: " + project.values.build_command + "\n";
+    if (!project.values.agents.empty()) {
+        out += std::to_string(project.values.agents.size()) + " agent override"
+             + (project.values.agents.size() == 1 ? "" : "s") + " (";
+        bool first = true;
+        for (const auto& [id, a] : project.values.agents) {
+            if (!first) out += ", ";
+            first = false;
+            out += id;
+        }
+        out += ")\n";
+    }
+    std::string engines;
+    for (const auto& k : project.present) {
+        if (k.rfind(kWsKeyPrefix, 0) != 0) continue;
+        if (!engines.empty()) engines += ", ";
+        engines += k.substr(kWsKeyPrefix.size());
+    }
+    if (!engines.empty())
+        out += "web-search API keys for: " + engines + "\n";
+    return out;
+}
+
+std::map<std::string, std::string> load_trusted_projects(
+    const std::string& store_path) {
+    std::string path = store_path.empty() ? global_config_path() : store_path;
+    std::map<std::string, std::string> out;
+    if (path.empty()) return out;
+    std::ifstream f(path);
+    if (!f.is_open()) return out;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    auto j = nlohmann::json::parse(ss.str(), nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return out;
+    if (!j.contains("trusted_projects") || !j["trusted_projects"].is_object())
+        return out;
+    for (auto& [k, v] : j["trusted_projects"].items())
+        if (v.is_string())
+            out[k] = v.get<std::string>();
+    return out;
+}
+
+bool store_trust_record(const std::string& store_path,
+                        const std::string& project_dir,
+                        const std::string& fingerprint,
+                        std::string& error) {
+    std::string path = store_path.empty() ? global_config_path() : store_path;
+    if (path.empty()) {
+        error = "cannot determine the settings directory";
+        return false;
+    }
+    std::string key = canonical_project_key(project_dir);
+    return update_config_file(path, [&key, &fingerprint](nlohmann::json& j) {
+        if (!j.contains("trusted_projects") || !j["trusted_projects"].is_object())
+            j["trusted_projects"] = nlohmann::json::object();
+        j["trusted_projects"][key] = fingerprint;
+    }, error);
+}
+
+ConfigLayer load_project_layer(const std::string& project_dir,
+                               const std::string& trust_store_path,
+                               ProjectTrust* state_out) {
+    ConfigLayer project = load_layer(project_dir + "/.haicode/config.json");
+    strip_project_providers(project);
+
+    ProjectTrust state;
+    if (has_gated_keys(project)) {
+        state.needed = true;
+        state.fingerprint = project_gated_fingerprint(project);
+        auto trusted = load_trusted_projects(trust_store_path);
+        auto it = trusted.find(canonical_project_key(project_dir));
+        state.granted = it != trusted.end() && it->second == state.fingerprint;
+        state.summary = trust_summary(project);
+        if (!state.granted)
+            strip_untrusted(project);
+    }
+    if (state_out)
+        *state_out = state;
+    return project;
 }
 
 } // namespace haicode

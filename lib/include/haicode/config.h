@@ -132,13 +132,6 @@ struct ConfigLayer {
 // layer (nothing present), so it can never clobber the other layer.
 ConfigLayer load_layer(const std::string& path);
 
-// Full load with a caller-supplied GLOBAL layer: loads the project layer
-// from <project_dir>/.haicode/config.json, merges, and attaches agents.md /
-// claude.md. The GUI keeps its (possibly just-edited) global layer in
-// memory and re-merges through this after a Settings save.
-AppConfig load_with_layers(const ConfigLayer& global_layer,
-                           const std::string& project_dir);
-
 // Presence-based merge: the overlay wins exactly for keys present in the
 // overlay layer (per subkey for provider entries); collections (permissions,
 // instructions, skills) keep append semantics and per-key maps (models,
@@ -173,6 +166,75 @@ nlohmann::json global_scope_json(const AppConfig& cfg);
 // its non-leak guarantees are testable headless.
 bool sync_global_scope(const AppConfig& global, const std::string& path,
                        std::string& error);
+
+// ---- Project trust boundary ------------------------------------------------
+//
+// A repository's .haicode/config.json is untrusted input: a hostile repo
+// could otherwise point provider base_urls at itself (capturing env-fallback
+// API keys and the OAuth token), allow-all its permissions, or set a build
+// hook that runs arbitrary shell. Rules, enforced in load_project_layer():
+//
+//   * `providers` NEVER merges from the project layer — credentials and
+//     endpoints come from the global layer only, trusted or not.
+//   * `permissions`, `build_command`, `agents`, and `web_search.api_keys`
+//     are gated: they are stripped unless the user recorded trust for this
+//     project's CURRENT gated content (fingerprint match).
+//   * Everything else (model, default_mode, vision, ...) merges normally —
+//     untrusted projects lose only the keys that grant authority.
+
+// Outcome of consulting the trust store for one project directory.
+struct ProjectTrust {
+    bool needed = false;       // the project layer carries gated keys
+    std::string fingerprint;   // canonical digest of those keys as parsed
+    bool granted = false;      // trust record matches the fingerprint
+    // Human-readable list of exactly what the gated keys would enable, for
+    // the trust prompt ("2 permission rules (including allow-all), build
+    // command: ..."). Empty when !needed.
+    std::string summary;
+};
+
+// Load the project layer with the trust boundary applied: project providers
+// are always removed; gated keys are removed unless the trust store at
+// `trust_store_path` (the global config file; empty = global_config_path())
+// holds a matching fingerprint for realpath(project_dir). `state_out`, when
+// given, reports the pre-strip trust state so the GUI can prompt.
+ConfigLayer load_project_layer(const std::string& project_dir,
+                               const std::string& trust_store_path,
+                               ProjectTrust* state_out = nullptr);
+
+// The "trusted_projects" map in the trust-store file:
+// {"trusted_projects": {"<realpath(project_dir)>": "<fingerprint>"}}.
+// A missing/invalid file or key yields an empty map.
+std::map<std::string, std::string> load_trusted_projects(
+    const std::string& trust_store_path);
+
+// Record (or replace) the trust fingerprint for realpath(project_dir) via
+// update_config_file — atomic, 0600, preserves unrelated keys.
+bool store_trust_record(const std::string& trust_store_path,
+                        const std::string& project_dir,
+                        const std::string& fingerprint,
+                        std::string& error);
+
+// Digest of the gated keys exactly as parsed into the layer. Two layers
+// describing the same gated content (regardless of formatting or unrelated
+// keys) produce the same fingerprint; any gated change does not.
+std::string project_gated_fingerprint(const ConfigLayer& project);
+
+// Does the layer carry any gated key?
+bool has_gated_keys(const ConfigLayer& project);
+
+// Remove every gated key (values + presence) from the layer, in place.
+void strip_untrusted(ConfigLayer& project);
+
+// Full load with a caller-supplied GLOBAL layer: loads the project layer
+// through the trust boundary (load_project_layer), merges, and attaches
+// agents.md / claude.md. The GUI keeps its (possibly just-edited) global
+// layer in memory and re-merges through this after a Settings save.
+// `trust_state`, when given, receives the project's pre-strip trust state
+// (needed + granted) so the caller can prompt.
+AppConfig load_with_layers(const ConfigLayer& global_layer,
+                           const std::string& project_dir,
+                           ProjectTrust* trust_state = nullptr);
 
 // One configurable permission source (global or project file), kept
 // un-merged so the policy editor can show and edit each independently.

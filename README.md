@@ -166,6 +166,29 @@ global config, and the build command is project-scoped — saved to the open
 project's own `.haicode/config.json`, so one project's build hook never runs
 in every project.
 
+### Project trust
+
+A repository's `.haicode/config.json` is treated as untrusted input. Two
+rules protect you when you open a repository for the first time:
+
+- **Providers never come from a project.** Credentials and endpoints are
+  configured only in your global config — a checked-in config can never
+  re-point a provider at another server (which would capture your API key
+  or OAuth token), no matter how the project is configured.
+- **Authority-granting keys require your consent.** A project's
+  `permissions` rules, `build_command`, `agents`, and `web_search.api_keys`
+  are ignored until you trust that project. When such keys are present,
+  HaiCode shows exactly what they would enable (permission rules including
+  any allow-all rule, the build command, agent overrides, which search
+  engines get keys) and asks; **Don't Trust** is the default. Trust is
+  recorded per resolved project path in the global config
+  (`"trusted_projects"`), and any later change to those keys invalidates
+  the record and asks again — cosmetic reformatting does not.
+
+Everything else in a project config (model, default mode, vision overrides,
+skills, …) merges as before; untrusted projects lose only the keys that
+grant authority.
+
 ### Providers
 
 The `"providers"` object maps arbitrary ids to provider configs. Each entry has

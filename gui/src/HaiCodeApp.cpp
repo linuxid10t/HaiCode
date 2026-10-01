@@ -182,7 +182,7 @@ HaiCodeApp::ReadyToRun()
 
     // --- 3. Load config ---
     global_layer_ = haicode::load_layer(haicode::global_config_path());
-    config_ = haicode::load_with_layers(global_layer_, project_dir_);
+    _SyncMergedConfig();  // fills config_ and last_trust_ (gate not yet up)
 
     // --- 4. Create core objects ---
     store_     = std::make_unique<haicode::SessionStore>(*db_);
@@ -262,6 +262,12 @@ HaiCodeApp::ReadyToRun()
 
     // --- 13. Show the window ---
     main_window_->Show();
+
+    // --- 13b. Project trust: if the project's config carries gated keys
+    // (permission rules, a build command, agent overrides, search API keys)
+    // without a matching trust record, ask now. Declining leaves the merged
+    // config as loaded — stripped — so the fail-closed state is already set.
+    _MaybePromptProjectTrust();
 
     // --- 14. Kick off initial model fetch for the provider that the session
     // (loaded in the constructor via _SwitchToSession) already set. Posting
@@ -409,6 +415,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             project_dir_ = path;
             global_layer_ = haicode::load_layer(haicode::global_config_path());
             _SyncMergedConfig();
+            _MaybePromptProjectTrust();
             _RecreateEngine();
             break;
         }
@@ -669,11 +676,47 @@ HaiCodeApp::MessageReceived(BMessage* msg)
 void
 HaiCodeApp::_SyncMergedConfig()
 {
-    config_ = haicode::load_with_layers(global_layer_, project_dir_);
+    config_ = haicode::load_with_layers(global_layer_, project_dir_,
+                                        &last_trust_);
     // The project layer may add or remove permission rules; the gate keeps
     // the previously configured set otherwise.
     if (perm_gate_)
         perm_gate_->set_rules(config_.permissions);
+}
+
+void
+HaiCodeApp::_MaybePromptProjectTrust()
+{
+    if (!last_trust_.needed || last_trust_.granted)
+        return;
+    // Fail-closed prompt: "Don't Trust" is the default button and Escape —
+    // the merged config already reflects the stripped layer, so declining
+    // is a no-op.
+    BString text;
+    text << "The configuration in this project:\n\n"
+         << project_dir_.c_str()
+         << "\n\nwants to enable:\n\n"
+         << last_trust_.summary.c_str()
+         << "\nUntil the project is trusted, these settings are ignored.";
+    BAlert* alert = new BAlert("Project trust", text.String(),
+                               "Don't Trust", "Trust", nullptr,
+                               B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+    alert->SetShortcut(0, B_ESCAPE);
+    if (alert->Go() != 1)
+        return;
+    std::string err;
+    if (!haicode::store_trust_record("", project_dir_,
+                                     last_trust_.fingerprint, err)) {
+        BString failure;
+        failure << "Could not record trust for this project:\n\n"
+                << err.c_str();
+        BAlert* a = new BAlert("Trust failed", failure.String(), "OK");
+        a->Go();
+        return;
+    }
+    // Record matches the current gated content: re-merge so the gated keys
+    // (permissions, build command, ...) take effect.
+    _SyncMergedConfig();
 }
 
 bool

@@ -55,6 +55,9 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
 // other editors may have created world-readable.
 std::string ensure_owner_only(const std::string& path);
 
+// Lowercase hex SHA-256 of `data`. Used for config trust fingerprints.
+std::string sha256_hex(const std::string& data);
+
 // Create a securely-named scratch file via mkstemp on tmpl_prefix +
 // "XXXXXX". For temp files that are deleted when done (not renamed over a
 // target). Returns the open fd (caller closes and unlinks), or -1 on

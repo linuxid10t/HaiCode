@@ -59,9 +59,16 @@ private:
     // config's project-owned values (build_command, project providers, ...)
     // must never leak into it.
     haicode::ConfigLayer global_layer_;
+    // Trust state of the open project's gated config keys, as of the last
+    // _SyncMergedConfig() (pre-strip). Drives the trust prompt.
+    haicode::ProjectTrust last_trust_;
     // Re-merge global_layer_ + the project layer into config_ and push the
     // refreshed permission rules to the gate.
     void _SyncMergedConfig();
+    // If the open project carries gated config keys (permissions, build
+    // command, agents, search API keys) without a matching trust record,
+    // prompt; "Trust" stores the record and re-merges so they take effect.
+    void _MaybePromptProjectTrust();
     std::string project_dir_;
 
     // Shared holder so the broker's delivery callback can capture MainWindow*

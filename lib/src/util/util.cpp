@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <random>
 #include <curl/curl.h>
+#include <openssl/sha.h>
 #include <cstring>
 #include <cstdlib>
 #include <vector>
@@ -243,6 +244,16 @@ std::string ensure_owner_only(const std::string& path) {
     if (chmod(path.c_str(), bits & ~077) != 0)
         return "Cannot tighten permissions on " + path + ": " + strerror(errno);
     return "";
+}
+
+std::string sha256_hex(const std::string& data) {
+    unsigned char digest[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(data.data()), data.size(),
+           digest);
+    std::ostringstream ss;
+    for (unsigned char b : digest)
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)b;
+    return ss.str();
 }
 
 int make_secure_temp(const std::string& tmpl_prefix, std::string& out_path) {
