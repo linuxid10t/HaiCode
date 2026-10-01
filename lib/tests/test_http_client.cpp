@@ -318,6 +318,16 @@ static void serve_responses(int listen_fd, const std::vector<std::string>& respo
     }
 }
 
+// State shared with the client thread, which may outlive this function on
+// a regression (cancel fails, thread detached) — shared_ptr ownership keeps
+// a detached thread from dangling against this stack frame.
+struct CancelWaitState {
+    haicode::HttpClient http;
+    std::atomic<bool> done{false};
+    long code = 42;
+    std::string terr = "unset";
+};
+
 // Cancel while the transfer is silent: the server accepts, drains the
 // request, optionally writes headers, then goes quiet. write_cb never fires
 // in this phase — regression for cancels that used to ride data arrival and
@@ -327,10 +337,7 @@ static bool test_cancel_aborts_silent_wait(bool send_headers) {
     int port = bind_ephemeral(fd);
     CHECK(port > 0, "ephemeral bind failed");
 
-    haicode::HttpClient http;
-    long code = 42;
-    std::string terr = "unset";
-    std::atomic<bool> done{false};
+    auto st = std::make_shared<CancelWaitState>();
     std::atomic<bool> request_seen{false};
 
     std::thread srv([&] {
@@ -341,16 +348,16 @@ static bool test_cancel_aborts_silent_wait(bool send_headers) {
             (void)!write(c, "HTTP/1.1 200 OK\r\n"
                             "Content-Type: text/event-stream\r\n\r\n", 56);
         request_seen = true;
-        for (int i = 0; i < 100 && !done; i++)
+        for (int i = 0; i < 100 && !st->done; i++)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         close(c);
     });
 
-    std::thread client([&] {
-        http.post_sse("http://127.0.0.1:" + std::to_string(port), {}, "{}",
-                      [](const haicode::SSEEvent&) { return true; },
-                      &code, &terr);
-        done = true;
+    std::thread client([st, port] {
+        st->http.post_sse("http://127.0.0.1:" + std::to_string(port), {}, "{}",
+                          [](const haicode::SSEEvent&) { return true; },
+                          &st->code, &st->terr);
+        st->done = true;
     });
 
     // Wait until the request is registered (server drained it), then cancel.
@@ -358,19 +365,20 @@ static bool test_cancel_aborts_silent_wait(bool send_headers) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     auto begin = std::chrono::steady_clock::now();
-    http.cancel();
-    for (int i = 0; i < 50 && !done; i++)
+    st->http.cancel();
+    for (int i = 0; i < 50 && !st->done; i++)
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     bool fast = std::chrono::steady_clock::now() - begin < std::chrono::seconds(5);
-    if (done) client.join();
-    else      client.detach();
+    if (st->done) client.join();
+    else          client.detach();  // safe: state owned via shared_ptr
     srv.join();
     close(fd);
 
-    CHECK(done, "post_sse must return after cancel() during a silent wait");
+    CHECK(st->done, "post_sse must return after cancel() during a silent wait");
     CHECK(fast, "cancel must abort within ~1 s, not ride the low-speed timeout");
-    CHECK(code == -1, "cancelled silent wait reports transport code -1");
-    CHECK(terr.empty(), "cancel is silent — no transport error text, got: " + terr);
+    CHECK(st->code == -1, "cancelled silent wait reports transport code -1");
+    CHECK(st->terr.empty(), "cancel is silent — no transport error text, got: "
+          + st->terr);
     std::cout << "[OK] cancel aborts silent wait (headers="
               << (send_headers ? "sent" : "none") << ") in <5s, silent\n";
     return true;
