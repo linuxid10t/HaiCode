@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <fs_attr.h>
+#include <FindDirectory.h>
+#include <Path.h>
 
 // ---- Helpers ----
 
@@ -41,6 +43,21 @@ static void write_file(const std::string& path, const std::string& content) {
     f.write(content.data(), static_cast<std::streamsize>(content.size()));
 }
 
+// Probe writability of a location: true = write succeeded (caller decides
+// what that means); false = not writable. Never throws or aborts.
+static bool write_file_quietly(const std::string& path) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    f << "x";
+    f.close();
+    if (!f) {
+        std::remove(path.c_str());
+        return false;
+    }
+    std::remove(path.c_str());
+    return true;
+}
+
 static std::string read_file(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     std::ostringstream ss;
@@ -63,6 +80,16 @@ static int count_files_with_prefix(const std::string& dir, const std::string& pr
     }
     closedir(d);
     return n;
+}
+
+// Resolve the system temp directory exactly as DiffTool does, so leftover
+// scans look where the tool actually creates its scratch file.
+static std::string system_temp_dir() {
+    BPath temp_path;
+    if (find_directory(B_SYSTEM_TEMP_DIRECTORY, &temp_path) == B_OK
+            && temp_path.Path())
+        return temp_path.Path();
+    return "/tmp";
 }
 
 #define CHECK(cond, msg) \
@@ -641,9 +668,43 @@ static bool diff_preserves_sibling_tmp_diff_file() {
           "pre-existing .tmp_diff sibling must survive a diff preview byte-identical");
     CHECK(count_files_with_prefix("/tmp", "tft_diff_sib.txt.tmp_diff_") == 0,
           "diff must leave no scratch files behind");
+    CHECK(count_files_with_prefix(system_temp_dir(), "haicode_diff_") == 0,
+          "diff must leave no haicode_diff_ scratch in the temp dir");
     std::remove(p.c_str());
     std::remove(sentinel.c_str());
     std::cout << "[OK] diff preserves pre-existing .tmp_diff sibling\n";
+    return true;
+}
+
+// Task 22: the scratch file must live in the system temp directory, never
+// beside the target — diff previews run against read-only locations (Plan
+// mode over the packagefs-mounted system headers). chmod cannot simulate
+// this (the default Haiku user is uid 0 and bypasses permission bits), so
+// the test targets the genuinely read-only packagefs.
+static bool diff_scratch_in_readonly_dir() {
+    // Probe: if this location is somehow writable, the test cannot assert
+    // anything meaningful — fail loudly rather than pass vacuously.
+    const std::string probe = "/boot/system/develop/headers/os/kernel/.tft_ro_probe";
+    if (write_file_quietly(probe)) {
+        std::cerr << "[FAIL] " << probe << " is writable; read-only premise broken\n";
+        return false;
+    }
+
+    const std::string ro_file = "/boot/system/develop/headers/os/kernel/fs_attr.h";
+    auto r = tool("diff")->execute(
+        {{"path", ro_file}, {"content", "totally different\n"}}, ctx());
+    CHECK(r.success,
+          "diff against a read-only location must succeed, got: " + r.error);
+    CHECK(r.output.find("+totally different") != std::string::npos,
+          "diff output expected");
+
+    // No scratch beside the read-only target, none left in the temp dir.
+    CHECK(count_files_with_prefix("/boot/system/develop/headers/os/kernel",
+                                  "fs_attr.h.tmp_diff_") == 0,
+          "no scratch may be created beside the target");
+    CHECK(count_files_with_prefix(system_temp_dir(), "haicode_diff_") == 0,
+          "diff must leave no haicode_diff_ scratch in the temp dir");
+    std::cout << "[OK] diff scratch lives in the temp dir (read-only target works)\n";
     return true;
 }
 
@@ -716,6 +777,7 @@ int main() {
     ok &= edit_missing_new_string_param_leaves_file_intact();
     ok &= edit_preserves_mode_0755();
     ok &= diff_preserves_sibling_tmp_diff_file();
+    ok &= diff_scratch_in_readonly_dir();
     ok &= edit_whitespace_must_match_exactly();
 
     if (ok) {

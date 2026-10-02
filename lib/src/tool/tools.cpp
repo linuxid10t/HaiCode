@@ -1287,13 +1287,21 @@ public:
 
         path = resolve_path(path, ctx.working_dir);
 
-        // Write proposed content to a securely-created scratch file: mkstemp
-        // picks a unique name (O_EXCL), so a pre-existing sibling of a similar
-        // name can never be touched. Unlinked on every exit path below.
+        // Write proposed content to a securely-created scratch file in the
+        // SYSTEM TEMP DIRECTORY, never beside the target: mkstemp picks a
+        // unique name (O_EXCL), and diffing must stay read-only for the
+        // target's location — a read-only directory (Plan mode against
+        // /boot/system/develop/headers, say) must not fail the preview.
+        // Unlinked on every exit path below.
+        BPath temp_path;
+        std::string tmpdir = "/tmp";
+        if (find_directory(B_SYSTEM_TEMP_DIRECTORY, &temp_path) == B_OK
+                && temp_path.Path())
+            tmpdir = temp_path.Path();
         std::string tmp;
-        int tfd = util::make_secure_temp(path + ".tmp_diff_", tmp);
+        int tfd = util::make_secure_temp(tmpdir + "/haicode_diff_", tmp);
         if (tfd < 0)
-            return {false, "", "Cannot create temp file for " + path + ": " + strerror(errno)};
+            return {false, "", "Cannot create temp file in " + tmpdir + ": " + strerror(errno)};
         {
             const char* data = content.data();
             size_t remaining = content.size();
