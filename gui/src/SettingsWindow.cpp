@@ -406,7 +406,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
         thinking_menu_->AddItem(item);
         if (std::string(e.value) == config_.thinking_display) thinking_marked = item;
     }
-    if (!thinking_marked) thinking_marked = thinking_menu_->ItemAt(2);
+    if (!thinking_marked) thinking_marked = thinking_menu_->ItemAt(0);
     thinking_marked->SetMarked(true);
     thinking_field_ = new BMenuField("thinking_field", "Thinking display:",
                                      thinking_menu_);
@@ -1131,7 +1131,7 @@ SettingsWindow::_MarkedThinkingDisplay() const
             && value)
             return value;
     }
-    return "on_while_thinking";
+    return "off";
 }
 
 void

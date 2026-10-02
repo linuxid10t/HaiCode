@@ -507,9 +507,10 @@ nlohmann::json global_scope_json(const AppConfig& cfg) {
     if (!cfg.provider.empty()) j["provider"] = cfg.provider;
     if (!cfg.model.empty())    j["model"]    = cfg.model;
     if (!cfg.default_mode.empty()) j["default_mode"] = cfg.default_mode;
-    // Erase-when-default so the file stays minimal for default behavior.
-    if (!cfg.thinking_display.empty()
-            && cfg.thinking_display != "on_while_thinking")
+    // Erase-when-default so the file stays minimal for default behavior:
+    // empty is the "unset" sentinel (default = "off"); explicit values —
+    // including "off" — are persisted as the user's choice.
+    if (!cfg.thinking_display.empty())
         j["thinking_display"] = cfg.thinking_display;
     j["providers"] = providers_to_json(cfg.providers);
     j["web_search"] = {

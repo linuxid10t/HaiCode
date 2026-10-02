@@ -2997,10 +2997,10 @@ void
 MainWindow::_ApplyThinkingDisplay()
 {
     if (!chat_view_ || !engine_) return;
-    // Map the config string onto the ChatView display mode; anything other
-    // than the two non-default values falls back to the streaming behavior.
+    // Map the config string onto the ChatView display mode; empty or
+    // unrecognized values fall back to "off" (the default).
     const std::string& td = engine_->config().thinking_display;
-    ThinkingDisplay d = ThinkingDisplay::ExpandedWhileStreaming;
+    ThinkingDisplay d = ThinkingDisplay::AlwaysCollapsed;
     if (td == "off")
         d = ThinkingDisplay::AlwaysCollapsed;
     else if (td == "on")

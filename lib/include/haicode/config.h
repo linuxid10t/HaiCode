@@ -80,7 +80,7 @@ struct AppConfig {
     std::string default_mode = "plan";
     // Thinking-block display in the chat view: "off" (always collapsed),
     // "on" (always expanded), or "on_while_thinking" (expanded while
-    // streaming, collapsed after). Empty = "on_while_thinking".
+    // streaming, collapsed after). Empty = "off" (the default).
     std::string thinking_display;
     // Skill ids (filenames, e.g. "git-commit.md") enabled by default for
     // newly created sessions. Parsed from the top-level "skills" array in
