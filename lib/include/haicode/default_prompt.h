@@ -14,8 +14,10 @@ namespace haicode {
 //
 // SPLIT: kDefaultSystemPrompt is byte-stable across turns so Anthropic's
 // prefix cache can hit on it. The {{STEPS_LEFT}} sentence lives in
-// kDynamicSystemPrompt below and is emitted as a separate text block
-// after the stable body. Per-agent overrides (config.agents.<id>.
+// kDynamicSystemPrompt below and every provider sends it at the TAIL of
+// the conversation (after the last message), never in the system prompt:
+// a per-step change there would invalidate the cached history behind it.
+// Per-agent overrides (config.agents.<id>.
 // system_prompt) use the same placeholders; unmatched placeholders are
 // left as-is.
 
@@ -150,8 +152,8 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 - Do not echo secrets in logs or error messages.
 )HPCODE";
 
-// Re-rendered every step and emitted as a separate system text block AFTER
-// the stable body — but only once the turn enters its final stretch:
+// Re-rendered every step and sent after the last conversation message
+// (never inside the cached system body) — but only once the turn enters its final stretch:
 // while steps_left > max(1, min(10, max_steps / 2)) this entire block is
 // omitted (render_dynamic_prompt returns an empty string). Kept short so
 // the per-step byte delta is minimal. Splitting this out is what lets the

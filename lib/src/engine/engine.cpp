@@ -1811,9 +1811,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                        + plan_mode_block
                        + chat_mode_block;
 
-    // Dynamic per-step content ({{STEPS_LEFT}}). Emitted as a separate
-    // system text block by the Anthropic provider so the stable body
-    // above stays byte-identical across turns and hits the prefix cache.
+    // Dynamic per-step content ({{STEPS_LEFT}}, todos, offline note).
+    // Providers send it after the last conversation message, so the stable
+    // body above AND the history stay byte-identical across steps and hit
+    // the prefix cache.
     std::string system_dynamic = render_dynamic_prompt(model_id, os_info,
                                                        session.directory,
                                                        max_steps, max_steps);

@@ -11,9 +11,12 @@ namespace haicode {
 // Builds the /messages streaming request body: model, max_tokens, sampling
 // params (omitted on adaptive-thinking models, which reject non-default
 // temperature/top_p), capability-mapped output_config.effort, adaptive
-// thinking with display:"summarized", cached system blocks, verbatim
-// messages, tools with a trailing cache breakpoint, and the
-// conversation-prefix cache_control post-pass.
+// thinking with display:"summarized", the stable system block (cached),
+// verbatim messages, and tools with a trailing cache breakpoint. Post-pass:
+// cache breakpoints on the last block of the last and second-to-last
+// messages, then `system_dynamic` appended as a trailing user text block
+// AFTER them — never in `system`, where a per-step change would invalidate
+// the cached conversation behind it.
 nlohmann::json build_anthropic_body(const LLMRequest& request);
 
 // Accumulates one streaming thinking content block. thinking_delta and

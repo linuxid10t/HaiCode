@@ -42,26 +42,30 @@ nlohmann::json build_anthropic_body(const LLMRequest& request) {
     if (caps.thinking == ThinkingMode::Adaptive)
         body["thinking"] = {{"type", "adaptive"}, {"display", "summarized"}};
 
-    // System — split into a stable cached block + an uncached dynamic
-    // tail ({{STEPS_LEFT}}). The stable block carries cache_control so
-    // Anthropic can prefix-cache it across turns.
-    if (!request.system.empty()) {
+    // System — the byte-stable body only, with a cache breakpoint. The
+    // per-step dynamic text (todos, step budget, offline note) must NOT
+    // live here: the cache prefix is tools → system → messages, so a
+    // changing system block invalidates the cache for the whole
+    // conversation behind it. It rides at the tail of the messages instead
+    // (below). Exception: with no messages to carry it, it stays a second
+    // system block.
+    if (!request.system.empty() || (request.messages.empty()
+                                    && !request.system_dynamic.empty())) {
         nlohmann::json arr = nlohmann::json::array();
-        nlohmann::json stable_block;
-        stable_block["type"] = "text";
-        stable_block["text"] = request.system;
-        stable_block["cache_control"] = {{"type", "ephemeral"}};
-        arr.push_back(stable_block);
-        if (!request.system_dynamic.empty()) {
-            arr.push_back({{"type", "text"}, {"text", request.system_dynamic}});
+        if (!request.system.empty()) {
+            nlohmann::json stable_block;
+            stable_block["type"] = "text";
+            stable_block["text"] = request.system;
+            stable_block["cache_control"] = {{"type", "ephemeral"}};
+            arr.push_back(stable_block);
         }
+        if (request.messages.empty() && !request.system_dynamic.empty())
+            arr.push_back({{"type", "text"}, {"text", request.system_dynamic}});
         body["system"] = arr;
     }
 
-    // Messages — verbatim from the engine. cache_control on the last
-    // block of the second-to-last message is added in a post-pass
-    // below, so the conversation prefix (everything except the most
-    // recent turn) hits the cache.
+    // Messages — verbatim from the engine; the cache breakpoints and the
+    // dynamic tail are applied in a post-pass below.
     body["messages"] = request.messages;
 
     // Tools — cache_control on the last entry. Stable across turns.
@@ -78,24 +82,58 @@ nlohmann::json build_anthropic_body(const LLMRequest& request) {
         body["tools"] = tools_arr;
     }
 
-    // Conversation-prefix cache breakpoint. Mark the last block of the
-    // second-to-last message so everything older than the current turn
-    // is cached. Requires the message to expose a content array; if the
-    // message's content is a plain string, promote it to a one-element
-    // text-block array. Skip on messages that can't be normalized.
+    // Conversation-prefix cache breakpoints, then the dynamic tail.
+    //
+    // (1) Last block of the LAST message: everything up to and including
+    //     this step's input (e.g. fresh tool results) is written to the
+    //     cache, so the next step reads it instead of paying full price
+    //     for it and then again for the cache write.
+    // (2) Last block of the second-to-last message: a fallback read point
+    //     when the last message holds more blocks than the cache lookback
+    //     window (many parallel tool results).
+    // Together with system and tools that is 4 breakpoints — the API max.
+    //
+    // (3) system_dynamic is appended as a text block AFTER breakpoint (1),
+    //     so it changes every step without invalidating anything cached.
+    //     A trailing text block after tool_result blocks is legal. If the
+    //     conversation ends on an assistant turn, it becomes its own user
+    //     message (user after assistant keeps alternation legal).
+    //
+    // String content is promoted to a one-element text array to carry a
+    // breakpoint; the API renders both forms identically, so the promoted
+    // message still matches the plain-string form on later steps.
+    auto promote = [](nlohmann::json& msg) -> nlohmann::json* {
+        if (!msg.is_object() || !msg.contains("content")) return nullptr;
+        auto& content = msg["content"];
+        if (content.is_string()) {
+            std::string s = content.get<std::string>();
+            if (s.empty()) return nullptr;  // empty text blocks are rejected
+            content = nlohmann::json::array({
+                {{"type", "text"}, {"text", s}}
+            });
+        }
+        return (content.is_array() && !content.empty()) ? &content : nullptr;
+    };
     auto& msgs = body["messages"];
-    if (msgs.is_array() && msgs.size() >= 2) {
-        auto& target = msgs[msgs.size() - 2];
-        if (target.is_object() && target.contains("content")) {
-            auto& content = target["content"];
-            if (content.is_string()) {
-                std::string s = content.get<std::string>();
-                content = nlohmann::json::array({
-                    {{"type", "text"}, {"text", s}}
-                });
-            }
-            if (content.is_array() && !content.empty()) {
-                content.back()["cache_control"] = {{"type", "ephemeral"}};
+    if (msgs.is_array() && !msgs.empty()) {
+        if (auto* c = promote(msgs.back()))
+            c->back()["cache_control"] = {{"type", "ephemeral"}};
+        if (msgs.size() >= 2)
+            if (auto* c = promote(msgs[msgs.size() - 2]))
+                c->back()["cache_control"] = {{"type", "ephemeral"}};
+
+        if (!request.system_dynamic.empty()) {
+            nlohmann::json dyn = {{"type", "text"},
+                                  {"text", request.system_dynamic}};
+            auto& last = msgs.back();
+            if (last.is_object() && last.value("role", "") == "user") {
+                auto& content = last["content"];
+                if (content.is_string())  // only when empty (see promote)
+                    content = nlohmann::json::array();
+                if (content.is_array()) content.push_back(dyn);
+            } else {
+                msgs.push_back({{"role", "user"},
+                                {"content", nlohmann::json::array({dyn})}});
             }
         }
     }

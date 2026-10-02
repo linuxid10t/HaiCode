@@ -9,6 +9,7 @@
 #include <haicode/provider_error.h>
 #include <haicode/engine.h>
 #include <haicode/db.h>
+#include <functional>
 #include <iostream>
 #include <vector>
 
@@ -219,6 +220,126 @@ static bool test_replay_ignored_without_tools() {
 }
 
 // ---- OpenAI translation must keep dropping thinking blocks ----
+
+// ---- Anthropic prompt-cache layout: dynamic text trails the messages ----
+//
+// Regression: system_dynamic (todos, step budget, offline note) used to be a
+// second system block. The cache prefix is tools → system → messages, so
+// every todo change re-billed the whole conversation as a cache write.
+
+static int count_breakpoints(const json& body) {
+    int n = 0;
+    std::function<void(const json&)> walk = [&](const json& j) {
+        if (j.is_object()) {
+            if (j.contains("cache_control")) ++n;
+            for (auto& [k, v] : j.items()) walk(v);
+        } else if (j.is_array()) {
+            for (auto& v : j) walk(v);
+        }
+    };
+    walk(body);
+    return n;
+}
+
+static bool test_anthropic_dynamic_tail_cache_layout() {
+    LLMRequest req;
+    req.model_id = "claude-opus-5";
+    req.system = "STABLE";
+    req.system_dynamic = "\n\n# Active todos\n\n- [ ] A\n";
+    req.tools.push_back({"read", "Read", json{{"type", "object"}}});
+    req.messages = {
+        {{"role", "user"}, {"content", "go"}},
+        {{"role", "assistant"}, {"content", json::array({
+            {{"type", "tool_use"}, {"id", "t1"}, {"name", "read"},
+             {"input", json::object()}}})}},
+        {{"role", "user"}, {"content", json::array({
+            {{"type", "tool_result"}, {"tool_use_id", "t1"},
+             {"content", "data"}}})}},
+    };
+    json b1 = build_anthropic_body(req);
+    CHECK(b1["system"].size() == 1 && b1["system"][0]["text"] == "STABLE",
+          "system carries only the stable block");
+    auto& last = b1["messages"].back();
+    CHECK(last["role"] == "user" && last["content"].size() == 2,
+          "dynamic text appended to the last user message");
+    CHECK(last["content"][0]["type"] == "tool_result"
+          && last["content"][0].contains("cache_control"),
+          "breakpoint on the last block before the dynamic text");
+    CHECK(last["content"][1]["type"] == "text"
+          && last["content"][1]["text"] == req.system_dynamic
+          && !last["content"][1].contains("cache_control"),
+          "dynamic text trails, uncached");
+    CHECK(b1["messages"][1]["content"].back().contains("cache_control"),
+          "second-to-last message keeps its fallback breakpoint");
+    CHECK(count_breakpoints(b1) == 4, "never more than the API's 4 breakpoints");
+
+    // Next step: the todo list changed and one exchange was appended. The
+    // step-1 prefix (minus its dynamic block) must reappear unchanged,
+    // ignoring where the breakpoints sit.
+    LLMRequest req2 = req;
+    req2.system_dynamic = "\n\n# Active todos\n\n- [x] A\n";
+    req2.messages.push_back({{"role", "assistant"}, {"content", "done"}});
+    req2.messages.push_back({{"role", "user"}, {"content", "thanks"}});
+    json b2 = build_anthropic_body(req2);
+    auto strip = [](json j) {
+        std::function<void(json&)> walk = [&](json& x) {
+            if (x.is_object()) {
+                x.erase("cache_control");
+                for (auto& [k, v] : x.items()) walk(v);
+            } else if (x.is_array()) {
+                for (auto& v : x) walk(v);
+            }
+        };
+        walk(j);
+        return j;
+    };
+    CHECK(b2["system"] == b1["system"], "system identical across a todo change");
+    CHECK(b2["tools"] == b1["tools"], "tools identical across steps");
+    json p1 = strip(b1["messages"]);
+    p1.back()["content"].erase(p1.back()["content"].size() - 1);  // drop dyn
+    json p2 = strip(b2["messages"]);
+    for (size_t i = 0; i < p1.size(); ++i) {
+        json a = p1[i], c = p2[i];
+        // String vs one-text-block array render identically on the API.
+        auto norm = [](json& m) {
+            if (m["content"].is_string())
+                m["content"] = json::array({{{"type", "text"},
+                                             {"text", m["content"]}}});
+        };
+        norm(a); norm(c);
+        CHECK(a == c, "step-1 messages are an unchanged prefix of step 2");
+    }
+    CHECK(b2["messages"].back()["content"][0]["text"] == "thanks"
+          && b2["messages"].back()["content"][1]["text"] == req2.system_dynamic,
+          "string user prompt promoted, dynamic text after it");
+
+    // Conversation ending on an assistant turn: dynamic becomes its own
+    // trailing user message.
+    LLMRequest req3 = req;
+    req3.messages.push_back({{"role", "assistant"}, {"content", "ok"}});
+    json b3 = build_anthropic_body(req3);
+    CHECK(b3["messages"].back()["role"] == "user"
+          && b3["messages"].back()["content"][0]["text"] == req.system_dynamic,
+          "assistant-final history gets a trailing user message");
+
+    // No messages at all: dynamic falls back to a second system block.
+    LLMRequest req4;
+    req4.model_id = "claude-opus-5";
+    req4.system = "STABLE";
+    req4.system_dynamic = "DYN";
+    json b4 = build_anthropic_body(req4);
+    CHECK(b4["system"].size() == 2 && b4["system"][1]["text"] == "DYN",
+          "messageless request keeps dynamic in system");
+
+    // No dynamic text: messages untouched apart from breakpoints.
+    LLMRequest req5 = req;
+    req5.system_dynamic.clear();
+    json b5 = build_anthropic_body(req5);
+    CHECK(b5["messages"].back()["content"].size() == 1,
+          "no dynamic text, no extra block");
+    std::cout << "[OK] anthropic: dynamic text trails messages, prefix cache-stable\n";
+    return true;
+}
 
 static bool test_openai_translate_drops_thinking() {
     json thinking = {{"type", "thinking"}, {"thinking", "T"},
@@ -438,6 +559,7 @@ int main() {
     ok = test_thinking_block_fragments() && ok;
     ok = test_replay_thinking_before_tool_use() && ok;
     ok = test_replay_ignored_without_tools() && ok;
+    ok = test_anthropic_dynamic_tail_cache_layout() && ok;
     ok = test_openai_translate_drops_thinking() && ok;
     ok = test_openai_effort_mapping() && ok;
     ok = test_openai_body_reasoning_model() && ok;
