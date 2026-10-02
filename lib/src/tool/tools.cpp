@@ -1,6 +1,8 @@
 #include <haicode/tool.h>
 #include <haicode/util.h>
 #include <haicode/subprocess.h>
+#include <haicode/config.h>
+#include <haicode/default_prompt.h>
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
@@ -1045,7 +1047,11 @@ public:
                          const ToolContext& ctx) const override {
         std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
         while (!base.empty() && base.back() == '/') base.pop_back();
-        return base + "/agents.md";
+        // Mirror execute(): an existing case variant (AGENTS.md) is the
+        // real destination.
+        std::string existing = find_project_instructions_file(base,
+                                                              kAgentsMdFilename);
+        return existing.empty() ? base + "/" + kAgentsMdFilename : existing;
     }
 
     ToolResult execute(const nlohmann::json& input,
@@ -1056,7 +1062,13 @@ public:
 
         std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
         while (!base.empty() && base.back() == '/') base.pop_back();
-        std::string path = base + "/agents.md";
+        // Update an existing case variant in place (AGENTS.md stays
+        // AGENTS.md); create agents.md only when no variant exists, so the
+        // write never shadows the file the loader actually reads.
+        std::string path = find_project_instructions_file(base,
+                                                          kAgentsMdFilename);
+        if (path.empty())
+            path = base + "/" + kAgentsMdFilename;
 
         std::string err = util::atomic_write_file(path, content);
         if (!err.empty())

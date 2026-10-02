@@ -35,8 +35,10 @@ struct AppConfig {
     std::map<std::string, AgentConfig> agents;
     std::vector<PermissionRule> permissions;
     std::vector<std::string> instructions;
-    // Contents of <project_dir>/agents.md (or claude.md fallback), read verbatim
-    // by ConfigLoader::load(). Project-specific only; never merged from global config.
+    // Contents of <project_dir>/agents.md (or claude.md fallback; both
+    // looked up case-insensitively — AGENTS.md works), read verbatim by
+    // ConfigLoader::load(). Project-specific only; never merged from global
+    // config.
     std::string agents_md;
     // Per-model context-window overrides (keyed by exact model_id). Empty by default;
     // populated from the top-level "models" object in config.json. Used by
@@ -235,6 +237,15 @@ void strip_untrusted(ConfigLayer& project);
 AppConfig load_with_layers(const ConfigLayer& global_layer,
                            const std::string& project_dir,
                            ProjectTrust* trust_state = nullptr);
+
+// Resolve <project_dir>/<base_name> case-insensitively (AGENTS.md vs
+// agents.md — BFS is case-sensitive and repos ship both spellings). Returns
+// the path of the first directory entry whose name equals base_name
+// ignoring case, preferring the exact spelling; "" when the project
+// directory has no such entry or cannot be read. Used for the project
+// instructions files (kAgentsMdFilename / kClaudeMdFilename).
+std::string find_project_instructions_file(const std::string& project_dir,
+                                           const char* base_name);
 
 // One configurable permission source (global or project file), kept
 // un-merged so the policy editor can show and edit each independently.

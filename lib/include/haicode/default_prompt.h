@@ -169,8 +169,10 @@ constexpr const char* kDynamicSystemPromptNeutral = R"HPCODE(
 You have a renewable per-turn step budget (configurable per agent). As of this turn, you have {{STEPS_LEFT}} step(s) remaining. Each model turn counts as one step, no matter how many tool calls it contains. Completing a todo resets the budget to its configured maximum, so it only runs out when you stop making progress. When the remaining count is low, finish the current sub-task and complete its todo rather than starting exploratory work. Work the active todo list top-down; when it is empty or fully complete, wrap up the current turn by reporting the outcome to the user instead of starting new work. Do not reference the amount of steps left in assistant messages.
 )HPCODE";
 
-// Lowercase filenames auto-discovered at the project root.
-// agents.md is preferred; claude.md is read as a fallback for compatibility.
+// Instruction filenames auto-discovered at the project root, matched
+// case-insensitively (AGENTS.md works too); the exact spelling wins when
+// several variants exist. agents.md is preferred; claude.md is read as a
+// fallback for compatibility.
 constexpr const char* kAgentsMdFilename  = "agents.md";
 constexpr const char* kClaudeMdFilename  = "claude.md";
 

@@ -212,7 +212,7 @@ In the GUI, the provider dropdown is built dynamically via `MainWindow::RebuildP
 
 ## Project Metadata
 
-- `agents.md`: Contains system prompt instructions for agents.
+- `agents.md`: Contains system prompt instructions for agents (also `claude.md` as a fallback; both looked up case-insensitively, exact spelling preferred — see `find_project_instructions_file` in `lib/src/config/config.cpp`).
 
 ## Key constraints
 
