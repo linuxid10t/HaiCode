@@ -244,6 +244,34 @@ In the GUI, **Settings → Preferences** opens a list-based editor where you can
 add, edit, and remove providers; changes persist to the global config file.
 The provider dropdown in the toolbar is rebuilt dynamically from the config.
 
+### Model database
+
+**Settings → Model Database…** shows everything HaiCode knows about each model —
+context window, maximum output, vision support, and prices (USD per 1M tokens) —
+and lets you add your own entries or override the built-in ones. Search to find
+a model, select it, and click **Edit…** (or double-click). **Add…** creates an
+entry for a model HaiCode doesn't know, and **Revert to Built-in** removes your
+entry. Leave a field blank to keep the built-in value. Changes apply to the next
+request without interrupting running sessions.
+
+Entries are keyed by a model id **or prefix** (`my-local` covers
+`my-local-7b`). The longest matching key wins, and your entry wins a tie with a
+built-in one. That way a short prefix like `gpt` never shadows the built-in
+`gpt-5.5` row. Entries are stored in the global config file:
+
+```json
+{
+  "models":     {"my-local": 32768},
+  "max_output": {"my-local": 4096},
+  "vision":     {"my-local": false},
+  "pricing":    {"my-proxy-model": {"input": 1.0, "output": 2.0,
+                                    "cache_read": 0.1, "cache_write": 0}}
+}
+```
+
+A price you set is flat: it replaces any built-in long-context pricing tiers for
+that model.
+
 ### Auto-compaction
 
 Long sessions grow toward the model's context window. When the input-token
@@ -266,9 +294,10 @@ on a context-overflow rejection. The current user turn is always kept intact.
 | `auto_compact_threshold` | `0.80` | Fraction (0.0–1.0) of the window at which compaction triggers. |
 
 Compaction is **disabled when the model's context window is unknown** (`window == 0`),
-since the threshold cannot be sized safely. Set the window explicitly via the
-top-level `"models"` object (e.g. `"models": {"my-local-model": 131072}`) to
-enable compaction for models HaiCode doesn't recognize.
+since the threshold cannot be sized safely. Set the window in **Settings → Model
+Database…** (or via the top-level `"models"` object, e.g.
+`"models": {"my-local-model": 131072}`) to enable compaction for models HaiCode
+doesn't recognize.
 
 After each compaction, a collapsible `[context compacted]` transcript entry
 shows the checkpoint summary in the chat scrollback (click to toggle in the

@@ -344,10 +344,12 @@ static std::string normalize_model_id(const std::string& raw, bool& is_free) {
 }
 
 // Longest-prefix match of "kind:model" against a table of {key, p} entries.
+// `len_out` receives the matched MODEL-part length (key minus "kind:").
 template <typename Entries>
 static const ModelPricing* prefix_match(const std::string& kind,
                                         const std::string& model,
-                                        const Entries& entries) {
+                                        const Entries& entries,
+                                        size_t* len_out = nullptr) {
     const std::string full = kind + ":" + model;
     const ModelPricing* best = nullptr;
     size_t best_len = 0;
@@ -361,6 +363,7 @@ static const ModelPricing* prefix_match(const std::string& kind,
             best_len = k.size();
         }
     }
+    if (len_out) *len_out = best ? best_len - (kind.size() + 1) : 0;
     return best;
 }
 
@@ -377,12 +380,16 @@ const ModelPricing* lookup_pricing(
     return lookup_pricing(provider_id, provider_id, model_id, overrides);
 }
 
-const ModelPricing* lookup_pricing(
+// Full resolution; `from_override` reports whether a user entry won (its
+// flat price then replaces any built-in tier ladder).
+static const ModelPricing* resolve_pricing(
     const std::string& provider_id,
     const std::string& provider_kind,
     const std::string& model_id,
-    const std::map<std::string, ModelPricing>& overrides)
+    const std::map<std::string, ModelPricing>& overrides,
+    bool& from_override)
 {
+    from_override = false;
     bool free_variant = false;
     const std::string model = normalize_model_id(model_id, free_variant);
     if (free_variant) {
@@ -396,34 +403,60 @@ const ModelPricing* lookup_pricing(
         return &kLocalFree;
     }
 
-    // Config overrides: match against provider id, provider kind, and bare
-    // model key — longest prefix wins, ties to the override (a user can
-    // re-key a built-in by reusing its key).
-    const std::string keys[3] = {
-        lower(provider_id) + ":" + model,
-        lower(provider_kind) + ":" + model,
-        model,
-    };
-    for (const std::string& full : keys) {
-        const ModelPricing* best = nullptr;
-        size_t best_len = 0;
-        for (auto& [k, v] : overrides) {
-            std::string k_lc = lower(k);
-            if (full.rfind(k_lc, 0) == 0 && k_lc.size() >= best_len) {
-                best = &v;
-                best_len = k_lc.size();
-            }
-        }
-        if (best) return best;
+    // Built-ins: provider-kind key first, then any-provider wildcard. The
+    // matched model-part length competes with the user's entries below.
+    const std::string& kind = provider_kind.empty() ? provider_id : provider_kind;
+    const ModelPricing* builtin = nullptr;
+    size_t builtin_len = 0;
+    {
+        size_t len = 0;
+        if ((builtin = prefix_match(kind, model, kBuiltin, &len))) builtin_len = len;
+        else if ((builtin = prefix_match(kind, model, kBuiltinExtra, &len))) builtin_len = len;
+        else if ((builtin = prefix_match("*", model, kBuiltin, &len))) builtin_len = len;
+        else if ((builtin = prefix_match("*", model, kBuiltinExtra, &len))) builtin_len = len;
     }
 
-    // Built-ins: provider-kind key first, then any-provider wildcard.
-    const std::string& kind = provider_kind.empty() ? provider_id : provider_kind;
-    if (const ModelPricing* p = prefix_match(kind, model, kBuiltin)) return p;
-    if (const ModelPricing* p = prefix_match(kind, model, kBuiltinExtra)) return p;
-    if (const ModelPricing* p = prefix_match("*", model, kBuiltin)) return p;
-    if (const ModelPricing* p = prefix_match("*", model, kBuiltinExtra)) return p;
-    return nullptr;
+    // Config overrides: keyed by provider id, provider kind, or bare model
+    // (prefixes allowed). They join the built-ins as one prefix database:
+    // the override wins when its matched model part is at least as long as
+    // the built-in's (a user can re-key a built-in by reusing its key; a
+    // short "gpt-5" entry doesn't shadow the built-in "gpt-5.5" row).
+    const std::string prefixes[3] = {
+        lower(provider_id) + ":",
+        lower(provider_kind) + ":",
+        "",
+    };
+    for (const std::string& pre : prefixes) {
+        const std::string full = pre + model;
+        const ModelPricing* best = nullptr;
+        size_t best_len = 0;
+        bool any = false;
+        for (auto& [k, v] : overrides) {
+            std::string k_lc = lower(k);
+            if (k_lc.size() < pre.size()) continue;
+            if (full.rfind(k_lc, 0) == 0 && (!any || k_lc.size() >= best_len)) {
+                best = &v;
+                best_len = k_lc.size();
+                any = true;
+            }
+        }
+        if (best && best_len - pre.size() >= builtin_len) {
+            from_override = true;
+            return best;
+        }
+    }
+    return builtin;
+}
+
+const ModelPricing* lookup_pricing(
+    const std::string& provider_id,
+    const std::string& provider_kind,
+    const std::string& model_id,
+    const std::map<std::string, ModelPricing>& overrides)
+{
+    bool from_override = false;
+    return resolve_pricing(provider_id, provider_kind, model_id, overrides,
+                           from_override);
 }
 
 TokenUsage estimate_inflight_usage(const TokenUsage& reported,
@@ -460,9 +493,14 @@ double compute_step_cost(const TokenUsage& usage,
                          const std::string& provider_kind,
                          const std::string& model_id,
                          const std::map<std::string, ModelPricing>& overrides) {
-    const ModelPricing* base = lookup_pricing(provider_id, provider_kind,
-                                               model_id, overrides);
+    bool from_override = false;
+    const ModelPricing* base = resolve_pricing(provider_id, provider_kind,
+                                               model_id, overrides,
+                                               from_override);
     if (!base) return 0.0;
+    // A user price is flat: it replaces the built-in tier ladder too
+    // (otherwise an override on a tiered model would never take effect).
+    if (from_override) return compute_cost(usage, *base);
 
     // Tier ladder: the longest-prefix entry whose thresholds cover the
     // request's total prompt size. Tier overrides the base price only when
@@ -489,6 +527,30 @@ double compute_step_cost(const TokenUsage& usage,
         }
     }
     return compute_cost(usage, *base);
+}
+
+std::vector<std::pair<std::string, ModelPricing>> builtin_pricing_entries() {
+    std::vector<std::pair<std::string, ModelPricing>> out;
+    for (const auto& e : kBuiltin) out.emplace_back(e.key, e.p);
+    for (const auto& e : kBuiltinExtra) out.emplace_back(e.key, e.p);
+    return out;
+}
+
+bool has_price_tiers(const std::string& model_id) {
+    bool free_variant = false;
+    const std::string model = normalize_model_id(model_id, free_variant);
+    // Longest ladder wins (as in compute_step_cost); a one-tier ladder
+    // (gpt-5.4-mini, shielding it from the gpt-5.4 surcharge) is flat.
+    const PriceTier* tiers = nullptr;
+    size_t best_len = 0;
+    for (const auto& e : kTiered) {
+        const std::string p = e.model_prefix;
+        if (model.rfind(p, 0) == 0 && p.size() > best_len) {
+            tiers = e.tiers;
+            best_len = p.size();
+        }
+    }
+    return tiers && tiers[0].up_to_prompt_tokens != 0;
 }
 
 } // namespace haicode

@@ -246,6 +246,16 @@ ConfigLayer load_layer(const std::string& path) {
             }
         }
 
+        // Per-model output-cap overrides: {"max_output": {"foo": 16384}}
+        if (j.contains("max_output") && j["max_output"].is_object()) {
+            for (auto& [k, v] : j["max_output"].items()) {
+                if (v.is_number_integer()) {
+                    cfg.model_max_output[k] = v.get<int>();
+                    layer.present.insert("max_output/" + k);
+                }
+            }
+        }
+
         // Vision fallback pair:
         // {"vision_fallback": {"provider": "openai", "model": "gpt-4o-mini"}}
         // Describes images via this model when the primary is text-only.
@@ -462,6 +472,8 @@ AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay) {
         result.model_contexts[k] = v;
     for (auto& [k, v] : ov.model_vision)
         result.model_vision[k] = v;
+    for (auto& [k, v] : ov.model_max_output)
+        result.model_max_output[k] = v;
     for (auto& [k, v] : ov.pricing)
         result.pricing[k] = v;
 
@@ -493,7 +505,7 @@ const std::vector<std::string>& global_scope_keys() {
     static const std::vector<std::string> keys = {
         "provider", "model", "default_mode", "thinking_display",
         "providers", "web_search", "skills", "models", "vision",
-        "vision_fallback", "pricing",
+        "max_output", "vision_fallback", "pricing",
         "auto_compact", "auto_compact_threshold",
         "compaction_buffer", "compaction_recent_context",
         "compaction_summary_max_tokens",
@@ -540,6 +552,12 @@ nlohmann::json global_scope_json(const AppConfig& cfg) {
         for (auto& [mid, vis] : cfg.model_vision)
             vision_j[mid] = vis;
         j["vision"] = vision_j;
+    }
+    if (!cfg.model_max_output.empty()) {
+        nlohmann::json out_j = nlohmann::json::object();
+        for (auto& [mid, cap] : cfg.model_max_output)
+            out_j[mid] = cap;
+        j["max_output"] = out_j;
     }
     if (!cfg.vision_fallback_model.empty()) {
         j["vision_fallback"] = {

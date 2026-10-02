@@ -133,6 +133,9 @@ target_link_libraries(test_pricing haicode)
 add_executable(test_codex_params tests/test_codex_params.cpp)
 target_link_libraries(test_codex_params haicode)
 
+add_executable(test_model_db tests/test_model_db.cpp)
+target_link_libraries(test_model_db haicode)
+
 # Local-socket tests (bind/accept/recv) need libnetwork directly.
 add_executable(test_web_tools tests/test_web_tools.cpp)
 target_link_libraries(test_web_tools haicode network)
@@ -152,6 +155,6 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_db_concurrency test_config_write test_config_trust
          test_subprocess test_turn_integrity test_engine_correctness
          test_session_lifecycle test_web_tools test_provider_params
-         test_pricing test_codex_params test_propose_plan)
+         test_pricing test_codex_params test_propose_plan test_model_db)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
