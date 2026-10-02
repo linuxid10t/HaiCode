@@ -46,6 +46,7 @@
 #include <haicode/model_info.h>
 #include <haicode/skills.h>
 #include <haicode/tool.h>
+#include <haicode/codex_auth.h>
 
 #include <nlohmann/json.hpp>
 
@@ -655,21 +656,42 @@ MainWindow::RebuildProviderMenu(const std::map<std::string, haicode::ProviderCon
         delete provider_menu_->RemoveItem((int32)0);
 
     for (auto& [id, p] : providers) {
-        (void)p;
+        // Same type inference as HaiCodeApp's make_provider_registry.
+        std::string type = p.type.empty()
+            ? (id == "anthropic" ? "anthropic"
+              : id == "chatgpt" ? "chatgpt" : "openai") : p.type;
+        // Unsigned-in ChatGPT entries stay visible but unselectable: the
+        // registry can't serve them (no OAuth token), but hiding them made
+        // the sign-in requirement invisible.
         std::string label = id;
+        bool unselectable = false;
+        if (type == "chatgpt" && !haicode::codex_auth_signed_in()) {
+            label += " (sign in via Settings)";
+            unselectable = true;
+        }
         auto* msg = new BMessage(MSG_FETCH_MODELS);
         msg->AddString("provider_id", id.c_str());
         auto* item = new BMenuItem(label.c_str(), msg);
+        if (unselectable) item->SetEnabled(false);
         provider_menu_->AddItem(item);
     }
 
     provider_menu_->SetRadioMode(true);
     provider_menu_->SetLabelFromMarked(true);
 
-    // Restore mark: prefer `keep`, else first item.
+    // Restore mark: prefer `keep`, else the first selectable item — a
+    // disabled chatgpt entry can't be marked (SelectProvider refuses, and
+    // fetching models from an unregistered provider would just fail).
     SelectProvider(keep);
-    if (!provider_menu_->FindMarked() && provider_menu_->CountItems() > 0)
-        provider_menu_->ItemAt(0)->SetMarked(true);
+    if (!provider_menu_->FindMarked()) {
+        for (int32 i = 0; i < provider_menu_->CountItems(); ++i) {
+            auto* it = provider_menu_->ItemAt(i);
+            if (it && it->IsEnabled()) {
+                it->SetMarked(true);
+                break;
+            }
+        }
+    }
     if (auto* marked = provider_menu_->FindMarked()) {
         const char* pid = nullptr;
         if (marked->Message() && marked->Message()->FindString("provider_id", &pid) == B_OK && pid)
@@ -695,12 +717,21 @@ MainWindow::SetEngine(haicode::SessionEngine& engine)
 void
 MainWindow::SelectProvider(const std::string& provider_id)
 {
-    default_provider_ = provider_id;
+    // A disabled item (unsigned-in ChatGPT entry) can never be selected;
+    // the previous default stays untouched so the marked item remains valid.
     for (int32 i = 0; i < provider_menu_->CountItems(); i++) {
         BMenuItem* item = provider_menu_->ItemAt(i);
         const char* pid = nullptr;
-        if (item->Message() && item->Message()->FindString("provider_id", &pid) == B_OK && pid)
-            item->SetMarked(std::string(pid) == provider_id);
+        if (!item->Message()
+                || item->Message()->FindString("provider_id", &pid) != B_OK
+                || !pid)
+            continue;
+        if (std::string(pid) != provider_id)
+            continue;
+        if (!item->IsEnabled()) return;
+        default_provider_ = provider_id;
+        item->SetMarked(true);
+        return;
     }
 }
 

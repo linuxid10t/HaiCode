@@ -44,6 +44,7 @@ private:
     std::string existing_key_;  // real key (when editing); posted back if field left blank
     BButton*      oauth_btn_    = nullptr;
     BStringView*  oauth_status_ = nullptr;
+    BStringView*  oauth_note_   = nullptr;  // experimental/ToS note (chatgpt)
     // Last visibility applied to the oauth / key-url row groups. Hide() and
     // Show() nest (hide count) and IsHidden() lies before the window is
     // shown, so toggling is edge-triggered off these instead.

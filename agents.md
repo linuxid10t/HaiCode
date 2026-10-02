@@ -127,6 +127,11 @@ Rules:
   refresh-on-skew + one forced 401-retry). Usage is subscription-billed,
   so there are no built-in pricing entries; the cost column stays empty
   unless the user adds a `pricing` override (lookup miss is handled).
+  **Experimental** (Task 27): Settings labels the type "ChatGPT
+  (Experimental)" with a terms-of-use note (unofficial Codex CLI backend;
+  may break or violate ToS), and an unsigned-in chatgpt entry stays in
+  MainWindow's provider dropdown disabled with "(sign in via Settings)"
+  instead of vanishing — `SelectProvider` never marks a disabled item.
 - **Provider menu items carry their id.** Each `BMenuItem` in MainWindow's
   provider dropdown attaches `provider_id` to its `BMessage`; the
   `MSG_FETCH_MODELS` handler reads it from the message, never from the label.

@@ -70,7 +70,7 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
     static const TypeEntry kTypes[] = {
         {"Anthropic",              "anthropic"},
         {"OpenAI-compatible",      "openai"},
-        {"OpenAI (ChatGPT sign-in)", "chatgpt"},
+        {"ChatGPT (Experimental)", "chatgpt"},
         {"Ollama",                 "ollama"},
         {"vLLM",                   "vllm"},
         {"OpenRouter",             "openrouter"},
@@ -119,6 +119,10 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
     } else {
         oauth_status_->SetText("Not signed in");
     }
+    oauth_note_ = new BStringView("oauth_note",
+        "Experimental: uses the Codex CLI backend; unofficial, may break or "
+        "violate the ChatGPT terms of service.");
+    oauth_note_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
 
     auto* ok_btn = new BButton("ok", "OK", new BMessage(MSG_PROVIDER_DIALOG_DONE));
     ok_btn->MakeDefault(true);
@@ -135,6 +139,7 @@ ProviderEditWindow::ProviderEditWindow(BMessenger target,
         .Add(type_field)
         .Add(oauth_btn_)
         .Add(oauth_status_)
+        .Add(oauth_note_)
         .AddGlue()
         .AddGroup(B_HORIZONTAL)
             .AddGlue()
@@ -168,9 +173,11 @@ ProviderEditWindow::_UpdateTypeSpecificUI()
         if (want_oauth) {
             oauth_btn_->Show();
             oauth_status_->Show();
+            if (oauth_note_) oauth_note_->Show();
         } else {
             oauth_btn_->Hide();
             oauth_status_->Hide();
+            if (oauth_note_) oauth_note_->Hide();
         }
         oauth_rows_visible_ = want_oauth;
     }

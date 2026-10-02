@@ -197,9 +197,17 @@ grant authority.
 ### Providers
 
 The `"providers"` object maps arbitrary ids to provider configs. Each entry has
-a `type` (`"anthropic"` or `"openai"`), an optional `api_key`, and an optional
-`base_url`. When `type` is omitted it is inferred from the id: `"anthropic"`
-defaults to the Anthropic type, anything else to OpenAI-compatible.
+a `type` (`"anthropic"`, `"openai"`, `"chatgpt"`, or a flavored
+OpenAI-compatible server: `"ollama"`, `"vllm"`, `"openrouter"`, `"lmstudio"`,
+`"llamacpp"`), an optional `api_key`, and an optional `base_url`. When `type`
+is omitted it is inferred from the id: `"anthropic"` defaults to the Anthropic
+type, anything else to OpenAI-compatible.
+
+The `"chatgpt"` type (**ChatGPT (Experimental)** in Settings) signs in with
+your ChatGPT account instead of an API key. It uses the Codex CLI backend —
+unofficial, may break or violate the ChatGPT terms of service. Until you sign
+in (Settings → provider editor), the entry stays in the toolbar dropdown
+greyed-out with "(sign in via Settings)".
 
 `base_url` is the **complete API root** — scheme, host, path prefix, and
 version segment. The app appends only the resource path (`/messages`,
