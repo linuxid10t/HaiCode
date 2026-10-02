@@ -44,6 +44,10 @@ static std::string parent_dir(const std::string& path) {
 }
 
 std::string global_skills_dir() {
+    if (const char* env = std::getenv("HAICODE_SKILLS_DIR"); env && *env)
+        return env;
+    // Legacy pre-rename name, accepted for one release (older wrappers,
+    // existing test scripts), then removed.
     if (const char* env = std::getenv("HPCODE_SKILLS_DIR"); env && *env)
         return env;
     BPath settings;

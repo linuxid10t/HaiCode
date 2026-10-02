@@ -295,7 +295,7 @@ static void test_retry_skill_block() {
     mkdirs(proj + "/.haicode/skills");
     write_file(proj + "/.haicode/skills/alpha.md",
         "---\nname: Alpha\n---\nAlpha body.\n");
-    setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
+    setenv("HAICODE_SKILLS_DIR", gdir.c_str(), 1);
 
     haicode::Database db(tmp + "/e2e.db");
     db.migrate();
@@ -349,7 +349,7 @@ static void test_retry_skill_block() {
         CHECK(saw_raw, "stored prompt row keeps the verbatim /alpha command");
     }
 
-    unsetenv("HPCODE_SKILLS_DIR");
+    unsetenv("HAICODE_SKILLS_DIR");
     rm_rf(tmp);
     std::cout << "[OK] retry re-emits one-shot skill block from the stored "
                  "row\n";
