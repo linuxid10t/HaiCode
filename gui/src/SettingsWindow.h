@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Window.h>
+#include "SnapshotMenu.h"
 #include <Messenger.h>
 #include <map>
 #include <string>
@@ -91,15 +92,22 @@ private:
     // add/edit/remove, and the scalar fields are read from the General/Tools
     // tab controls at save time.
     haicode::AppConfig config_;
+    std::string selected_provider_;
+    std::string selected_model_;
+    std::string selected_fb_provider_;
+    std::string selected_fb_model_;
+    bool model_available_ = false;
+    bool fb_model_available_ = false;
+    void _LoadModelSnapshot(BMessage* message, bool fallback);
 
     // Providers tab
     BListView*   list_       = nullptr;
     BStringView* empty_hint_ = nullptr;
 
     // General tab
-    BPopUpMenu*  provider_menu_    = nullptr;
+    SnapshotMenu*  provider_menu_    = nullptr;
     BMenuField*  provider_field_   = nullptr;
-    BPopUpMenu*  model_menu_       = nullptr;
+    SnapshotMenu*  model_menu_       = nullptr;
     BMenuField*  model_field_      = nullptr;
     BTextControl* context_field_   = nullptr;
     // Vision override for the selected model (Auto/Yes/No), mirroring
@@ -108,9 +116,9 @@ private:
     BMenuField*  vision_field_     = nullptr;
     // Vision fallback pair: a vision-capable (provider, model) used to
     // describe images for text-only primaries. "(none)" = feature off.
-    BPopUpMenu*  fb_provider_menu_ = nullptr;
+    SnapshotMenu*  fb_provider_menu_ = nullptr;
     BMenuField*  fb_provider_field_= nullptr;
-    BPopUpMenu*  fb_model_menu_    = nullptr;
+    SnapshotMenu*  fb_model_menu_    = nullptr;
     BMenuField*  fb_model_field_   = nullptr;
     // Last model fetch errored (empty list + non-empty error). Clicking the
     // respective dropdown re-fetches; the no-key "(none available)" case is

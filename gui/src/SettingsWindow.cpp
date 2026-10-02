@@ -346,42 +346,14 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
     // ---- General tab ----
     float label_w = 120.0f;
 
-    // Default provider dropdown — one item per configured provider.
-    provider_menu_ = new BPopUpMenu("provider");
-    provider_menu_->SetRadioMode(true);
-    provider_menu_->SetLabelFromMarked(true);
-    bool found_provider = false;
-    for (auto& [id, p] : config_.providers) {
-        auto* msg = new BMessage(MSG_SET_PROVIDER);
-        msg->AddString("provider_id", id.c_str());
-        auto* item = new BMenuItem(id.c_str(), msg);
-        provider_menu_->AddItem(item);
-        if (id == config_.provider) {
-            item->SetMarked(true);
-            found_provider = true;
-        }
-    }
-    if (!found_provider && provider_menu_->CountItems() > 0)
-        provider_menu_->ItemAt(0)->SetMarked(true);
-    if (provider_menu_->CountItems() == 0) {
-        auto* item = new BMenuItem("(none configured)", nullptr);
-        item->SetEnabled(false);
-        item->SetMarked(true);
-        provider_menu_->AddItem(item);
-    }
+    selected_provider_ = config_.provider;
+    selected_model_ = config_.model;
+    selected_fb_provider_ = config_.vision_fallback_provider;
+    selected_fb_model_ = config_.vision_fallback_model;
+    provider_menu_ = new SnapshotMenu("provider");
     provider_field_ = new BMenuField("provider_field", "Default provider:",
                                      provider_menu_);
-
-    // Default model dropdown — populated after a fetch (per selected provider).
-    model_menu_ = new BPopUpMenu("model");
-    model_menu_->SetRadioMode(true);
-    model_menu_->SetLabelFromMarked(true);
-    {
-        auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
-        loading->SetEnabled(false);
-        loading->SetMarked(true);
-        model_menu_->AddItem(loading);
-    }
+    model_menu_ = new SnapshotMenu("model");
     model_field_ = new ModelMenuField("model_field", "Default model:",
                                       model_menu_, MSG_MODEL_REFRESH);
 
@@ -468,53 +440,14 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
 
     // Vision fallback pair: a vision-capable (provider, model) that describes
     // images for text-only primaries. Leading "(none)" item = feature off.
-    fb_provider_menu_ = new BPopUpMenu("fb_provider");
-    fb_provider_menu_->SetRadioMode(true);
-    fb_provider_menu_->SetLabelFromMarked(true);
-    {
-        auto* none_item = new BMenuItem("(none)", new BMessage(MSG_FB_PROVIDER_SET));
-        none_item->Message()->AddString("provider_id", "");
-        fb_provider_menu_->AddItem(none_item);
-        bool fb_found = config_.vision_fallback_provider.empty();
-        if (fb_found) none_item->SetMarked(true);
-        for (auto& [id, p] : config_.providers) {
-            auto* m = new BMessage(MSG_FB_PROVIDER_SET);
-            m->AddString("provider_id", id.c_str());
-            auto* item = new BMenuItem(id.c_str(), m);
-            fb_provider_menu_->AddItem(item);
-            if (id == config_.vision_fallback_provider) {
-                item->SetMarked(true);
-                fb_found = true;
-            }
-        }
-    }
+    fb_provider_menu_ = new SnapshotMenu("fb_provider");
     fb_provider_field_ = new BMenuField("fb_provider_field",
-                                        "Vision fallback provider:",
-                                        fb_provider_menu_);
-
-    fb_model_menu_ = new BPopUpMenu("fb_model");
-    fb_model_menu_->SetRadioMode(true);
-    fb_model_menu_->SetLabelFromMarked(true);
-    if (!config_.vision_fallback_model.empty()) {
-        // Pre-mark the configured model; the fetch replaces placeholder items
-        // but preserves the marked model (re-marked by id, same as the
-        // primary model menu). Label is the shortened display form; the real
-        // full id rides on the item's message.
-        auto* msg = new BMessage();
-        msg->AddString("model_id", config_.vision_fallback_model.c_str());
-        auto* item = new BMenuItem(
-            short_model_label(config_.vision_fallback_model).c_str(), msg);
-        item->SetMarked(true);
-        fb_model_menu_->AddItem(item);
-    } else {
-        auto* off = new BMenuItem("(off)", nullptr);
-        off->SetEnabled(false);
-        off->SetMarked(true);
-        fb_model_menu_->AddItem(off);
-    }
+                                        "Vision fallback provider:", fb_provider_menu_);
+    fb_model_menu_ = new SnapshotMenu("fb_model");
     fb_model_field_ = new ModelMenuField("fb_model_field",
                                          "Vision fallback model:",
                                          fb_model_menu_, MSG_FB_MODEL_REFRESH);
+    _RebuildProviderMenus();
 
     auto* general_tab = new BGroupView(B_VERTICAL, B_USE_DEFAULT_SPACING);
     BLayoutBuilder::Group<>(general_tab)
@@ -721,59 +654,48 @@ SettingsWindow::_RepopulateList()
 void
 SettingsWindow::_RebuildProviderMenus()
 {
-    // Rebuild both provider dropdowns from config_.providers after an add or
-    // remove, preserving each menu's marked id when it still exists. Without
-    // this the menus (built once in the constructor) go stale: a new provider
-    // can't be selected as default, and removing the marked one leaves a ghost
-    // entry that Save would write back into config_.provider.
-
-    std::string keep_primary = _MarkedProviderId();
-    std::string keep_fb      = _MarkedFBProviderId();
-
-    while (provider_menu_->CountItems() > 0)
-        delete provider_menu_->RemoveItem((int32)0);
-    bool found_provider = false;
-    for (auto& [id, p] : config_.providers) {
-        auto* msg = new BMessage(MSG_SET_PROVIDER);
-        msg->AddString("provider_id", id.c_str());
-        auto* item = new BMenuItem(id.c_str(), msg);
-        provider_menu_->AddItem(item);
-        if (id == keep_primary) {
-            item->SetMarked(true);
-            found_provider = true;
-        }
+    std::vector<SnapshotMenu::Entry> primary;
+    BMessage none(MSG_FB_PROVIDER_SET);
+    none.AddString("provider_id", "");
+    std::vector<SnapshotMenu::Entry> fallback = {{"(none)", none}};
+    int32 primary_index = -1;
+    int32 fallback_index = 0;
+    for (const auto& [id, provider] : config_.providers) {
+        std::string type = provider.type.empty() ? id : provider.type;
+        bool enabled = type != "chatgpt" || haicode::codex_auth_signed_in();
+        std::string label = id + (enabled ? "" : " (sign in via Settings)");
+        BMessage message(MSG_SET_PROVIDER);
+        message.AddString("provider_id", id.c_str());
+        primary.push_back({label, message, enabled});
+        message.what = MSG_FB_PROVIDER_SET;
+        fallback.push_back({label, message, enabled});
+        if (enabled && id == selected_provider_)
+            primary_index = primary.size() - 1;
+        if (enabled && id == selected_fb_provider_)
+            fallback_index = fallback.size() - 1;
     }
-    if (!found_provider && provider_menu_->CountItems() > 0)
-        provider_menu_->ItemAt(0)->SetMarked(true);
-    if (provider_menu_->CountItems() == 0) {
-        auto* item = new BMenuItem("(none configured)", nullptr);
-        item->SetEnabled(false);
-        item->SetMarked(true);
-        provider_menu_->AddItem(item);
-    }
-
-    while (fb_provider_menu_->CountItems() > 0)
-        delete fb_provider_menu_->RemoveItem((int32)0);
-    {
-        bool found_fb = keep_fb.empty();
-        auto* none_item = new BMenuItem("(none)", new BMessage(MSG_FB_PROVIDER_SET));
-        none_item->Message()->AddString("provider_id", "");
-        fb_provider_menu_->AddItem(none_item);
-        if (found_fb)
-            none_item->SetMarked(true);
-        for (auto& [id, p] : config_.providers) {
-            auto* m = new BMessage(MSG_FB_PROVIDER_SET);
-            m->AddString("provider_id", id.c_str());
-            auto* item = new BMenuItem(id.c_str(), m);
-            fb_provider_menu_->AddItem(item);
-            if (id == keep_fb) {
-                item->SetMarked(true);
-                found_fb = true;
+    if (primary_index < 0) {
+        selected_provider_.clear();
+        for (size_t i = 0; i < primary.size(); ++i) {
+            if (primary[i].enabled) {
+                primary_index = i;
+                const char* id = nullptr;
+                primary[i].message.FindString("provider_id", &id);
+                selected_provider_ = id;
+                break;
             }
         }
-        if (!found_fb)
-            none_item->SetMarked(true);
     }
+    if (primary.empty()) {
+        primary.push_back(SnapshotMenu::Placeholder("(none configured)"));
+        primary_index = 0;
+    }
+    if (fallback_index == 0)
+        selected_fb_provider_.clear();
+    provider_menu_->Publish(std::move(primary), primary_index, "", BMessenger(this));
+    fb_provider_menu_->Publish(std::move(fallback), fallback_index, "", BMessenger(this));
+    provider_menu_->UpdateLabel(provider_field_);
+    fb_provider_menu_->UpdateLabel(fb_provider_field_);
 }
 
 void
@@ -903,11 +825,26 @@ SettingsWindow::MessageReceived(BMessage* msg)
         case MSG_SAVE:
             _Save();
             break;
-        case MSG_MODEL_CHANGED:
-            // Model dropdown selection changed — sync the context field.
+        case MSG_MODEL_CHANGED: {
+            std::string model;
+            if (!model_menu_->Accept(*msg, "model_id", model))
+                break;
+            selected_model_ = model;
+            model_menu_->Select("model_id", model);
+            model_menu_->UpdateLabel(model_field_);
             _RefreshContextField();
             _RefreshVisionMenu();
             break;
+        }
+        case MSG_FB_MODEL_CHANGED: {
+            std::string model;
+            if (!fb_model_menu_->Accept(*msg, "model_id", model))
+                break;
+            selected_fb_model_ = model;
+            fb_model_menu_->Select("model_id", model);
+            fb_model_menu_->UpdateLabel(fb_model_field_);
+            break;
+        }
         case MSG_MODEL_REFRESH: {
             // Primary model dropdown clicked while the prior load failed.
             // The flag gate lives here so ModelMenuField stays stateless.
@@ -922,138 +859,33 @@ SettingsWindow::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_FB_PROVIDER_SET: {
-            // Fallback provider dropdown changed — refetch its model list.
-            while (fb_model_menu_->CountItems() > 0)
-                delete fb_model_menu_->RemoveItem((int32)0);
-            if (_MarkedFBProviderId().empty()) {
-                // "(none)" disables the feature outright: no fetch, no
-                // loading state — the model menu resolves immediately to
-                // "(off)" (a stale in-flight reply is dropped by the
-                // provider-id guard in MSG_FB_MODELS_LOADED).
-                auto* off = new BMenuItem("(off)", nullptr);
-                off->SetEnabled(false);
-                off->SetMarked(true);
-                fb_model_menu_->AddItem(off);
-                // No fetch can happen for "(none)"; clear any stale failure.
-                fb_models_load_failed_ = false;
-                break;
+            if (fb_provider_menu_->HasRevision(*msg)) {
+                std::string provider;
+                if (!fb_provider_menu_->Accept(*msg, "provider_id", provider))
+                    break;
+                selected_fb_provider_ = provider;
+                fb_provider_menu_->Select("provider_id", provider);
+                fb_provider_menu_->UpdateLabel(fb_provider_field_);
             }
-            auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
-            loading->SetEnabled(false);
-            loading->SetMarked(true);
-            fb_model_menu_->AddItem(loading);
             _FetchFBModelsForMarkedProvider();
             break;
         }
         case MSG_FB_MODELS_LOADED: {
-            // Same stale-reply guard as the primary pair; also discards late
-            // replies after switching back to "(none)" (empty id never matches).
-            const char* fb_loaded_pid = nullptr;
-            if (msg->FindString("provider_id", &fb_loaded_pid) == B_OK
-                    && fb_loaded_pid && std::string(fb_loaded_pid) != _MarkedFBProviderId())
-                break;
-
-            // A completed load (even an empty one) is not a failure — only the
-            // explicit error branch below re-arms the click-to-retry flag.
-            fb_models_load_failed_ = false;
-            std::string preserved = config_.vision_fallback_model;
-            while (fb_model_menu_->CountItems() > 0)
-                delete fb_model_menu_->RemoveItem((int32)0);
-            const char* m = nullptr;
-            int32 idx = 0;
-            bool any = false;
-            BMenuItem* to_mark = nullptr;
-            while (msg->FindString("model", idx++, &m) == B_OK) {
-                if (m && *m) {
-                    auto* msg = new BMessage();
-                    msg->AddString("model_id", m);
-                    fb_model_menu_->AddItem(
-                        new BMenuItem(short_model_label(m).c_str(), msg));
-                    any = true;
-                }
-            }
-            if (any) {
-                if (!preserved.empty())
-                    to_mark = find_model_item(fb_model_menu_, preserved);
-                if (!to_mark) to_mark = fb_model_menu_->ItemAt(0);
-            } else {
-                std::string label = "(none available)";
-                const char* err = nullptr;
-                if (msg->FindString("error", &err) == B_OK && err && *err) {
-                    label = std::string("(fetch failed: ") + err + ")";
-                    // Remember the failure so clicking the dropdown re-fetches.
-                    // A no-key "(none available)" is not an error — retrying
-                    // it cannot succeed, so the flag stays false there.
-                    fb_models_load_failed_ = true;
-                }
-                to_mark = new BMenuItem(label.c_str(), nullptr);
-                to_mark->SetEnabled(false);
-                fb_model_menu_->AddItem(to_mark);
-            }
-            if (to_mark) to_mark->SetMarked(true);
-            fb_model_menu_->SetLabelFromMarked(true);
+            _LoadModelSnapshot(msg, true);
             break;
         }
         case MSG_SET_PROVIDER: {
-            // Provider dropdown changed — refetch the model list.
-            while (model_menu_->CountItems() > 0)
-                delete model_menu_->RemoveItem((int32)0);
-            auto* loading = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
-            loading->SetEnabled(false);
-            loading->SetMarked(true);
-            model_menu_->AddItem(loading);
+            std::string provider;
+            if (!provider_menu_->Accept(*msg, "provider_id", provider))
+                break;
+            selected_provider_ = provider;
+            provider_menu_->Select("provider_id", provider);
+            provider_menu_->UpdateLabel(provider_field_);
             _FetchModelsForMarkedProvider();
             break;
         }
         case MSG_MODELS_LOADED: {
-            // Discard replies for a provider that is no longer marked — fetches
-            // run on detached threads and can land out of order after the user
-            // switched providers (same guard MainWindow applies).
-            const char* loaded_pid = nullptr;
-            if (msg->FindString("provider_id", &loaded_pid) == B_OK
-                    && loaded_pid && std::string(loaded_pid) != _MarkedProviderId())
-                break;
-
-            // Repopulate model dropdown from the fetched list.
-            // A completed load (even an empty one) is not a failure — only the
-            // explicit error branch below re-arms the click-to-retry flag.
-            models_load_failed_ = false;
-            std::string preserved = config_.model;
-            while (model_menu_->CountItems() > 0)
-                delete model_menu_->RemoveItem((int32)0);
-            const char* m = nullptr;
-            for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i) {
-                // Label is the shortened display form; the real (full-path) id
-                // rides on the item's message so _Save/_RefreshContextField/
-                // _RefreshVisionMenu keep keying config by the real id.
-                auto* msg = new BMessage(MSG_MODEL_CHANGED);
-                msg->AddString("model_id", m);
-                model_menu_->AddItem(new BMenuItem(short_model_label(m).c_str(), msg));
-            }
-            BMenuItem* to_mark = nullptr;
-            if (model_menu_->CountItems() > 0) {
-                if (auto* existing = find_model_item(model_menu_, preserved))
-                    to_mark = existing;
-                else
-                    to_mark = model_menu_->ItemAt(0);
-            } else {
-                std::string label = "(none available)";
-                const char* err = nullptr;
-                if (msg->FindString("error", &err) == B_OK && err && *err) {
-                    label = std::string("(fetch failed: ") + err + ")";
-                    // Remember the failure so clicking the dropdown re-fetches.
-                    // A no-key "(none available)" is not an error — retrying
-                    // it cannot succeed, so the flag stays false there.
-                    models_load_failed_ = true;
-                }
-                to_mark = new BMenuItem(label.c_str(), nullptr);
-                to_mark->SetEnabled(false);
-                model_menu_->AddItem(to_mark);
-            }
-            if (to_mark) to_mark->SetMarked(true);
-            model_menu_->SetLabelFromMarked(true);
-            _RefreshContextField();
-            _RefreshVisionMenu();
+            _LoadModelSnapshot(msg, false);
             break;
         }
         case MSG_WS_ENGINE_SELECTED: {
@@ -1096,6 +928,54 @@ SettingsWindow::MessageReceived(BMessage* msg)
 }
 
 void
+SettingsWindow::_LoadModelSnapshot(BMessage* message, bool fallback)
+{
+    const std::string& provider = fallback ? selected_fb_provider_ : selected_provider_;
+    const char* loaded = nullptr;
+    if (message->FindString("provider_id", &loaded) == B_OK && provider != loaded)
+        return;
+    if (fallback && provider.empty())
+        return;
+    auto* menu = fallback ? fb_model_menu_ : model_menu_;
+    auto* field = fallback ? fb_model_field_ : model_field_;
+    auto& model = fallback ? selected_fb_model_ : selected_model_;
+    auto& failed = fallback ? fb_models_load_failed_ : models_load_failed_;
+    auto& available = fallback ? fb_model_available_ : model_available_;
+    failed = false;
+    std::vector<SnapshotMenu::Entry> entries;
+    int32 selected = 0;
+    const char* id = nullptr;
+    for (int32 i = 0; message->FindString("model", i, &id) == B_OK; ++i) {
+        if (!*id)
+            continue;
+        BMessage selection(fallback ? MSG_FB_MODEL_CHANGED : MSG_MODEL_CHANGED);
+        selection.AddString("model_id", id);
+        entries.push_back({short_model_label(id), selection});
+        if (model == id)
+            selected = entries.size() - 1;
+    }
+    available = !entries.empty();
+    if (available) {
+        entries[selected].message.FindString("model_id", &id);
+        model = id;
+    } else {
+        std::string label = "(none available)";
+        const char* error = nullptr;
+        if (message->FindString("error", &error) == B_OK && *error) {
+            label = std::string("(fetch failed: ") + error + ")";
+            failed = true;
+        }
+        entries.push_back(SnapshotMenu::Placeholder(label));
+    }
+    menu->Publish(std::move(entries), selected, provider, BMessenger(this));
+    menu->UpdateLabel(field);
+    if (!fallback) {
+        _RefreshContextField();
+        _RefreshVisionMenu();
+    }
+}
+
+void
 SettingsWindow::_Save()
 {
     BMessage saved(MSG_SETTINGS_SAVED);
@@ -1103,14 +983,7 @@ SettingsWindow::_Save()
 
     // Scalars from the General/Tools tabs.
     std::string provider_sel = _MarkedProviderId();
-    std::string model_sel;
-    if (auto* m = model_menu_->FindMarked()) {
-        // model_item_id() returns "" for placeholder items (no message),
-        // which doubles as the skip test: omitting the model string makes
-        // HaiCodeApp keep the previously persisted value — a failed fetch
-        // must not poison config.json or the context/vision overrides below.
-        model_sel = model_item_id(m);
-    }
+    std::string model_sel = model_available_ ? selected_model_ : "";
     if (!model_sel.empty())
         saved.AddString("model", model_sel.c_str());
     saved.AddString("provider", provider_sel.c_str());
@@ -1163,9 +1036,7 @@ SettingsWindow::_Save()
     // Vision fallback pair. "(none)" provider or a placeholder/unset model
     // label means the feature is off (sent as empty strings).
     std::string fb_provider = _MarkedFBProviderId();
-    std::string fb_model;
-    if (auto* mk = fb_model_menu_->FindMarked())
-        fb_model = model_item_id(mk);
+    std::string fb_model = fb_model_available_ ? selected_fb_model_ : "";
     saved.AddString("vision_fallback_provider", fb_provider.c_str());
     saved.AddString("vision_fallback_model", fb_model.c_str());
 
@@ -1181,22 +1052,14 @@ SettingsWindow::_Save()
 std::string
 SettingsWindow::_MarkedProviderId() const
 {
-    if (auto* marked = provider_menu_->FindMarked()) {
-        const char* pid = nullptr;
-        if (marked->Message()
-            && marked->Message()->FindString("provider_id", &pid) == B_OK && pid)
-            return pid;
-    }
-    return "";
+    return selected_provider_;
 }
 
 void
 SettingsWindow::_RefreshContextField()
 {
     if (!context_field_) return;
-    std::string model;
-    if (auto* marked = model_menu_->FindMarked())
-        model = model_item_id(marked);  // "" for placeholder items
+    std::string model = model_available_ ? selected_model_ : "";
 
     auto mcit = config_.model_contexts.find(model);
     if (mcit != config_.model_contexts.end() && mcit->second > 0) {
@@ -1214,9 +1077,7 @@ void
 SettingsWindow::_RefreshVisionMenu()
 {
     if (!vision_menu_) return;
-    std::string model;
-    if (auto* marked = model_menu_->FindMarked())
-        model = model_item_id(marked);  // "" for placeholder items
+    std::string model = model_available_ ? selected_model_ : "";
 
     std::string want = "auto";
     auto vit = config_.model_vision.find(model);
@@ -1318,9 +1179,12 @@ void
 SettingsWindow::_FetchModelsForMarkedProvider()
 {
     std::string pid = _MarkedProviderId();
-    if (pid.empty()) return;
-    // A load is in flight; a dropdown click won't re-trigger it.
     models_load_failed_ = false;
+    model_available_ = false;
+    model_menu_->Publish({SnapshotMenu::Placeholder(pid.empty()
+        ? "(none available)" : "(loading…)")}, 0, pid, BMessenger(this));
+    model_menu_->UpdateLabel(model_field_);
+    if (pid.empty()) return;
     BMessage fetch(MSG_FETCH_MODELS);
     fetch.AddString("provider_id", pid.c_str());
     // Route the reply back to this window instead of MainWindow.
@@ -1332,9 +1196,12 @@ void
 SettingsWindow::_FetchFBModelsForMarkedProvider()
 {
     std::string pid = _MarkedFBProviderId();
-    if (pid.empty()) return;
-    // A load is in flight; a dropdown click won't re-trigger it.
     fb_models_load_failed_ = false;
+    fb_model_available_ = false;
+    fb_model_menu_->Publish({SnapshotMenu::Placeholder(pid.empty()
+        ? "(off)" : "(loading…)")}, 0, pid, BMessenger(this));
+    fb_model_menu_->UpdateLabel(fb_model_field_);
+    if (pid.empty()) return;
     BMessage fetch(MSG_FETCH_MODELS);
     fetch.AddString("provider_id", pid.c_str());
     fetch.AddMessenger("reply", BMessenger(this));
@@ -1347,12 +1214,5 @@ SettingsWindow::_FetchFBModelsForMarkedProvider()
 std::string
 SettingsWindow::_MarkedFBProviderId() const
 {
-    if (auto* marked = fb_provider_menu_->FindMarked()) {
-        const char* pid = nullptr;
-        if (marked->Message()
-            && marked->Message()->FindString("provider_id", &pid) == B_OK
-            && pid)
-            return pid;
-    }
-    return "";
+    return selected_fb_provider_;
 }

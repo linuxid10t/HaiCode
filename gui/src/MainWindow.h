@@ -18,6 +18,7 @@
 #include <TextControl.h>
 
 #include "ChatView.h"
+#include "SnapshotMenu.h"
 
 #include <haicode/engine.h>
 #include <haicode/db.h>
@@ -234,11 +235,11 @@ private:
     // derived from the media type)
     std::vector<std::pair<std::string, std::string>> pending_attachments_;
     BMenuField*    model_field_     = nullptr;
-    BPopUpMenu*    model_menu_      = nullptr;
+    SnapshotMenu* model_menu_      = nullptr;
     BMenuField*    inf_effort_field_ = nullptr;
     BPopUpMenu*    inf_effort_menu_  = nullptr;
     BMenuField*    provider_field_  = nullptr;
-    BPopUpMenu*    provider_menu_   = nullptr;
+    SnapshotMenu* provider_menu_   = nullptr;
     BMenuBar*      menu_bar_        = nullptr;
     BMenuItem*     offline_item_    = nullptr;
     BStringView*   status_strip_    = nullptr;

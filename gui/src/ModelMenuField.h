@@ -5,6 +5,9 @@
 #include <MenuItem.h>
 #include <Message.h>
 #include <Window.h>
+#include <MenuBar.h>
+#include <MessageFilter.h>
+#include "SnapshotMenu.h"
 
 #include <string>
 
@@ -50,8 +53,8 @@ inline BMenuItem* find_model_item(BMenu* menu, const std::string& id) {
 // dropdown (MSG_MODEL_REFRESH) and SettingsWindow's primary and
 // vision-fallback model dropdowns. The window-side handler decides whether
 // to actually re-fetch (its failed-load flag), keeping this view stateless.
-// BMenuField tracks its menu on a separate menu-task thread, so the window
-// looper stays free to process the refresh while the menu is open.
+// Native popup tracking owns each rendered snapshot until Go() returns.
+// Replies cancel obsolete tracking and reopen with the latest snapshot.
 class ModelMenuField : public BMenuField {
 public:
     ModelMenuField(const char* name, const char* label, BMenu* menu,
@@ -61,7 +64,25 @@ public:
     {
     }
 
-    void MouseDown(BPoint where) override
+    void AttachedToWindow() override
+    {
+        BMenuField::AttachedToWindow();
+        class RedirectMouse : public BMessageFilter {
+        public:
+            explicit RedirectMouse(BHandler* field)
+                : BMessageFilter(B_MOUSE_DOWN), field_(field) {}
+            filter_result Filter(BMessage*, BHandler** target) override
+            {
+                *target = field_;
+                return B_DISPATCH_MESSAGE;
+            }
+        private:
+            BHandler* field_;
+        };
+        MenuBar()->AddFilter(new RedirectMouse(this));
+    }
+
+    void MouseDown(BPoint) override
     {
         int32 buttons = 0;
         if (Window() && Window()->CurrentMessage()
@@ -70,9 +91,34 @@ public:
             BMessage refresh(refreshWhat_);
             Window()->PostMessage(&refresh);
         }
-        BMenuField::MouseDown(where);
+        _OpenPopup();
+    }
+
+    void KeyDown(const char* bytes, int32 count) override
+    {
+        if (count == 1 && (bytes[0] == B_SPACE || bytes[0] == B_DOWN_ARROW
+                || bytes[0] == B_RIGHT_ARROW)) {
+            if (Window())
+                Window()->PostMessage(refreshWhat_);
+            _OpenPopup();
+        } else
+            BMenuField::KeyDown(bytes, count);
     }
 
 private:
+    void _OpenPopup()
+    {
+        if (!IsEnabled())
+            return;
+        if (auto* menu = dynamic_cast<SnapshotMenu*>(Menu())) {
+            // Anchor under the menu-bar portion only, not the whole field —
+            // Bounds() includes the "Model:" label and would offset the popup.
+            BRect anchor = MenuBar()
+                ? MenuBar()->ConvertToScreen(MenuBar()->Bounds())
+                : ConvertToScreen(Bounds());
+            menu->OpenModelPopup(anchor);
+        }
+    }
+
     uint32 refreshWhat_;
 };

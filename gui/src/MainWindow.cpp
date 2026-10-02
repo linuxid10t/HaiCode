@@ -341,20 +341,16 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     .End();
 
     // Provider selector — populated from config in RebuildProviderMenu().
-    provider_menu_ = new BPopUpMenu("Provider");
+    provider_menu_ = new SnapshotMenu("Provider");
     provider_field_ = new BMenuField("provider_field", "Provider:", provider_menu_);
 
     // Model list — starts empty; populated after MSG_MODELS_LOADED.
     // Radio mode keeps at most one item marked, so the dropdown's marked item
     // always mirrors default_model_ (the single source of truth for the next
     // session's model).
-    model_menu_ = new BPopUpMenu("(loading…)");
-    model_menu_->SetRadioMode(true);
-    model_menu_->SetLabelFromMarked(true);
-    auto* loading_item = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
-    loading_item->SetEnabled(false);
-    loading_item->SetMarked(true);
-    model_menu_->AddItem(loading_item);
+    model_menu_ = new SnapshotMenu("(loading…)");
+    model_menu_->Publish({SnapshotMenu::Placeholder("(loading…)")}, 0,
+                         default_provider_, BMessenger(this));
     model_field_ = new ModelMenuField("model_field", "Model:", model_menu_,
                                       MSG_MODEL_REFRESH);
 
@@ -649,54 +645,37 @@ MainWindow::QuitRequested()
 void
 MainWindow::RebuildProviderMenu(const std::map<std::string, haicode::ProviderConfig>& providers)
 {
-    // Remember current selection to restore if possible.
-    std::string keep = default_provider_;
-
-    while (provider_menu_->CountItems() > 0)
-        delete provider_menu_->RemoveItem((int32)0);
-
-    for (auto& [id, p] : providers) {
-        // Same type inference as HaiCodeApp's make_provider_registry.
+    std::vector<SnapshotMenu::Entry> entries;
+    int32 selected = -1;
+    for (const auto& [id, p] : providers) {
         std::string type = p.type.empty()
             ? (id == "anthropic" ? "anthropic"
               : id == "chatgpt" ? "chatgpt" : "openai") : p.type;
-        // Unsigned-in ChatGPT entries stay visible but unselectable: the
-        // registry can't serve them (no OAuth token), but hiding them made
-        // the sign-in requirement invisible.
-        std::string label = id;
-        bool unselectable = false;
-        if (type == "chatgpt" && !haicode::codex_auth_signed_in()) {
-            label += " (sign in via Settings)";
-            unselectable = true;
-        }
-        auto* msg = new BMessage(MSG_FETCH_MODELS);
-        msg->AddString("provider_id", id.c_str());
-        auto* item = new BMenuItem(label.c_str(), msg);
-        if (unselectable) item->SetEnabled(false);
-        provider_menu_->AddItem(item);
+        bool enabled = type != "chatgpt" || haicode::codex_auth_signed_in();
+        BMessage message(MSG_FETCH_MODELS);
+        message.AddString("provider_id", id.c_str());
+        entries.push_back({id + (enabled ? "" : " (sign in via Settings)"),
+                           message, enabled, true});
+        if (enabled && id == default_provider_)
+            selected = entries.size() - 1;
     }
-
-    provider_menu_->SetRadioMode(true);
-    provider_menu_->SetLabelFromMarked(true);
-
-    // Restore mark: prefer `keep`, else the first selectable item — a
-    // disabled chatgpt entry can't be marked (SelectProvider refuses, and
-    // fetching models from an unregistered provider would just fail).
-    SelectProvider(keep);
-    if (!provider_menu_->FindMarked()) {
-        for (int32 i = 0; i < provider_menu_->CountItems(); ++i) {
-            auto* it = provider_menu_->ItemAt(i);
-            if (it && it->IsEnabled()) {
-                it->SetMarked(true);
+    if (selected < 0) {
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].enabled) {
+                selected = i;
+                const char* id = nullptr;
+                entries[i].message.FindString("provider_id", &id);
+                default_provider_ = id;
                 break;
             }
         }
     }
-    if (auto* marked = provider_menu_->FindMarked()) {
-        const char* pid = nullptr;
-        if (marked->Message() && marked->Message()->FindString("provider_id", &pid) == B_OK && pid)
-            default_provider_ = pid;
+    if (entries.empty()) {
+        entries.push_back(SnapshotMenu::Placeholder("(none configured)"));
+        selected = 0;
     }
+    provider_menu_->Publish(std::move(entries), selected, "", BMessenger(this));
+    provider_menu_->UpdateLabel(provider_field_);
 }
 
 void
@@ -717,21 +696,9 @@ MainWindow::SetEngine(haicode::SessionEngine& engine)
 void
 MainWindow::SelectProvider(const std::string& provider_id)
 {
-    // A disabled item (unsigned-in ChatGPT entry) can never be selected;
-    // the previous default stays untouched so the marked item remains valid.
-    for (int32 i = 0; i < provider_menu_->CountItems(); i++) {
-        BMenuItem* item = provider_menu_->ItemAt(i);
-        const char* pid = nullptr;
-        if (!item->Message()
-                || item->Message()->FindString("provider_id", &pid) != B_OK
-                || !pid)
-            continue;
-        if (std::string(pid) != provider_id)
-            continue;
-        if (!item->IsEnabled()) return;
+    if (provider_menu_->Select("provider_id", provider_id)) {
         default_provider_ = provider_id;
-        item->SetMarked(true);
-        return;
+        provider_menu_->UpdateLabel(provider_field_);
     }
 }
 
@@ -1057,13 +1024,15 @@ MainWindow::MessageReceived(BMessage* msg)
             // The provider id is carried on the clicked item's message, not
             // inferred from its label. For messages from outside the menu
             // (settings save, startup), provider_id may be attached directly.
-            const char* pid_str = nullptr;
-            if (msg->FindString("provider_id", &pid_str) != B_OK || !pid_str) {
-                BMenuItem* marked = provider_menu_->FindMarked();
-                if (marked && marked->Message())
-                    marked->Message()->FindString("provider_id", &pid_str);
+            std::string pid = default_provider_;
+            if (provider_menu_->HasRevision(*msg)) {
+                if (!provider_menu_->Accept(*msg, "provider_id", pid))
+                    break;
+            } else {
+                const char* value = nullptr;
+                if (msg->FindString("provider_id", &value) == B_OK)
+                    pid = value;
             }
-            std::string pid = pid_str ? pid_str : "anthropic";
             // Re-mark the provider dropdown too: external fetches (settings
             // save, startup) don't go through the menu's radio selection, so
             // without this the label would keep showing the old provider.
@@ -1081,12 +1050,11 @@ MainWindow::MessageReceived(BMessage* msg)
             // User clicked a model menu item. default_model_ is the single
             // source of truth — _NewSession/_UpdateMaxContext read it instead
             // of querying the menu, so we just sync it here.
-            BMenuItem* marked = model_menu_->FindMarked();
-            // Placeholder items ((loading…), (fetch failed: …)) carry no
-            // model id; absorbing the empty id would blank the context meter
-            // and poison the session/config with "".
-            if (marked && !model_item_id(marked).empty()) {
-                default_model_ = model_item_id(marked);
+            std::string model;
+            if (model_menu_->Accept(*msg, "model_id", model)) {
+                default_model_ = model;
+                model_menu_->Select("model_id", model);
+                model_menu_->UpdateLabel(model_field_);
                 _ApplyProviderModelToActiveSession();
                 _UpdateMaxContext();
                 _PersistProviderModel();
@@ -1146,54 +1114,31 @@ MainWindow::MessageReceived(BMessage* msg)
             // A completed load (even an empty one) is not a failure — only the
             // explicit error branch below re-arms the click-to-retry flag.
             models_load_failed_ = false;
-            std::string preserved = default_model_;
-
-            while (model_menu_->CountItems() > 0)
-                delete model_menu_->RemoveItem((int32)0);
-
-            const char* m = nullptr;
-            for (int32 i = 0; msg->FindString("model", i, &m) == B_OK; ++i) {
-                // Label is the shortened display form; the real (full-path) id
-                // rides on the item's message so downstream consumers keep it.
-                BMessage* sel = new BMessage(MSG_MODEL_SELECTED);
-                sel->AddString("model_id", m);
-                model_menu_->AddItem(new BMenuItem(short_model_label(m).c_str(), sel));
+            std::vector<SnapshotMenu::Entry> entries;
+            int32 selected = 0;
+            const char* model = nullptr;
+            for (int32 i = 0; msg->FindString("model", i, &model) == B_OK; ++i) {
+                BMessage selection(MSG_MODEL_SELECTED);
+                selection.AddString("model_id", model);
+                entries.push_back({short_model_label(model), selection});
+                if (default_model_ == model)
+                    selected = entries.size() - 1;
             }
-
-            BMenuItem* to_mark = nullptr;
-            bool placeholder = false;
-            if (model_menu_->CountItems() > 0) {
-                // Prefer re-marking the previously selected model (match by id).
-                if (auto* existing = find_model_item(model_menu_, preserved))
-                    to_mark = existing;
-                else
-                    to_mark = model_menu_->ItemAt(0);
-            } else {
-                // Empty list: prefer an error reason from the fetch (if any)
-                // over the generic "(none available)" so misconfigurations
-                // (bad base_url, missing models endpoint, auth failure) are
-                // debuggable instead of silent.
+            if (entries.empty()) {
                 std::string label = "(none available)";
-                const char* err = nullptr;
-                if (msg->FindString("error", &err) == B_OK && err && *err) {
-                    label = std::string("(fetch failed: ") + err + ")";
-                    // Remember the failure so clicking the dropdown re-fetches.
-                    // A no-key "(none available)" is not an error — retrying
-                    // it cannot succeed, so the flag stays false there.
+                const char* error = nullptr;
+                if (msg->FindString("error", &error) == B_OK && error && *error) {
+                    label = std::string("(fetch failed: ") + error + ")";
                     models_load_failed_ = true;
                 }
-                auto* none_item = new BMenuItem(label.c_str(), nullptr);
-                none_item->SetEnabled(false);
-                model_menu_->AddItem(none_item);
-                to_mark = none_item;
-                // The marked item is a UI placeholder, not a model id —
-                // default_model_ must not absorb it (a failed fetch would
-                // otherwise poison the session DB and persisted config).
-                placeholder = true;
+                entries.push_back(SnapshotMenu::Placeholder(label));
+            } else {
+                entries[selected].message.FindString("model_id", &model);
+                default_model_ = model;
             }
-            to_mark->SetMarked(true);
-            if (!placeholder)
-                default_model_ = model_item_id(to_mark);
+            model_menu_->Publish(std::move(entries), selected,
+                                 default_provider_, BMessenger(this));
+            model_menu_->UpdateLabel(model_field_);
             _UpdateMaxContext();
             // Sync the engine: without this, switching provider leaves the
             // active session's stored model stale (the auto-marked default
@@ -1344,28 +1289,14 @@ MainWindow::_SelectSession(int idx)
             SelectProvider(provider_id);
 
         if (!model_id.empty()) {
-            // Try to mark the matching item. If none matches (different
-            // provider, list still loading), explicitly clear any stale mark
-            // so the dropdown doesn't show a model from a previous session.
-            // default_model_ is set unconditionally — _NewSession reads it
-            // directly, not the menu state.
-            bool found = false;
-            for (int32 i = 0; i < model_menu_->CountItems(); i++) {
-                BMenuItem* item = model_menu_->ItemAt(i);
-                if (!item) continue;
-                // Match on the carried full id, not the (shortened) label.
-                if (model_item_id(item) == model_id) {
-                    item->SetMarked(true);
-                    found = true;
-                }
-            }
-            if (!found) {
-                for (int32 i = 0; i < model_menu_->CountItems(); i++) {
-                    if (auto* item = model_menu_->ItemAt(i))
-                        item->SetMarked(false);
-                }
-            }
             default_model_ = model_id;
+            if (model_menu_->Select("model_id", model_id))
+                model_menu_->UpdateLabel(model_field_);
+            else {
+                model_menu_->Publish({SnapshotMenu::Placeholder(short_model_label(model_id))},
+                                     0, default_provider_, BMessenger(this));
+                model_menu_->UpdateLabel(model_field_);
+            }
         }
 
         if (!provider_id.empty() && provider_id != prev_provider) {
@@ -3049,12 +2980,9 @@ MainWindow::_FetchModels()
     // in flight. default_model_ is preserved so that if the fetch fails
     // or returns no matches, the next session still uses a sensible
     // value.
-    while (model_menu_->CountItems() > 0)
-        delete model_menu_->RemoveItem((int32)0);
-    auto* loading_item = new BMenuItem("(loading\xe2\x80\xa6)", nullptr);
-    loading_item->SetEnabled(false);
-    loading_item->SetMarked(true);
-    model_menu_->AddItem(loading_item);
+    model_menu_->Publish({SnapshotMenu::Placeholder("(loading…)")}, 0,
+                         default_provider_, BMessenger(this));
+    model_menu_->UpdateLabel(model_field_);
 
     BMessage fwd(MSG_FETCH_MODELS);
     fwd.AddString("provider_id", default_provider_.c_str());

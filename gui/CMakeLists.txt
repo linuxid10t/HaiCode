@@ -37,3 +37,8 @@ target_link_libraries(haicode-gui PRIVATE
     ${ROOT_LIB}
     $<$<BOOL:${TRACKER_LIB}>:${TRACKER_LIB}>
 )
+
+add_executable(test_snapshot_menu tests/test_snapshot_menu.cpp src/SnapshotMenu.cpp)
+target_include_directories(test_snapshot_menu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_snapshot_menu PRIVATE ${BE_LIB} ${ROOT_LIB})
+add_test(NAME snapshot_menu COMMAND test_snapshot_menu)
