@@ -254,6 +254,63 @@ static bool settings_save_does_not_leak_project_state() {
     return true;
 }
 
+// thinking_display default is "off": an absent key parses to the empty
+// "unset" sentinel (consumers fall back to collapsed), explicit values
+// parse unchanged, and the save path erases the key from the global file
+// when the layer leaves it unset (the default is never written).
+static bool thinking_display_defaults_to_off() {
+    reset_dir();
+    const std::string p = std::string(kDir) + "/thinking.json";
+
+    // Absent key → empty (unset); explicit values survive the parser.
+    write_file(p, R"({"model":"m"})");
+    auto cfg = haicode::ConfigLoader().load_file(p);
+    CHECK(cfg.thinking_display.empty(),
+          "absent thinking_display must stay unset (empty)");
+    write_file(p, R"({"thinking_display":"on_while_thinking"})");
+    cfg = haicode::ConfigLoader().load_file(p);
+    CHECK(cfg.thinking_display == "on_while_thinking",
+          "explicit saved preference must not be coerced to the default");
+    write_file(p, R"({"thinking_display":"off"})");
+    cfg = haicode::ConfigLoader().load_file(p);
+    CHECK(cfg.thinking_display == "off", "explicit off survives the parser");
+
+    // Serialization: default (empty) omits the key; explicit values emit it.
+    haicode::AppConfig g;
+    CHECK(!haicode::global_scope_json(g).contains("thinking_display"),
+          "default thinking_display must not be serialized");
+    g.thinking_display = "on";
+    CHECK(haicode::global_scope_json(g)["thinking_display"] == "on",
+          "explicit on must be serialized");
+    g.thinking_display = "on_while_thinking";
+    CHECK(haicode::global_scope_json(g)["thinking_display"] == "on_while_thinking",
+          "explicit on_while_thinking must be serialized (no longer the default)");
+
+    // Sync hygiene: a file holding a stale explicit value is erased when
+    // the layer is back to the default, and re-written when set to "on".
+    const std::string gp = std::string(kDir) + "/global.json";
+    write_file(gp, R"({"thinking_display":"on_while_thinking","future":1})");
+    haicode::AppConfig gl = haicode::load_layer(gp).values;
+    std::string err;
+    CHECK(haicode::sync_global_scope(gl, gp, err), "sync: " + err);
+    nlohmann::json j = nlohmann::json::parse(read_file(gp), nullptr, false);
+    CHECK(j.contains("thinking_display"), "explicit layer value round-trips");
+    haicode::AppConfig gdef;  // everything at default
+    CHECK(haicode::sync_global_scope(gdef, gp, err), "default sync: " + err);
+    j = nlohmann::json::parse(read_file(gp), nullptr, false);
+    CHECK(!j.contains("thinking_display"),
+          "default (off) must be erased from the global file");
+    CHECK(j["future"] == 1, "unknown keys still preserved");
+    gdef.thinking_display = "on";
+    CHECK(haicode::sync_global_scope(gdef, gp, err), "on sync: " + err);
+    j = nlohmann::json::parse(read_file(gp), nullptr, false);
+    CHECK(j.contains("thinking_display")
+            && j["thinking_display"] == "on",
+          "explicit on written back to the global file");
+    std::cout << "[OK] thinking_display defaults to off\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok &= missing_file_created();
@@ -264,6 +321,7 @@ int main() {
     ok &= empty_path_fails();
     ok &= writes_owner_only();
     ok &= settings_save_does_not_leak_project_state();
+    ok &= thinking_display_defaults_to_off();
     if (ok) {
         std::cout << "\nAll config-write tests passed!\n";
         return 0;

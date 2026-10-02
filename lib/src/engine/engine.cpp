@@ -1837,8 +1837,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             mode_label(mode).c_str(),
             max_steps, kStepCeilingMultiplier * max_steps, config_.instructions.size());
     // The full prompt embeds project agents.md content; dump it only when
-    // explicitly debugging prompt assembly.
-    if (std::getenv("HPCODE_DEBUG_PROMPT") && *std::getenv("HPCODE_DEBUG_PROMPT")) {
+    // explicitly debugging prompt assembly. HAICODE_DEBUG_PROMPT is the
+    // current name; the pre-rename HPCODE_DEBUG_PROMPT is accepted for one
+    // release.
+    const char* dbg_prompt = std::getenv("HAICODE_DEBUG_PROMPT");
+    if (!dbg_prompt || !*dbg_prompt)
+        dbg_prompt = std::getenv("HPCODE_DEBUG_PROMPT");
+    if (dbg_prompt && *dbg_prompt) {
         fprintf(stderr, "[engine] system prompt:\n%s\n---\n", system.c_str());
     }
     fflush(stderr);

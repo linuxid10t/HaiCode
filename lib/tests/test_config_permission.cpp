@@ -1655,6 +1655,96 @@ static bool policy_save_conflict_and_validation() {
 }
 
 // ============================================================
+// Project instructions files (agents.md / claude.md, case-insensitive)
+// ============================================================
+
+// Fresh empty project dir; removes any leftover from an earlier run.
+static std::string fresh_project_dir(const std::string& name) {
+    const std::string dir = "/tmp/" + name;
+    (void)system(("rm -rf " + dir).c_str());
+    TEST_REQUIRE(mkdir(dir.c_str(), 0755) == 0, "mkdir " + dir);
+    return dir;
+}
+
+static bool instr_case_insensitive_agents_md() {
+    const std::string dir = fresh_project_dir("tfc_instr_agents_upper");
+    write_file(dir + "/AGENTS.md", "upper case rules");
+
+    haicode::ConfigLayer global;
+    auto cfg = haicode::load_with_layers(global, dir);
+    CHECK(cfg.agents_md == "upper case rules",
+          "AGENTS.md (uppercase) is discovered");
+
+    CHECK(haicode::find_project_instructions_file(dir, "agents.md")
+              == dir + "/AGENTS.md",
+          "helper resolves the existing AGENTS.md spelling");
+    (void)system(("rm -rf " + dir).c_str());
+    std::cout << "[OK] AGENTS.md (uppercase) discovered\n";
+    return true;
+}
+
+static bool instr_claude_md_fallback_case_insensitive() {
+    const std::string dir = fresh_project_dir("tfc_instr_claude_upper");
+    write_file(dir + "/CLAUDE.md", "claude fallback rules");
+
+    haicode::ConfigLayer global;
+    auto cfg = haicode::load_with_layers(global, dir);
+    CHECK(cfg.agents_md == "claude fallback rules",
+          "CLAUDE.md (uppercase) loaded as fallback");
+
+    CHECK(haicode::find_project_instructions_file(dir, "agents.md").empty(),
+          "no agents.md variant present");
+    CHECK(haicode::find_project_instructions_file(dir, "claude.md")
+              == dir + "/CLAUDE.md",
+          "helper resolves the existing CLAUDE.md spelling");
+    (void)system(("rm -rf " + dir).c_str());
+    std::cout << "[OK] CLAUDE.md (uppercase) fallback discovered\n";
+    return true;
+}
+
+static bool instr_agents_wins_over_claude() {
+    const std::string dir = fresh_project_dir("tfc_instr_both");
+    write_file(dir + "/AGENTS.md", "agents rules");
+    write_file(dir + "/CLAUDE.md", "claude rules");
+
+    haicode::ConfigLayer global;
+    auto cfg = haicode::load_with_layers(global, dir);
+    CHECK(cfg.agents_md == "agents rules", "agents.md wins over claude.md");
+    (void)system(("rm -rf " + dir).c_str());
+    std::cout << "[OK] agents.md wins over claude.md\n";
+    return true;
+}
+
+static bool instr_exact_case_preferred() {
+    const std::string dir = fresh_project_dir("tfc_instr_both_cases");
+    write_file(dir + "/agents.md", "lower case rules");
+    write_file(dir + "/AGENTS.md", "upper case rules");
+
+    haicode::ConfigLayer global;
+    auto cfg = haicode::load_with_layers(global, dir);
+    CHECK(cfg.agents_md == "lower case rules",
+          "exact-case agents.md preferred over AGENTS.md");
+    CHECK(haicode::find_project_instructions_file(dir, "agents.md")
+              == dir + "/agents.md",
+          "helper prefers the exact spelling");
+    (void)system(("rm -rf " + dir).c_str());
+    std::cout << "[OK] exact-case agents.md preferred\n";
+    return true;
+}
+
+static bool instr_empty_file_treated_absent() {
+    const std::string dir = fresh_project_dir("tfc_instr_empty");
+    write_file(dir + "/AGENTS.md", "");
+
+    haicode::ConfigLayer global;
+    auto cfg = haicode::load_with_layers(global, dir);
+    CHECK(cfg.agents_md.empty(), "empty instruction file treated as absent");
+    (void)system(("rm -rf " + dir).c_str());
+    std::cout << "[OK] empty instruction file treated as absent\n";
+    return true;
+}
+
+// ============================================================
 
 int main() {
     std::cout << "=== Config + PermissionGate Tests ===\n\n";
@@ -1686,6 +1776,13 @@ int main() {
     ok &= merge_web_search_default_overlay_preserves_base();
     ok &= merge_absent_project_keys_preserve_global();
     ok &= merge_explicit_default_value_still_overrides();
+
+    std::cout << "\n-- project instructions (case-insensitive lookup) --\n";
+    ok &= instr_case_insensitive_agents_md();
+    ok &= instr_claude_md_fallback_case_insensitive();
+    ok &= instr_agents_wins_over_claude();
+    ok &= instr_exact_case_preferred();
+    ok &= instr_empty_file_treated_absent();
 
     std::cout << "\n-- PermissionGate --\n";
     ok &= perm_allow_rule();

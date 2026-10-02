@@ -2348,10 +2348,7 @@ MainWindow::_HandlePlanDecision(BMessage* msg)
 void
 MainWindow::_HandleTodosUpdated(BMessage* msg)
 {
-    if (!todos_list_) {
-        fprintf(stderr, "[todos] _HandleTodosUpdated: no todos_list_\n");
-        return;
-    }
+    if (!todos_list_) return;
 
     while (todos_list_->CountItems() > 0)
         delete todos_list_->RemoveItem((int32)0);
@@ -2374,13 +2371,10 @@ MainWindow::_HandleTodosUpdated(BMessage* msg)
         if (st == "in_progress" && active && *active)
             label += std::string("  — ") + active;
         todos_list_->AddItem(new BStringItem(label.c_str()));
-        fprintf(stderr, "[todos] added item %d: '%s'\n", (int)idx, label.c_str());
         if (st == "completed") ++done;
         ++total;
         ++idx;
     }
-    fprintf(stderr, "[todos] _HandleTodosUpdated total=%zu items, list now has %zu items\n",
-            (size_t)total, (size_t)todos_list_->CountItems());
 
     char hdr[64];
     snprintf(hdr, sizeof(hdr), "Todos (%d/%d done)", done, total);
@@ -3011,10 +3005,10 @@ void
 MainWindow::_ApplyThinkingDisplay()
 {
     if (!chat_view_ || !engine_) return;
-    // Map the config string onto the ChatView display mode; anything other
-    // than the two non-default values falls back to the streaming behavior.
+    // Map the config string onto the ChatView display mode; empty or
+    // unrecognized values fall back to "off" (the default).
     const std::string& td = engine_->config().thinking_display;
-    ThinkingDisplay d = ThinkingDisplay::ExpandedWhileStreaming;
+    ThinkingDisplay d = ThinkingDisplay::AlwaysCollapsed;
     if (td == "off")
         d = ThinkingDisplay::AlwaysCollapsed;
     else if (td == "on")

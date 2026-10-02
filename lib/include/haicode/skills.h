@@ -16,7 +16,8 @@ struct SkillInfo {
 // Scan <B_USER_SETTINGS_DIRECTORY>/haicode/skills/ (global) and
 // <project_dir>/.haicode/skills/ (project) for *.md skill files. A project
 // file with the same filename shadows the global one. Result is sorted by
-// name. The global dir can be overridden via $HPCODE_SKILLS_DIR (tests).
+// name. The global dir can be overridden via $HAICODE_SKILLS_DIR (tests);
+// the pre-rename $HPCODE_SKILLS_DIR is accepted for one release.
 std::vector<SkillInfo> list_skills(const std::string& project_dir);
 
 // Build the "# Skills" block appended to the system prompt: a directive
@@ -41,7 +42,8 @@ std::string build_skills_block(const std::string& project_dir,
                                const std::string& mode = "build");
 
 // Absolute path of the global skills directory
-// (<settings>/haicode/skills/, or $HPCODE_SKILLS_DIR when set). Exposed for
+// (<settings>/haicode/skills/, or $HAICODE_SKILLS_DIR — legacy
+// $HPCODE_SKILLS_DIR for one release — when set). Exposed for
 // the UI and tests.
 std::string global_skills_dir();
 

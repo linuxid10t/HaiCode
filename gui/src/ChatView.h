@@ -107,7 +107,7 @@ private:
     bool               reasoning_streaming_ = false;
     bool               inhibit_scroll_  = false;
     bool               defer_rebuild_   = false;
-    ThinkingDisplay    thinking_display_ = ThinkingDisplay::ExpandedWhileStreaming;
+    ThinkingDisplay    thinking_display_ = ThinkingDisplay::AlwaysCollapsed;
 
     std::vector<ChatEntry>        model_;
     std::vector<ToolHeaderRange>  header_ranges_;

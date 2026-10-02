@@ -97,7 +97,7 @@ static void test_discovery() {
     mkdirs(gdir + "/pack/skills/other");
     write_file(gdir + "/pack/skills/other/README.md", "doc; not a skill\n");
 
-    setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
+    setenv("HAICODE_SKILLS_DIR", gdir.c_str(), 1);
     auto skills = haicode::list_skills(proj);
     CHECK(skills.size() == 5);  // alpha, beta, gamma, shadowed, dirskill
     // Case-sensitive sort by name: capitals sort before lowercase, and the
@@ -180,7 +180,7 @@ static void test_discovery() {
                       "reached]") != std::string::npos);
     CHECK(capped.find(std::string(40 * 1024 + 100, 'y')) == std::string::npos);
 
-    unsetenv("HPCODE_SKILLS_DIR");
+    unsetenv("HAICODE_SKILLS_DIR");
     rm_rf(tmp);
 }
 
@@ -256,7 +256,7 @@ static void test_parse_invocation() {
     write_file(gdir + "/pack/skills/dirskill/SKILL.md", "DirSkill body.\n");
     write_file(proj + "/.haicode/skills/gamma.md", "Gamma body.\n");
 
-    setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
+    setenv("HAICODE_SKILLS_DIR", gdir.c_str(), 1);
 
     haicode::SkillInfo sk;
     std::string args;
@@ -297,7 +297,7 @@ static void test_parse_invocation() {
     CHECK(!parse_skill_invocation(proj, "", sk, args));
     CHECK(!parse_skill_invocation(proj, "/Alpha fix", sk, args)); // case-sensitive
 
-    unsetenv("HPCODE_SKILLS_DIR");
+    unsetenv("HAICODE_SKILLS_DIR");
     rm_rf(tmp);
 }
 
@@ -427,7 +427,7 @@ static void test_engine_slash_e2e() {
     mkdirs(proj + "/.haicode/skills");
     write_file(proj + "/.haicode/skills/alpha.md",
         "---\nname: Alpha\n---\nAlpha body.\n");
-    setenv("HPCODE_SKILLS_DIR", gdir.c_str(), 1);
+    setenv("HAICODE_SKILLS_DIR", gdir.c_str(), 1);
 
     std::string dbp = tmp + "/e2e.db";
     haicode::Database db(dbp);
@@ -494,12 +494,49 @@ static void test_engine_slash_e2e() {
         CHECK(saw_raw);
     }  // ~SessionEngine joins the loop threads
 
+    unsetenv("HAICODE_SKILLS_DIR");
+    rm_rf(tmp);
+}
+
+// One-release legacy acceptance: the pre-rename $HPCODE_SKILLS_DIR still
+// resolves the global skills directory when $HAICODE_SKILLS_DIR is unset,
+// and the new name wins once both are set.
+static void test_legacy_skills_dir_env() {
+    std::string tmp = "/tmp/hc_test_skills_legacy_XXXXXX";
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", tmp.c_str());
+    if (!mkdtemp(buf)) { CHECK(false); return; }
+    tmp = buf;
+    std::string legacy_dir = tmp + "/legacy_skills";
+    std::string new_dir = tmp + "/new_skills";
+    std::string proj = tmp + "/proj";
+    mkdirs(legacy_dir);
+    mkdirs(new_dir);
+    mkdirs(proj);
+    write_file(legacy_dir + "/legacy.md", "Legacy body.\n");
+    write_file(new_dir + "/newname.md", "New body.\n");
+
+    unsetenv("HAICODE_SKILLS_DIR");
+    setenv("HPCODE_SKILLS_DIR", legacy_dir.c_str(), 1);
+    auto skills = haicode::list_skills(proj);
+    CHECK(skills.size() == 1);
+    CHECK(!skills.empty() && skills[0].id == "legacy.md");
+    CHECK(!skills.empty() && skills[0].path == legacy_dir + "/legacy.md");
+
+    // New name takes precedence when both are set.
+    setenv("HAICODE_SKILLS_DIR", new_dir.c_str(), 1);
+    skills = haicode::list_skills(proj);
+    CHECK(skills.size() == 1);
+    CHECK(!skills.empty() && skills[0].id == "newname.md");
+
+    unsetenv("HAICODE_SKILLS_DIR");
     unsetenv("HPCODE_SKILLS_DIR");
     rm_rf(tmp);
 }
 
 int main() {
     test_discovery();
+    test_legacy_skills_dir_env();
     test_config();
     test_store();
     test_parse_invocation();

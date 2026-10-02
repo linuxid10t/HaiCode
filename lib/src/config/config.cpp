@@ -8,7 +8,10 @@
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
+#include <cstring>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <FindDirectory.h>
 #include <Path.h>
@@ -51,6 +54,35 @@ AppConfig ConfigLoader::load(const std::string& project_dir) {
     return load_with_layers(global_layer, project_dir);
 }
 
+// Case-insensitive instruction-file lookup: BFS is case-sensitive, so a
+// repo shipping AGENTS.md (the common convention) would be silently
+// ignored. Scans the project directory for an entry whose name equals
+// base_name ignoring case; the exact spelling wins when several variants
+// exist. Returns "" when there is no such entry (or the directory cannot
+// be read).
+std::string find_project_instructions_file(const std::string& project_dir,
+                                           const char* base_name) {
+    DIR* d = opendir(project_dir.c_str());
+    if (!d) return "";
+    const size_t len = strlen(base_name);
+    std::string found;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        const char* name = ent->d_name;
+        size_t i = 0;
+        while (i < len && name[i] != '\0'
+               && std::tolower((unsigned char)name[i])
+                  == std::tolower((unsigned char)base_name[i]))
+            ++i;
+        if (i != len || name[i] != '\0') continue;
+        found = project_dir + "/" + name;
+        if (strcmp(name, base_name) == 0)
+            break;  // exact spelling beats a case variant seen earlier
+    }
+    closedir(d);
+    return found;
+}
+
 AppConfig load_with_layers(const ConfigLayer& global_layer,
                            const std::string& project_dir,
                            ProjectTrust* trust_state) {
@@ -60,24 +92,28 @@ AppConfig load_with_layers(const ConfigLayer& global_layer,
 
     AppConfig result = merge(global_layer, project_layer);
 
-    // Project-only: read agents.md, falling back to claude.md. If both exist,
-    // agents.md wins. Empty content is treated as absent (no block emitted by
-    // the engine). Unreadable-but-exists logs a warning.
-    std::string agents_path = project_dir + "/" + kAgentsMdFilename;
-    std::string claude_path = project_dir + "/" + kClaudeMdFilename;
+    // Project-only: read agents.md, falling back to claude.md — both looked
+    // up case-insensitively (find_project_instructions_file). If both exist,
+    // agents.md wins. Empty content is treated as absent (no block emitted
+    // by the engine). Unreadable-but-exists logs a warning.
+    std::string agents_path = find_project_instructions_file(project_dir,
+                                                             kAgentsMdFilename);
+    std::string claude_path = find_project_instructions_file(project_dir,
+                                                             kClaudeMdFilename);
     std::string content = read_file(agents_path);
     std::string source  = kAgentsMdFilename;
     if (content.empty()) {
         struct stat st;
-        if (::stat(agents_path.c_str(), &st) == 0) {
+        if (!agents_path.empty() && ::stat(agents_path.c_str(), &st) == 0) {
             fprintf(stderr, "[config] warning: %s exists but could not be read\n",
                     agents_path.c_str());
         }
         content = read_file(claude_path);
-        source  = kClaudeMdFilename;
+        source  = claude_path.empty() ? kClaudeMdFilename
+                : claude_path.substr(claude_path.rfind('/') + 1);
         if (content.empty()) {
             struct stat cst;
-            if (::stat(claude_path.c_str(), &cst) == 0) {
+            if (!claude_path.empty() && ::stat(claude_path.c_str(), &cst) == 0) {
                 fprintf(stderr, "[config] warning: %s exists but could not be read\n",
                         claude_path.c_str());
             }
@@ -483,9 +519,10 @@ nlohmann::json global_scope_json(const AppConfig& cfg) {
     if (!cfg.provider.empty()) j["provider"] = cfg.provider;
     if (!cfg.model.empty())    j["model"]    = cfg.model;
     if (!cfg.default_mode.empty()) j["default_mode"] = cfg.default_mode;
-    // Erase-when-default so the file stays minimal for default behavior.
-    if (!cfg.thinking_display.empty()
-            && cfg.thinking_display != "on_while_thinking")
+    // Erase-when-default so the file stays minimal for default behavior:
+    // empty is the "unset" sentinel (default = "off"); explicit values —
+    // including "off" — are persisted as the user's choice.
+    if (!cfg.thinking_display.empty())
         j["thinking_display"] = cfg.thinking_display;
     j["providers"] = providers_to_json(cfg.providers);
     j["web_search"] = {

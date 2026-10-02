@@ -128,7 +128,8 @@ private:
     BRadioButton* mode_plan_radio_   = nullptr;
     BRadioButton* mode_build_radio_  = nullptr;
     // Default thinking-block display in the chat view ("off"/"on"/
-    // "on_while_thinking"); value rides on each menu item's message.
+    // "on_while_thinking"; default "off"); value rides on each menu item's
+    // message.
     BPopUpMenu*  thinking_menu_     = nullptr;
     BMenuField*  thinking_field_    = nullptr;
 
