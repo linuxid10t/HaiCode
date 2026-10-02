@@ -45,6 +45,9 @@ static const struct { const char* key; ModelPricing p; } kBuiltin[] = {
     {"openai:gpt-5.6",               { 4.0,  20.0,  0.40,  5.00}},
     {"openai:gpt-5.5",               { 5.0,  30.0,  0.50,  0.0}},
     {"openai:gpt-5.4",               { 2.5,  15.0,  0.25,  0.0}},
+    {"openai:gpt-5.4-mini",          { 0.75,  4.5,  0.075, 0.0}},
+    {"openai:gpt-5.4-nano",          { 0.2,   1.25, 0.02,  0.0}},
+    {"openai:gpt-5.2",               { 1.75,  14.0, 0.175, 0.0}},
     {"openai:gpt-5-pro",             {15.0, 120.0,  0.00,  0.0}},
     {"openai:gpt-5-mini",            { 0.25,  2.0,  0.025, 0.0}},
     {"openai:gpt-5-nano",            { 0.05,  0.4,  0.005, 0.0}},
@@ -63,43 +66,83 @@ static const struct { const char* key; ModelPricing p; } kBuiltin[] = {
     // not modeled.
     {"*:grok-4.20",                  { 1.25,  2.5,  0.20,  0.0}},
     {"*:grok-4.3",                   { 1.25,  2.5,  0.20,  0.0}},
+    {"*:grok-4.5",                   { 2.0,   6.0,  0.30,  0.0}},
     {"*:grok-build-latest",          { 2.0,   6.0,  0.30,  0.0}},
     {"*:grok-4",                     { 2.0,   6.0,  0.50,  0.0}},
     {"*:grok-code-fast",             { 1.0,   2.0,  0.20,  0.0}},
     {"*:glm-5.3-flash",              { 0.15,  0.5,  0.03,  0.0}},
     {"*:glm-5.3",                    { 1.4,   4.4,  0.26,  0.0}},
     {"*:glm-5.2",                    { 1.4,   4.4,  0.26,  0.0}},
+    {"*:glm-5.1",                    { 1.4,   4.4,  0.26,  0.0}},
     {"*:glm-5-code",                 { 1.2,   5.0,  0.30,  0.0}},
     {"*:glm-5",                      { 1.0,   3.2,  0.20,  0.0}},
     {"*:glm-4.7-flash",              { 0.0,   0.0,  0.00,  0.0}},  // free
     {"*:glm-4.7",                    { 0.6,   2.2,  0.11,  0.0}},
     {"*:glm-4.6",                    { 0.6,   2.2,  0.11,  0.0}},
     {"*:glm-4.5-flash",              { 0.0,   0.0,  0.00,  0.0}},  // free
+    {"*:glm-4.5-airx",               { 1.1,   4.5,  0.00,  0.0}},
+    {"*:glm-4.5-air",                { 0.2,   1.1,  0.00,  0.0}},
+    {"*:glm-4.5-x",                  { 2.2,   8.9,  0.00,  0.0}},
+    {"*:glm-4.5v",                   { 0.6,   1.8,  0.00,  0.0}},
     {"*:glm-4.5",                    { 0.6,   2.2,  0.00,  0.0}},
     {"*:kimi-k3",                    { 3.0,  15.0,  0.30,  0.0}},
     {"*:kimi-k2.7-code",             { 0.95,  4.0,  0.19,  0.0}},
     {"*:kimi-k2.6",                  { 0.95,  4.0,  0.16,  0.0}},
     {"*:kimi-k2.5",                  { 0.6,   3.0,  0.10,  0.0}},
+    // Legacy Moonshot v1 ids (window sized by name suffix).
+    {"*:moonshot-v1-128k",           { 2.0,   5.0,  0.00,  0.0}},
+    {"*:moonshot-v1-32k",            { 1.0,   3.0,  0.00,  0.0}},
+    {"*:moonshot-v1-8k",             { 0.2,   2.0,  0.00,  0.0}},
     {"*:minimax-m3",                 { 0.3,   1.2,  0.06,  0.0}},
     {"*:minimax-m2",                 { 0.3,   1.2,  0.03,  0.375}},
     {"*:deepseek-v4-pro",            { 1.32,  3.96, 0.044, 0.0}},
     {"*:deepseek-v4-flash",          { 0.44,  1.32, 0.014, 0.0}},
+    // Retired 2026-07-24 ids, kept for old sessions; peak rate so cost is
+    // never under-reported (MODEL_NUMBERS §6).
+    {"*:deepseek-chat",              { 0.28,  0.42, 0.028, 0.0}},
+    {"*:deepseek-reasoner",          { 0.28,  0.42, 0.028, 0.0}},
     {"*:mistral-large-latest",       { 0.5,   1.5,  0.05,  0.0}},
     {"*:mistral-medium-latest",      { 1.5,   7.5,  0.15,  0.0}},
     {"*:mistral-small-latest",       { 0.15,  0.6,  0.015, 0.0}},
     {"*:ministral-14b-latest",       { 0.2,   0.2,  0.02,  0.0}},
     {"*:ministral-8b-latest",        { 0.15,  0.15, 0.015, 0.0}},
     {"*:ministral-3b-latest",        { 0.1,   0.1,  0.01,  0.0}},
+    {"*:devstral",                   { 0.4,   2.0,  0.04,  0.0}},
+    {"*:devstral-small",             { 0.1,   0.3,  0.01,  0.0}},
+    {"*:codestral",                  { 0.3,   0.9,  0.03,  0.0}},
+    {"*:pixtral-large",              { 2.0,   6.0,  0.20,  0.0}},
+    {"*:open-mistral-nemo",          { 0.3,   0.3,  0.03,  0.0}},
     {"*:muse-spark-1.3-contributor", { 0.1,   0.2,  0.002, 0.0}},
     {"*:muse-spark",                 { 1.25,  4.25, 0.15,  0.0}},
+    {"*:qwen3.8-max",                { 2.0,   6.0,  0.25,  0.0}},
+    // qwen3.8-flash / -omni-flash share the flash rate (the bare qwen3.8
+    // prefix below covers both ids).
+    {"*:qwen3.8-omni-flash",         { 0.15,  0.47, 0.016, 0.0}},
     {"*:qwen3.8",                    { 0.15,  0.47, 0.016, 0.2}},
+    {"*:qwen3.7-max",                { 2.5,   7.5,  0.50,  0.0}},
+    // Input-tiered models: compute_step_cost only consults kTiered after
+    // lookup_pricing hits a base, so this row is required even though the
+    // ladder's first tier duplicates it.
+    {"*:qwen3.5-plus",               { 0.4,   2.4,  0.00,  0.0}},
+    {"*:qwen3-max",                  { 1.2,   6.0,  0.00,  0.0}},
     {"*:qwen3-coder-plus",           { 1.0,   5.0,  0.10,  0.0}},
     {"*:qwen3-coder-flash",          { 0.3,   1.5,  0.08,  0.0}},
+    {"*:qwen-plus",                  { 0.4,   1.2,  0.00,  0.0}},
+    {"*:qwen-flash",                 { 0.05,  0.4,  0.00,  0.0}},
+    {"*:qwen3-vl-plus",              { 0.2,   1.6,  0.00,  0.0}},
+    {"*:qwen-turbo",                 { 0.05,  0.2,  0.00,  0.0}},
+    {"*:qwq-plus",                   { 0.8,   2.4,  0.00,  0.0}},
     {"*:doubao-seed-2-1-pro",        { 0.8625, 4.3125, 0.1725, 0.0}},
     {"*:doubao-seed-2-1-turbo",      { 0.4313, 2.1562, 0.0862, 0.0}},
+    {"*:doubao-seed-2-0-pro",        { 0.46,  2.3,  0.00,  0.0}},
+    {"*:doubao-seed-2-0-lite",       { 0.087, 0.52, 0.00,  0.0}},
     {"*:amazon.nova-2-pro",          { 2.1875, 17.5,  0.5469, 0.0}},
     {"*:amazon.nova-2",              { 0.3,    2.5,   0.075,  0.0}},
+    {"*:mimo-v2.6-pro",              { 0.435, 0.87, 0.0036, 0.0}},
     {"*:mimo-v2.6",                  { 0.14,   0.28,  0.0028, 0.0}},
+    // Cohere — command-a-plus prices as blank/$0 in the source: unpriced.
+    {"*:command-a-03",               { 2.5,  10.0,  0.00,  0.0}},
+    {"*:command-r-plus",             { 2.5,  10.0,  0.00,  0.0}},
 };
 
 // ---- tier ladder (long-context surcharges + input-size tiers) -------------
@@ -152,6 +195,15 @@ static const struct { const char* model_prefix; PriceTier tiers[4]; } kTiered[] 
         {272000, { 2.5, 15.0, 0.25, 0.0}},
         {0,      { 5.0, 22.5, 0.50, 0.0}},
     }},
+    // mini/nano are flat (no >272K surcharge): single-sentinel tiers shadow
+    // the family ladder so the longest-prefix match can't leak 5/22.5 onto
+    // them at long prompts.
+    {"gpt-5.4-mini", {
+        {0,      { 0.75,  4.5, 0.075, 0.0}},
+    }},
+    {"gpt-5.4-nano", {
+        {0,      { 0.2,  1.25, 0.02, 0.0}},
+    }},
     {"gemini-3.1-pro", {
         {200000, { 2.0, 12.0, 0.20, 0.0}},
         {0,      { 4.0, 18.0, 0.40, 0.0}},
@@ -169,6 +221,12 @@ static const struct { const char* model_prefix; PriceTier tiers[4]; } kTiered[] 
     {"grok-4.3", {
         {199999, { 1.25,  2.5,  0.20, 0.0}},
         {0,      { 2.5,   5.0,  0.40, 0.0}},
+    }},
+    // 4.5/4.6/4.7 share the >=200K surcharge but 4.5 has the cheaper
+    // cache-read (0.3/0.6 vs 0.5/1.0) — it needs its own ladder.
+    {"grok-4.5", {
+        {199999, { 2.0,   6.0,  0.30, 0.0}},
+        {0,      { 4.0,  12.0,  0.60, 0.0}},
     }},
     {"grok-build-latest", {
         {199999, { 2.0,   6.0,  0.30, 0.0}},
@@ -194,6 +252,16 @@ static const struct { const char* model_prefix; PriceTier tiers[4]; } kTiered[] 
         {128000, { 0.5,  2.5,  0.12, 0.0}},
         {256000, { 0.8,  4.0,  0.20, 0.0}},
         {0,      { 1.6,  9.6,  0.40, 0.0}},
+    }},
+    {"qwen3-max", {
+        { 32000, { 1.2,  6.0,  0.0, 0.0}},
+        {128000, { 2.4, 12.0,  0.0, 0.0}},
+        {0,      { 3.0, 15.0,  0.0, 0.0}},  // top tier runs to the 252K window
+    }},
+    {"qwen3-vl-plus", {
+        { 32000, { 0.2,  1.6,  0.0, 0.0}},
+        {128000, { 0.3,  2.4,  0.0, 0.0}},
+        {0,      { 0.6,  4.8,  0.0, 0.0}},
     }},
     {"qwen3.5-plus", {
         {256000, { 0.4,  2.4,  0.0, 0.0}},

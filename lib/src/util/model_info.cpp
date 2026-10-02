@@ -36,6 +36,10 @@ static const struct { const char* prefix; int window; } kKnownModels[] = {
     {"gpt-5.6",             1050000},
     {"gpt-5.5",             1050000},
     {"gpt-5.4",             1050000},
+    // mini/nano stay on the 400K family window; the bare gpt-5.4 prefix
+    // would hand them 1.05M and compaction would fire past the real limit.
+    {"gpt-5.4-mini",        400000},
+    {"gpt-5.4-nano",        400000},
     {"gpt-5-pro",           400000},
     {"gpt-5",               400000},
     {"gpt-4.1",             1047576},
@@ -59,7 +63,8 @@ static const struct { const char* prefix; int window; } kKnownModels[] = {
     {"grok-build",          500000},
     {"grok-code-fast",      256000},
     // Z.ai (GLM) — 5.2+ are 1M; 5/5.1/5-code and 4.x are 200K; 4.5 128K.
-    {"glm-5.3",             1048576},
+    {"glm-5.3-flash",       1048576},
+    {"glm-5.3",             1000000},
     {"glm-5.2",             1000000},
     {"glm-5",               200000},
     {"glm-4.7",             200000},
@@ -196,8 +201,8 @@ static const struct { const char* prefix; bool vision; } kVisionModels[] = {
 // (prefix, max output tokens). Hard per-response output caps for first-party
 // models; used to clamp an explicit max_tokens override so it cannot 400.
 // Absent prefix = no clamp. Where the source only published "max out =
-// window" (xAI, Kimi K2.x, Mistral, ByteDance), there is no verified separate
-// cap, so no entry — the streaming default stays kDefaultMaxTokens.
+// window" (xAI, Kimi K2.x, Mistral, ByteDance 2-1), there is no verified
+// separate cap, so no entry — the streaming default stays kDefaultMaxTokens.
 static const struct { const char* prefix; int max_out; } kMaxOutput[] = {
     // Anthropic
     {"claude-fable-5",     128000},
@@ -230,16 +235,41 @@ static const struct { const char* prefix; int max_out; } kMaxOutput[] = {
     // Google
     {"gemini-3",            65536},
     {"gemini-2.5",          65536},
+    {"gemma-4",             32768},
+    {"gemma-3",              8192},
     // Z.ai / Moonshot / MiniMax / DeepSeek / Meta Muse / Amazon
     {"glm-5.3",            128000},
     {"glm-5.2",            128000},
     {"glm-5",              128000},
     {"glm-4.7",            128000},
+    {"glm-4.5",             32000},  // also air/x/airx/flash variants
     {"kimi-k3",            131072},
     {"minimax-m3",         524288},  // hard cap; 131072 recommended
     {"deepseek-v4",        393216},
+    // Retired ids: chat had no thinking config (8K), reasoner went to 64K.
+    {"deepseek-chat",        8192},
+    {"deepseek-reasoner",   65536},
+    // Alibaba (DashScope first-party caps; turbo/qwq sit BELOW the 32K
+    // streaming default, so without the clamp every default request 400s)
+    {"qwen3.8",            131072},
+    {"qwen3.7",             65536},
+    {"qwen3.5-plus",        65536},
+    {"qwen3-max",           65536},
+    {"qwen3-coder",         65536},
+    {"qwen3-next",          65536},
+    {"qwen3-vl",            32768},
+    {"qwen-plus",           32768},
+    {"qwen-flash",          32768},
+    {"qwen-turbo",          16384},
+    {"qwq-plus",             8192},
     {"muse-spark",         131072},
     {"amazon.nova-2",       64000},
+    // Xiaomi / ByteDance 2-0 (2-1 publishes only max-out = window) / Cohere
+    {"mimo-v2.6",          131072},
+    {"doubao-seed-2-0",    128000},
+    {"command-a-03",         8000},
+    {"command-a-plus",      64000},
+    {"command-r-plus",       4096},
 };
 
 static bool starts_with_ci(const std::string& s, const std::string& prefix) {
@@ -262,16 +292,16 @@ int get_context_window(const std::string& /*provider_id*/,
     if (it != config_overrides.end() && it->second > 0)
         return it->second;
 
-    // 2. Longest-prefix hardcoded match.
-    const std::string* best_prefix = nullptr;
+    // 2. Longest-prefix hardcoded match. Track the winning length: keeping
+    // a pointer into a loop-local copy would dangle (and first-match wins,
+    // not longest).
+    size_t best_len = 0;
     int best_window = 0;
     for (auto& entry : kKnownModels) {
-        std::string p = entry.prefix;
-        if (starts_with_ci(model_id, p)) {
-            if (!best_prefix || p.size() > best_prefix->size()) {
-                best_prefix = &p;
-                best_window = entry.window;
-            }
+        const std::string p = entry.prefix;
+        if (starts_with_ci(model_id, p) && p.size() > best_len) {
+            best_len = p.size();
+            best_window = entry.window;
         }
     }
     return best_window;  // 0 if no prefix matched
@@ -328,15 +358,13 @@ bool model_supports_vision(const std::string& model_id,
 }
 
 int get_max_output_tokens(const std::string& model_id) {
-    const std::string* best_prefix = nullptr;
+    size_t best_len = 0;
     int best_out = 0;
     for (auto& entry : kMaxOutput) {
-        std::string p = entry.prefix;
-        if (starts_with_ci(model_id, p)) {
-            if (!best_prefix || p.size() > best_prefix->size()) {
-                best_prefix = &p;
-                best_out = entry.max_out;
-            }
+        const std::string p = entry.prefix;
+        if (starts_with_ci(model_id, p) && p.size() > best_len) {
+            best_len = p.size();
+            best_out = entry.max_out;
         }
     }
     return best_out;  // 0 = no known cap
