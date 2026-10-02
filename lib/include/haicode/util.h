@@ -45,6 +45,13 @@ std::string truncate_utf8(const std::string& s, size_t max_bytes);
 // files are created 0644. An explicit `mode` (e.g. 0600 for secrets) always
 // wins, INCLUDING over a pre-existing target's bits — secrets must tighten,
 // never inherit a group/world-readable 0644.
+//
+// Haiku semantics: BFS attributes (MIME type, Tracker metadata, ...) are
+// copied from the existing target onto the replacement — a bare rename
+// would drop them. If `path` is a symlink, the write goes through to the
+// resolved target and the link itself is preserved; a symlink that cannot
+// be resolved (dangling, loop) is refused with an error and nothing is
+// written.
 std::string atomic_write_file(const std::string& path, const std::string& content,
                               mode_t mode = (mode_t)0);
 

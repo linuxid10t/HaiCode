@@ -13,6 +13,10 @@
 #include <mutex>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <limits.h>
+#include <fs_attr.h>
 
 namespace haicode {
 namespace util {
@@ -166,8 +170,58 @@ std::string truncate_utf8(const std::string& s, size_t max_bytes) {
     return s.substr(0, end);
 }
 
+// Copy every BFS attribute (MIME type, Tracker metadata, ...) from the file
+// at src_path onto the open temp-file fd. Best-effort: a source that cannot
+// be opened or has no attribute directory (non-BFS volume) is fine, and an
+// individual attribute that fails to copy is skipped — losing metadata must
+// never fail a write that already succeeded on data.
+static void copy_file_attributes(const std::string& src_path, int dst_fd) {
+    int src_fd = open(src_path.c_str(), O_RDONLY);
+    if (src_fd < 0)
+        return;
+    DIR* dir = fs_fopen_attr_dir(src_fd);
+    if (!dir) {
+        close(src_fd);
+        return;
+    }
+    // Sanity cap: attributes are metadata (types, keywords, small icons);
+    // anything claiming megabytes is corrupt, not worth copying.
+    const off_t kMaxAttrSize = 1024 * 1024;
+    struct dirent* ent;
+    while ((ent = fs_read_attr_dir(dir)) != nullptr) {
+        attr_info info{};
+        if (fs_stat_attr(src_fd, ent->d_name, &info) != 0)
+            continue;
+        if (info.size < 0 || info.size > kMaxAttrSize)
+            continue;
+        std::vector<char> buf(info.size > 0 ? static_cast<size_t>(info.size) : 1);
+        ssize_t n = fs_read_attr(src_fd, ent->d_name, info.type, 0,
+                                 buf.data(), static_cast<size_t>(info.size));
+        if (n < 0)
+            continue;
+        (void)fs_write_attr(dst_fd, ent->d_name, info.type, 0, buf.data(),
+                            static_cast<size_t>(n));
+    }
+    fs_close_attr_dir(dir);
+    close(src_fd);
+}
+
 std::string atomic_write_file(const std::string& path, const std::string& content,
                               mode_t mode) {
+    // A symlink target must be written through, not replaced: renaming the
+    // temp file over the link would destroy it and leave a regular file.
+    // Resolve first; a dangling link or loop is an error we refuse to touch
+    // (the historical behavior silently destroyed the link).
+    std::string write_path = path;
+    struct stat lst{};
+    if (lstat(path.c_str(), &lst) == 0 && S_ISLNK(lst.st_mode)) {
+        std::vector<char> resolved(PATH_MAX);
+        if (!realpath(path.c_str(), resolved.data()))
+            return "Cannot resolve symlink " + path + ": " + strerror(errno)
+                   + " (nothing was written)";
+        write_path = resolved.data();
+    }
+
     // Remember the target's permission bits so replacement preserves them
     // (an 0755 script keeps its execute bits). 0 = target doesn't exist yet.
     // An explicit `mode` argument (secrets pass 0600) wins over BOTH the
@@ -175,20 +229,21 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
     // must tighten, never re-inherit world-readable bits.
     mode_t preserve_mode = 0;
     struct stat st{};
-    if (stat(path.c_str(), &st) == 0)
+    if (stat(write_path.c_str(), &st) == 0)
         preserve_mode = st.st_mode & 07777;
     mode_t effective = (mode != 0) ? mode
                      : (preserve_mode != 0) ? preserve_mode
                                             : (mode_t)0644;
 
     // mkstemp demands trailing X's and creates with O_EXCL semantics — a
-    // pre-existing file of a similar name can never be clobbered.
-    std::string tmpl = path + ".tmp_write_XXXXXX";
+    // pre-existing file of a similar name can never be clobbered. The temp
+    // sits beside the (resolved) target so the rename stays same-directory.
+    std::string tmpl = write_path + ".tmp_write_XXXXXX";
     std::vector<char> buf(tmpl.begin(), tmpl.end());
     buf.push_back('\0');
     int fd = mkstemp(buf.data());
     if (fd < 0)
-        return "Cannot create temp file for " + path + ": " + strerror(errno);
+        return "Cannot create temp file for " + write_path + ": " + strerror(errno);
     std::string tmp_path(buf.data());
 
     if (fchmod(fd, effective) != 0) {
@@ -214,6 +269,11 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
         remaining -= static_cast<size_t>(n);
     }
 
+    // BFS attributes live outside the data stream; a bare rename would drop
+    // them. Copy them onto the temp fd before the single fsync below flushes
+    // data + attributes together.
+    copy_file_attributes(write_path, fd);
+
     if (fsync(fd) != 0) {
         std::string err = "Flush error on " + tmp_path + ": " + strerror(errno);
         close(fd);
@@ -226,8 +286,8 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
         return err;
     }
 
-    if (rename(tmp_path.c_str(), path.c_str()) != 0) {
-        std::string err = "Cannot rename to target: " + path + ": " + strerror(errno);
+    if (rename(tmp_path.c_str(), write_path.c_str()) != 0) {
+        std::string err = "Cannot rename to target: " + write_path + ": " + strerror(errno);
         unlink(tmp_path.c_str());
         return err;
     }

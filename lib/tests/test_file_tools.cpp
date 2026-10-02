@@ -10,6 +10,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <fs_attr.h>
 
 // ---- Helpers ----
 
@@ -364,6 +367,92 @@ static bool util_ensure_owner_only() {
     return true;
 }
 
+// Task 21: a rename-based replacement drops every BFS attribute (MIME type,
+// Tracker metadata) — atomic_write_file must copy them onto the new file.
+static bool atomic_write_preserves_bfs_attributes() {
+    const std::string p = "/tmp/tft_atomic_attrs.txt";
+    write_file(p, "v1\n");
+
+    // Plant a typed attribute like Tracker would: BEOS:TYPE holds a
+    // NUL-terminated MIME string with type code 'MIMS'.
+    const uint32_t kMime = 0x4D494D53;  // "MIMS"
+    const std::string mime = "text/x-haicode-test";
+    int fd = open(p.c_str(), O_RDONLY);
+    CHECK(fd >= 0, "open for attr write failed");
+    ssize_t aw = fs_write_attr(fd, "BEOS:TYPE", kMime, 0, mime.c_str(),
+                               mime.size() + 1);
+    close(fd);
+    CHECK(aw == (ssize_t)(mime.size() + 1), "planting BEOS:TYPE failed");
+
+    std::string err = haicode::util::atomic_write_file(p, "v2\n");
+    CHECK(err.empty(), ("atomic_write_file: " + err).c_str());
+    CHECK(read_file(p) == "v2\n", "data must be the new content");
+
+    fd = open(p.c_str(), O_RDONLY);
+    CHECK(fd >= 0, "open for attr read failed");
+    attr_info info{};
+    CHECK(fs_stat_attr(fd, "BEOS:TYPE", &info) == 0,
+          "BEOS:TYPE must survive the rewrite");
+    CHECK(info.type == kMime, "attribute type must be preserved");
+    char buf[64] = {0};
+    ssize_t n = fs_read_attr(fd, "BEOS:TYPE", info.type, 0, buf, sizeof(buf));
+    close(fd);
+    CHECK(n == (ssize_t)(mime.size() + 1), "attribute size must be preserved");
+    CHECK(std::string(buf, n) == std::string(mime.c_str(), mime.size() + 1),
+          "attribute bytes must be preserved");
+
+    std::remove(p.c_str());
+    std::cout << "[OK] atomic_write_file preserves BFS attributes\n";
+    return true;
+}
+
+// Task 21: writing through a symlink must update the target and keep the
+// link — the old rename replaced the link with a regular file.
+static bool atomic_write_follows_symlink() {
+    const std::string real = "/tmp/tft_atomic_real.txt";
+    const std::string link = "/tmp/tft_atomic_link.txt";
+    std::remove(link.c_str());
+    std::remove(real.c_str());
+    write_file(real, "old\n");
+    CHECK(symlink(real.c_str(), link.c_str()) == 0, "symlink failed");
+
+    std::string err = haicode::util::atomic_write_file(link, "through the link\n");
+    CHECK(err.empty(), ("atomic_write_file: " + err).c_str());
+    CHECK(read_file(real) == "through the link\n",
+          "write through symlink must land in the target");
+    struct stat st{};
+    CHECK(lstat(link.c_str(), &st) == 0, "lstat on link failed");
+    CHECK(S_ISLNK(st.st_mode), "symlink must survive the write");
+
+    std::remove(link.c_str());
+    std::remove(real.c_str());
+    std::cout << "[OK] atomic_write_file writes through symlinks\n";
+    return true;
+}
+
+// Task 21: a dangling symlink must be refused, not silently destroyed (the
+// old rename replaced the broken link with a regular file at the link path).
+static bool atomic_write_broken_symlink_refused() {
+    const std::string target = "/tmp/tft_atomic_missing_target.txt";
+    const std::string link = "/tmp/tft_atomic_broken.txt";
+    std::remove(link.c_str());
+    std::remove(target.c_str());
+    CHECK(symlink(target.c_str(), link.c_str()) == 0, "symlink failed");
+
+    std::string err = haicode::util::atomic_write_file(link, "must not land\n");
+    CHECK(!err.empty(), "broken symlink must be refused with an error");
+
+    struct stat st{};
+    CHECK(lstat(link.c_str(), &st) == 0, "lstat on link failed");
+    CHECK(S_ISLNK(st.st_mode), "broken symlink must stay a symlink");
+    CHECK(stat(target.c_str(), &st) != 0, "dangling target must stay absent");
+
+    std::remove(link.c_str());
+    std::remove(target.c_str());  // paranoia: nothing may have appeared
+    std::cout << "[OK] atomic_write_file refuses broken symlinks\n";
+    return true;
+}
+
 // ============================================================
 // EditTool
 // ============================================================
@@ -608,6 +697,9 @@ int main() {
     ok &= util_explicit_mode_beats_preserved();
     ok &= util_default_mode_still_preserves();
     ok &= util_ensure_owner_only();
+    ok &= atomic_write_preserves_bfs_attributes();
+    ok &= atomic_write_follows_symlink();
+    ok &= atomic_write_broken_symlink_refused();
 
     std::cout << "\n-- edit --\n";
     ok &= edit_basic();
