@@ -19,8 +19,10 @@ enum class FinishReason { EndTurn, ToolUse, MaxTokens, Error, Stopped };
 
 // Anthropic's Messages API requires max_tokens (no omit-and-default); this is
 // the fallback when a request leaves it unset. Also the compaction output
-// allowance when unset.
-inline constexpr int kDefaultMaxTokens = 8192;
+// allowance when unset. Sized so long agentic turns with adaptive thinking
+// don't truncate; the compaction threshold reserve grows with it, which only
+// makes auto-compaction trigger earlier (safe direction).
+inline constexpr int kDefaultMaxTokens = 32768;
 
 struct LLMRequest {
     std::string model_id;

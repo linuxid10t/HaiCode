@@ -4,6 +4,7 @@
 #include <haicode/default_prompt.h>
 #include <haicode/pricing.h>
 #include <haicode/model_info.h>
+#include <haicode/provider_error.h>
 #include <haicode/compaction.h>
 #include <haicode/skills.h>
 #include <nlohmann/json.hpp>
@@ -2099,30 +2100,28 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         provider->stream(req, cbs, run_token);
 
-        // One retry on transient errors (provider overload, gateway timeout,
-        // dropped connection), but only when nothing has streamed yet — if the
-        // UI has already received text deltas, retrying would emit them again.
-        auto is_transient_err = [](const std::string& err) {
-            std::string lo = err;
-            std::transform(lo.begin(), lo.end(), lo.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            static const char* hits[] = {
-                "overloaded", "timeout", "timed out", "connection",
-                "internal server", "service unavailable", "bad gateway",
-                "gateway timeout", "temporarily unavailable",
-            };
-            for (const char* h : hits) {
-                if (lo.find(h) != std::string::npos) return true;
-            }
-            return false;
-        };
-        if (step_failed && is_transient_err(step_error)
-                && full_text.empty() && full_reasoning.empty()
-                && tool_calls.empty()
-                && !(interrupt_flag && interrupt_flag->load())) {
-            fprintf(stderr, "[engine] transient provider error: %s — retrying once\n",
-                    step_error.c_str());
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        // Transient errors (provider overload, gateway timeout, dropped
+        // connection, rate limits) are retried with exponential backoff, but
+        // only while nothing has streamed — if the UI has already received
+        // text deltas, retrying would emit them again. Three attempts total
+        // (0.5s/2s/8s); a server-sent Retry-After extends the wait.
+        for (int attempt = 0; attempt < 3
+                              && step_failed
+                              && full_text.empty() && full_reasoning.empty()
+                              && tool_calls.empty()
+                              && !(interrupt_flag && interrupt_flag->load())
+                              && classify_provider_error(step_error)
+                                     == ProviderErrorKind::Transient;
+             ++attempt) {
+            double wait_s = retry_backoff_ms(attempt) / 1000.0;
+            double ra = parse_retry_after_seconds(step_error);
+            if (ra > wait_s) wait_s = ra;
+            if (wait_s > 10.0) wait_s = 10.0;
+            fprintf(stderr, "[engine] transient provider error: %s — retry %d/3 "
+                            "in %.1fs\n", step_error.c_str(), attempt + 1, wait_s);
+            std::this_thread::sleep_for(
+                std::chrono::duration<double>(wait_s));
+            if (interrupt_flag && interrupt_flag->load()) break;
             step_failed = false;
             step_error.clear();
             // Surface the retry in the UI so the user sees fresh activity.
@@ -2139,21 +2138,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // Context-overflow recovery: if the provider rejected the request as
         // too large AND nothing streamed (no side effects), compact once
         // through the same checkpoint path and retry once. No loop — a second
-        // overflow falls through to StepFailed.
-        auto is_overflow_err = [](const std::string& err) {
-            std::string lo = err;
-            std::transform(lo.begin(), lo.end(), lo.begin(),
-                           [](unsigned char c){ return std::tolower(c); });
-            static const char* hits[] = {
-                "context", "too long", "token limit", "context_length",
-                "maximum context", "exceeds",
-            };
-            for (const char* h : hits) {
-                if (lo.find(h) != std::string::npos) return true;
-            }
-            return false;
-        };
-        if (step_failed && is_overflow_err(step_error)
+        // overflow falls through to StepFailed. classify_provider_error uses
+        // provider-specific markers, so unrelated "exceeds ..." errors (e.g.
+        // quota) never trigger compaction.
+        if (step_failed
+                && classify_provider_error(step_error) == ProviderErrorKind::Overflow
                 && full_text.empty() && full_reasoning.empty()
                 && tool_calls.empty()
                 && !(interrupt_flag && interrupt_flag->load())) {
@@ -2283,7 +2272,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             nlohmann::json ev;
             ev["session_id"] = session_id;
             ev["assistant_message_id"] = assistant_msg_id;
-            ev["finish_reason"] = (finish_reason == FinishReason::ToolUse) ? "tool_use" : "end_turn";
+            ev["finish_reason"] =
+                (finish_reason == FinishReason::ToolUse)    ? "tool_use"
+                : (finish_reason == FinishReason::MaxTokens) ? "max_tokens"
+                                                             : "end_turn";
             ev["usage"] = {
                 {"input",       usage.input},
                 {"output",      usage.output},

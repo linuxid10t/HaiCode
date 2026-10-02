@@ -1912,6 +1912,17 @@ MainWindow::_HandleStepEnded(BMessage* msg)
     interrupt_btn_->SetEnabled(true);
     engine_running_ = true;
     streaming_state_ = "thinking";
+
+    // A max_tokens stop is no longer silent: the model's output was cut off
+    // mid-stream, and the user needs to know why (no auto-continuation in
+    // 1.0 — raising the limit or prompting again is a manual act).
+    const char* finish = nullptr;
+    if (msg->FindString("finish_reason", &finish) == B_OK
+            && finish && std::string(finish) == "max_tokens") {
+        chat_view_->AppendSystem(
+            "Output truncated at the model's max_tokens limit — raise it in "
+            "Inference or continue.");
+    }
     _UpdateStatusStrip();
 }
 

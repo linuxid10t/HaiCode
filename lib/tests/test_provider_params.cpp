@@ -6,6 +6,7 @@
 #include <haicode/anthropic_params.h>
 #include <haicode/openai_params.h>
 #include <haicode/model_context_parse.h>
+#include <haicode/provider_error.h>
 #include <haicode/engine.h>
 #include <haicode/db.h>
 #include <iostream>
@@ -337,6 +338,51 @@ static bool test_openai_usage_cached_tokens() {
     return true;
 }
 
+// ---- classify_provider_error / backoff / Retry-After (Task 25) ----
+
+static bool test_error_classification() {
+    CHECK(classify_provider_error("Overloaded error") == ProviderErrorKind::Transient,
+          "overload is transient");
+    CHECK(classify_provider_error("HTTP 429: too many requests") == ProviderErrorKind::Transient,
+          "429 is transient");
+    CHECK(classify_provider_error("HTTP 529: service overloaded") == ProviderErrorKind::Transient,
+          "529 (Anthropic) is transient");
+    CHECK(classify_provider_error("rate limit exceeded") == ProviderErrorKind::Transient,
+          "rate limit text is transient");
+    CHECK(classify_provider_error("connection timed out") == ProviderErrorKind::Transient,
+          "timeout is transient");
+    CHECK(classify_provider_error("context_length_exceeded") == ProviderErrorKind::Overflow,
+          "openai marker is overflow");
+    CHECK(classify_provider_error("Prompt is too long: 100 > 200") == ProviderErrorKind::Overflow,
+          "anthropic marker is overflow");
+    CHECK(classify_provider_error("maximum context length is 8192") == ProviderErrorKind::Overflow,
+          "maximum-context-length marker is overflow");
+    CHECK(classify_provider_error("request_too_large") == ProviderErrorKind::Overflow,
+          "request_too_large is overflow");
+    // False-positive guards: quota/billing errors must NOT compact.
+    CHECK(classify_provider_error("You exceeded your current quota") == ProviderErrorKind::Fatal,
+          "quota error must not be overflow");
+    CHECK(classify_provider_error("file size exceeds limit") == ProviderErrorKind::Fatal,
+          "bare 'exceeds' must not be overflow");
+    CHECK(classify_provider_error("invalid api key") == ProviderErrorKind::Fatal,
+          "auth errors are fatal");
+    std::cout << "[OK] provider error classification matrix\n";
+    return true;
+}
+
+static bool test_retry_backoff_and_parse() {
+    CHECK(retry_backoff_ms(0) == 500, "first backoff 0.5s");
+    CHECK(retry_backoff_ms(1) == 2000, "second backoff 2s");
+    CHECK(retry_backoff_ms(2) == 8000, "third backoff 8s");
+    CHECK(retry_backoff_ms(3) == 10000, "backoff caps at 10s");
+    CHECK(parse_retry_after_seconds("HTTP 429 [retry-after: 7]") == 7.0,
+          "retry-after parsed from error text");
+    CHECK(parse_retry_after_seconds("HTTP 429") == 0.0,
+          "absent marker parses as 0");
+    std::cout << "[OK] backoff schedule + retry-after parse\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_effort_off_maps_low() && ok;
@@ -353,6 +399,8 @@ int main() {
     ok = test_openai_body_reasoning_model() && ok;
     ok = test_openai_body_flavor_effort() && ok;
     ok = test_openai_usage_cached_tokens() && ok;
+    ok = test_error_classification() && ok;
+    ok = test_retry_backoff_and_parse() && ok;
     if (!ok) return 1;
     std::cout << "All provider param tests passed\n";
     return 0;

@@ -93,6 +93,12 @@ public:
     // returned false (OpenAI [DONE], consumer cancel) is NOT a transport
     // failure — the response code is still reported.
     //
+    // retry_after (out, optional): the server's Retry-After header value when
+    // present and seconds-form (HTTP-dates are ignored — callers can't act
+    // on them portably). For HTTP-level failures the same value is appended
+    // to *transport_error as " [retry-after: N]" so it survives the
+    // provider→engine error-string path.
+    //
     // Cancellation/liveness: cancel() aborts the transfer from any phase
     // (including connect and silent header waits) via the progress callback.
     // There is no total timeout; instead a connect gets 30 s and a transfer
@@ -107,7 +113,8 @@ public:
                   const std::string& body,
                   SSECallback callback,
                   long* response_code = nullptr,
-                  std::string* transport_error = nullptr);
+                  std::string* transport_error = nullptr,
+                  std::string* retry_after = nullptr);
 
     // Simple GET. timeout_seconds caps the whole transfer (default 60s).
     // Redirects are followed SAME-HOST ONLY (<= 5 hops; hostname compared,

@@ -543,6 +543,56 @@ static bool test_post_sse_never_follows_redirect() {
     return true;
 }
 
+// Retry-After capture (Task 25): seconds-form header lands in the out-param
+// and is appended to the HTTP-level error text; HTTP-dates are ignored.
+static bool test_retry_after_captured() {
+    int fd = -1;
+    int port = bind_ephemeral(fd);
+    CHECK(port > 0, "ephemeral bind failed");
+    std::thread t([&]() {
+        serve_once(fd, "HTTP/1.1 429 Too Many Requests\r\n"
+                       "Retry-After: 7\r\n"
+                       "Content-Type: application/json\r\n"
+                       "Connection: close\r\n"
+                       "\r\n"
+                       "{\"error\":{\"message\":\"rate limited\"}}");
+    });
+
+    haicode::HttpClient http;
+    long code = 0;
+    std::string terr, ra;
+    http.post_sse("http://127.0.0.1:" + std::to_string(port),
+                  {}, "{}", [](const haicode::SSEEvent&) { return true; },
+                  &code, &terr, &ra);
+    t.join();
+    CHECK(code == 429, "429 reported");
+    CHECK(ra == "7", "seconds-form Retry-After captured");
+    CHECK(terr.find("[retry-after: 7]") != std::string::npos,
+          "marker appended to the error text");
+
+    // HTTP-date form: ignored, out-param stays empty.
+    int fd2 = -1;
+    int port2 = bind_ephemeral(fd2);
+    CHECK(port2 > 0, "second ephemeral bind failed");
+    std::thread t2([&]() {
+        serve_once(fd2, "HTTP/1.1 503 Service Unavailable\r\n"
+                        "Retry-After: Wed, 21 Oct 2026 07:28:00 GMT\r\n"
+                        "Connection: close\r\n"
+                        "\r\n"
+                        "{\"error\":{\"message\":\"down\"}}");
+    });
+    long code2 = 0;
+    std::string terr2, ra2;
+    http.post_sse("http://127.0.0.1:" + std::to_string(port2),
+                  {}, "{}", [](const haicode::SSEEvent&) { return true; },
+                  &code2, &terr2, &ra2);
+    t2.join();
+    CHECK(code2 == 503, "503 reported");
+    CHECK(ra2.empty(), "HTTP-date Retry-After ignored");
+    std::cout << "[OK] post_sse Retry-After: seconds captured, dates ignored\n";
+    return true;
+}
+
 int main() {
     std::cout.setf(std::ios::unitbuf);
     std::cout << "=== HttpClient post_sse failure reporting ===\n\n";
@@ -560,6 +610,7 @@ int main() {
     ok &= test_get_same_host_redirect_followed();
     ok &= test_get_cross_host_redirect_not_followed();
     ok &= test_post_sse_never_follows_redirect();
+    ok &= test_retry_after_captured();
     std::cout << (ok ? "\nAll http client tests passed!\n"
                      : "\nSome tests FAILED.\n");
     return ok ? 0 : 1;

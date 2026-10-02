@@ -8,6 +8,7 @@
 #include <openssl/sha.h>
 #include <cstring>
 #include <cstdlib>
+#include <cctype>
 #include <vector>
 #include <set>
 #include <mutex>
@@ -377,6 +378,32 @@ struct RequestState {
     // (or a headerless byte flood) that never terminated. Aborts the
     // transfer with a distinct transport error.
     bool over_cap = false;
+    // Retry-After header value (seconds-form only), captured for the caller
+    // so the engine's backoff can honor the server's requested delay.
+    std::string retry_after;
+
+    // Case-insensitive single-header capture: "Retry-After: N". HTTP-date
+    // values are ignored (digits-only check happens at parse time).
+    static size_t header_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+        auto* s = static_cast<RequestState*>(userdata);
+        std::string line(ptr, size * nmemb);
+        if (!line.empty() && line.back() == '\n') line.pop_back();
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos) return size * nmemb;
+        std::string name = line.substr(0, colon);
+        for (auto& c : name)
+            c = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+        if (name != "retry-after") return size * nmemb;
+        std::string value = line.substr(colon + 1);
+        size_t b = value.find_first_not_of(" \t");
+        if (b != std::string::npos) value = value.substr(b);
+        bool digits = !value.empty();
+        for (char c : value)
+            if (!std::isdigit(static_cast<unsigned char>(c))) digits = false;
+        if (digits) s->retry_after = value;
+        return size * nmemb;
+    }
 
     static size_t write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
         auto* s = static_cast<RequestState*>(userdata);
@@ -511,9 +538,11 @@ void HttpClient::post_sse(const std::string& url,
                            const std::string& body,
                            SSECallback callback,
                            long* response_code,
-                           std::string* transport_error) {
+                           std::string* transport_error,
+                           std::string* retry_after) {
     if (response_code) *response_code = 0;
     if (transport_error) transport_error->clear();
+    if (retry_after) retry_after->clear();
 
     // Request-local state: declared before the guard so the guard's dtor
     // (set erase) runs while `req` is still alive.
@@ -533,6 +562,8 @@ void HttpClient::post_sse(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, RequestState::write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &req);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, RequestState::header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &req);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xfer_cb);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &req);
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -579,6 +610,16 @@ void HttpClient::post_sse(const std::string& url,
             std::string excerpt = req.buffer.substr(0, 500);
             *transport_error = util::sanitize_utf8(excerpt);
         }
+    }
+
+    // Hand the captured header to the caller in both forms: the out-param
+    // (direct callers) and a suffix on the HTTP-level error text (the
+    // provider→engine error-string path, where the engine parses it back
+    // out for max(backoff, retry_after)).
+    if (!req.retry_after.empty()) {
+        if (retry_after) *retry_after = req.retry_after;
+        if (transport_error && !transport_error->empty() && code >= 400)
+            *transport_error += " [retry-after: " + req.retry_after + "]";
     }
 
     curl_slist_free_all(hlist);

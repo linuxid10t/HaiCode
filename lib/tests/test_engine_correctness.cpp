@@ -86,14 +86,16 @@ public:
         }
         requests.push_back(req);
         if (overflow && requests.size() == 1) {
-            cb.on_error("maximum context exceeded");
+            cb.on_error("prompt is too long: 123456 tokens > 200000 maximum");
             return;
         }
         cb.on_text_delta("t", "done");
-        cb.on_finish(FinishReason::EndTurn, {}, {});
+        cb.on_finish(max_tokens_stop ? FinishReason::MaxTokens
+                                     : FinishReason::EndTurn, {}, {});
     }
     std::string name_;
     bool overflow = false, fail_description = false, park = false;
+    bool max_tokens_stop = false;
     int summaries = 0, descriptions = 0;
     std::vector<LLMRequest> requests;
     std::mutex mu;
@@ -328,6 +330,21 @@ static void test_no_provider() {
     TEST_REQUIRE(engine.create_session("/tmp").empty() && failed, "clear no-provider error");
 }
 
+// MaxTokens stop surfaces as finish_reason "max_tokens" on StepEnded
+// (Task 25) instead of being silently mapped to end_turn.
+static void test_max_tokens_finish_reason() {
+    Fixture fx;
+    fx.primary->max_tokens_stop = true;
+    fx.start();
+    std::string finish;
+    fx.bus.subscribe(events::EventType::StepEnded, [&](const json& data) {
+        finish = data.value("finish_reason", "");
+    });
+    fx.engine->submit_prompt(fx.sid, "write a lot");
+    wait_idle(*fx.engine, fx.sid);
+    TEST_REQUIRE(finish == "max_tokens", "StepEnded must report max_tokens stop");
+}
+
 int main() {
     test_rebuild(false);
     test_rebuild(true);
@@ -337,5 +354,6 @@ int main() {
     test_expired_backfill();
     test_limits();
     test_no_provider();
+    test_max_tokens_finish_reason();
     std::puts("engine correctness tests passed");
 }
