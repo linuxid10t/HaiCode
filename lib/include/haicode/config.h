@@ -74,8 +74,9 @@ struct AppConfig {
     // model sees the build error immediately. Configured via "build_command" in
     // project .haicode/config.json (e.g. "make -C build -j4 2>&1").
     std::string build_command;
-    // Initial mode for newly created sessions: "plan" or "build".
-    // Defaults to "plan" so new sessions start in Plan mode unless overridden.
+    // Initial mode for newly created sessions: "plan", "build", or "chat"
+    // (anything else falls back to build at read time). Defaults to "plan"
+    // so new sessions start in Plan mode unless overridden.
     std::string default_mode = "plan";
     // Thinking-block display in the chat view: "off" (always collapsed),
     // "on" (always expanded), or "on_while_thinking" (expanded while
