@@ -37,4 +37,13 @@ int get_context_window(const std::string& provider_id,
 bool model_supports_vision(const std::string& model_id,
                            const std::map<std::string, bool>& config_overrides);
 
+// Hard per-response output cap for a model (0 = no known cap), from the
+// same source table as the window prefixes. Used to clamp an explicit
+// max_tokens override so it cannot exceed what the API accepts.
+int get_max_output_tokens(const std::string& model_id);
+
+// Clamps a requested max_tokens (>0) down to the model's published output
+// cap; unchanged when unset (<=0) or no cap is known.
+int clamp_max_tokens(const std::string& model_id, int requested);
+
 } // namespace haicode

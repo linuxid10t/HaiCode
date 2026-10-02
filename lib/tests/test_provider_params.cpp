@@ -10,6 +10,7 @@
 #include <haicode/engine.h>
 #include <haicode/db.h>
 #include <iostream>
+#include <vector>
 
 #define CHECK(cond, msg) \
     do { if (!(cond)) { std::cerr << "[FAIL] " << msg << "\n"; return false; } } while(0)
@@ -383,6 +384,34 @@ static bool test_retry_backoff_and_parse() {
     return true;
 }
 
+// ---- Anthropic Models API parse (Task 26 discovery) ----
+
+static bool test_anthropic_models_parse() {
+    std::vector<AnthropicModelEntry> entries;
+    CHECK(parse_anthropic_models(json{
+        {"data", json::array({
+            json{{"id", "claude-opus-5"}, {"max_input_tokens", 1000000}},
+            json{{"id", "claude-haiku-4-5"}, {"max_input_tokens", 200000}},
+            json{{"id", ""}, {"max_input_tokens", 999}},   // skipped
+            json{{"max_input_tokens", 5}},                  // no id, skipped
+            json{{"id", "proxy-model-no-limits"}},
+        })}
+    }, entries), "valid models document parses");
+    CHECK(entries.size() == 3, "empty-id entries skipped");
+    CHECK(entries[0].id == "claude-opus-5"
+          && entries[0].max_input_tokens == 1000000,
+          "max_input_tokens discovered per model");
+    CHECK(entries[2].id == "proxy-model-no-limits"
+          && entries[2].max_input_tokens == 0,
+          "missing limits parse as 0 (table/config fallback)");
+
+    std::vector<AnthropicModelEntry> bad;
+    CHECK(!parse_anthropic_models(json{{"error", "x"}}, bad),
+          "non-models document rejected");
+    std::cout << "[OK] anthropic models-API parse\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_effort_off_maps_low() && ok;
@@ -401,6 +430,7 @@ int main() {
     ok = test_openai_usage_cached_tokens() && ok;
     ok = test_error_classification() && ok;
     ok = test_retry_backoff_and_parse() && ok;
+    ok = test_anthropic_models_parse() && ok;
     if (!ok) return 1;
     std::cout << "All provider param tests passed\n";
     return 0;

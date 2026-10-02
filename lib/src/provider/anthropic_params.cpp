@@ -1,13 +1,17 @@
 #include <haicode/anthropic_params.h>
 #include <haicode/model_capabilities.h>
+#include <haicode/model_info.h>
 
 namespace haicode {
 
 nlohmann::json build_anthropic_body(const LLMRequest& request) {
     nlohmann::json body;
     body["model"] = request.model_id;
-    // Anthropic's API has no omit-and-default for this field.
-    body["max_tokens"] = request.max_tokens.value_or(kDefaultMaxTokens);
+    // Anthropic's API has no omit-and-default for this field. The fallback
+    // (and any explicit override) is clamped to the model's published output
+    // cap — e.g. claude-3-5-sonnet rejects anything above 8192.
+    body["max_tokens"] = clamp_max_tokens(
+        request.model_id, request.max_tokens.value_or(kDefaultMaxTokens));
     body["stream"] = true;
 
     const AnthropicModelCaps caps = anthropic_model_caps(request.model_id);
@@ -107,6 +111,22 @@ void ThinkingBlockAcc::apply_delta(const nlohmann::json& delta) {
     } else if (dtype == "signature_delta") {
         signature += delta.value("signature", "");
     }
+}
+
+bool parse_anthropic_models(const nlohmann::json& j,
+                            std::vector<AnthropicModelEntry>& out) {
+    if (!j.is_object() || !j.contains("data") || !j["data"].is_array())
+        return false;
+    for (auto& m : j["data"]) {
+        if (!m.is_object()) continue;
+        AnthropicModelEntry e;
+        e.id = m.value("id", "");
+        if (e.id.empty()) continue;
+        if (m.contains("max_input_tokens") && m["max_input_tokens"].is_number())
+            e.max_input_tokens = m["max_input_tokens"].get<int>();
+        out.push_back(std::move(e));
+    }
+    return true;
 }
 
 } // namespace haicode

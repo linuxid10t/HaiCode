@@ -393,6 +393,20 @@ public:
           id_(id.empty() ? "openai" : id), flavor_(flavor) {}
 
     std::string id() const override { return id_; }
+    // Compatibility flavors resolve to "openai" for pricing — custom ids
+    // (proxies) would otherwise miss the "openai:gpt-5" keys. Flavored local
+    // servers additionally short-circuit to free inside lookup_pricing.
+    std::string kind() const override {
+        switch (flavor_) {
+            case ServerFlavor::VLLM:      return "vllm";
+            case ServerFlavor::LlamaCpp:  return "llamacpp";
+            case ServerFlavor::LMStudio:  return "lmstudio";
+            case ServerFlavor::Ollama:    return "ollama";
+            case ServerFlavor::OpenRouter:
+            case ServerFlavor::Generic:   break;
+        }
+        return "openai";
+    }
 
     void stream(const LLMRequest& request, StreamCallbacks callbacks,
                 const std::string& stream_token = "") override {

@@ -2015,7 +2015,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         auto apply_inference = [&] {
             if (mj_now.is_object()) {
                 if (int v = mj_now.value("max_tokens", 0); v > 0)
-                    req.max_tokens = v;
+                    req.max_tokens = clamp_max_tokens(model_id, v);
                 if (mj_now.contains("temperature"))
                     req.temperature = mj_now.value("temperature", 0.0);
                 if (mj_now.contains("top_p"))
@@ -2253,11 +2253,12 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             store_.append_message(session_id, "assistant_text", data.dump());
         }
 
-        // Compute per-turn cost from token usage and resolved pricing.
-        // Unknown models fall back to 0.0 — silent, no warning.
-        const ModelPricing* price = lookup_pricing(provider_id, model_id,
-                                                    config_.pricing);
-        double step_cost = price ? compute_cost(usage, *price) : 0.0;
+        // Compute per-turn cost from token usage and resolved pricing
+        // (kind-aware fallback chain + long-context tiers). Unknown models
+        // and local servers fall back to 0.0 — silent, no warning.
+        double step_cost = compute_step_cost(usage, provider_id,
+                                             provider->kind(), model_id,
+                                             config_.pricing);
 
         // Update cost
         store_.update_cost(session_id, step_cost, usage);
@@ -2794,8 +2795,14 @@ bool SessionEngine::compact_history(const std::string& session_id,
             emit_progress(out);
         };
         // Providers invoke on_finish unconditionally; leaving it unset makes
-        // an empty std::function call (std::bad_function_call → abort).
-        cbs.on_finish = [](FinishReason, TokenUsage, std::vector<ToolCall>) {};
+        // an empty std::function call (std::bad_function_call → abort). The
+        // summarizer's tokens are also billed to the session like any other
+        // step (Task 26: maintenance usage accounting).
+        cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
+            double cost = compute_step_cost(tok, provider_id, provider.kind(),
+                                            model_id, config_.pricing);
+            store_.update_cost(session_id, cost, tok);
+        };
         cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
         provider.stream(r, cbs, stream_token);
         return !failed;
@@ -2983,7 +2990,13 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
         if (cancel && cancel->load()) return;
         raw_title += delta;
     };
-    cbs.on_finish = [&](FinishReason, TokenUsage, std::vector<ToolCall>) {};
+    // Title refinement's tokens are billed to the session (Task 26):
+    // maintenance calls are real usage on the same bill.
+    cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
+        double cost = compute_step_cost(tok, provider.id(), provider.kind(),
+                                        model_id, config_.pricing);
+        store_.update_cost(session_id, cost, tok);
+    };
     cbs.on_error = [&](const std::string& error) {
         failed = true;
         err = error;
@@ -3116,6 +3129,8 @@ bool SessionEngine::vision_fallback_ready()
 }
 
 std::string SessionEngine::describe_image(Provider& provider,
+                                          const std::string& provider_id,
+                                          const std::string& session_id,
                                           const std::string& model_id,
                                           const nlohmann::json& att,
                                           const std::atomic<bool>* interrupted,
@@ -3153,7 +3168,12 @@ std::string SessionEngine::describe_image(Provider& provider,
     cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
         if (!(interrupted && interrupted->load())) text += delta;
     };
-    cbs.on_finish = [&](FinishReason, TokenUsage, std::vector<ToolCall>) {};
+    cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
+        // Vision-fallback descriptions are billed to the session (Task 26).
+        double cost = compute_step_cost(tok, provider_id, provider.kind(),
+                                        model_id, config_.pricing);
+        store_.update_cost(session_id, cost, tok);
+    };
     cbs.on_error = [&](const std::string& error) {
         failed = true;
         err = error;
@@ -3210,7 +3230,8 @@ void SessionEngine::backfill_attachment_descriptions(
                 if (att.contains("description") || att.contains("description_status")) continue;
                 std::string desc;
                 try {
-                    desc = describe_image(*provider, config_.vision_fallback_model,
+                    desc = describe_image(*provider, pid, session_id,
+                        config_.vision_fallback_model,
                         att, interrupted, stream_token);
                 } catch (const std::exception&) {
                     fprintf(stderr, "[engine] vision fallback describe threw\n");

@@ -28,4 +28,17 @@ struct ThinkingBlockAcc {
     void apply_delta(const nlohmann::json& delta);
 };
 
+// One entry from the Models API (/v1/models): the id plus the discovered
+// max_input_tokens (0 when the server didn't report one).
+struct AnthropicModelEntry {
+    std::string id;
+    int max_input_tokens = 0;
+};
+
+// Parses a /v1/models response body (already JSON). Returns false when the
+// document is not a models list (missing "data"); entries with empty ids
+// are skipped. Pure, unit-testable.
+bool parse_anthropic_models(const nlohmann::json& j,
+                            std::vector<AnthropicModelEntry>& out);
+
 } // namespace haicode

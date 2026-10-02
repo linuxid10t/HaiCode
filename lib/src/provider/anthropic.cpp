@@ -20,6 +20,7 @@ public:
         : api_key_(api_key), base_url_(base_url), id_(id.empty() ? "anthropic" : id) {}
 
     std::string id() const override { return id_; }
+    std::string kind() const override { return "anthropic"; }
 
     void stream(const LLMRequest& request, StreamCallbacks callbacks,
                 const std::string& stream_token = "") override {
@@ -296,21 +297,40 @@ public:
         }
         try {
             auto j = nlohmann::json::parse(body, nullptr, false);
-            if (j.is_discarded() || !j.contains("data")) {
+            std::vector<AnthropicModelEntry> entries;
+            if (j.is_discarded() || !parse_anthropic_models(j, entries)) {
                 if (body.empty())
                     error = "empty response from server";
                 else
                     error = "invalid response from server";
                 return result;
             }
-            for (auto& m : j["data"]) {
-                std::string mid = m.value("id", "");
-                if (!mid.empty()) result.push_back(mid);
+            for (auto& e : entries) {
+                // Cache the discovered limits so the context meter and
+                // auto-compaction work without config overrides (same
+                // pattern as the OpenAI flavors/codex).
+                if (e.max_input_tokens > 0) {
+                    std::lock_guard<std::mutex> lock(context_cache_mu_);
+                    context_cache_[e.id] = e.max_input_tokens;
+                }
+                result.push_back(e.id);
             }
         } catch (...) {
             error = "invalid response from server";
         }
         return result;
+    }
+
+    int get_model_context(const std::string& model_id) const override {
+        std::lock_guard<std::mutex> lock(context_cache_mu_);
+        auto it = context_cache_.find(model_id);
+        return it != context_cache_.end() ? it->second : 0;
+    }
+
+    int peek_model_context(const std::string& model_id) const override {
+        std::lock_guard<std::mutex> lock(context_cache_mu_);
+        auto it = context_cache_.find(model_id);
+        return it != context_cache_.end() ? it->second : 0;
     }
 
 private:
@@ -323,6 +343,10 @@ private:
     // returning, so entries are always in-flight streams.
     std::mutex cancel_mu_;
     std::map<std::string, std::vector<std::shared_ptr<std::atomic<bool>>>> cancel_flags_;
+    // Discovered id -> max_input_tokens from the Models API; guarded by
+    // context_cache_mu_. Populated during list_models().
+    mutable std::mutex context_cache_mu_;
+    mutable std::map<std::string, int> context_cache_;
 };
 
 // Factory function

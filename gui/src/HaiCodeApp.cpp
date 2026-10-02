@@ -192,9 +192,9 @@ HaiCodeApp::ReadyToRun()
     perm_gate_ = std::make_unique<haicode::PermissionGate>();
     bus_       = std::make_unique<haicode::SessionEventBus>();
 
-    // Default model unconditionally — providers may be configured later
-    if (config_.model.empty())
-        config_.model = "claude-opus-4-5";
+    // No hardcoded default model: the startup MSG_FETCH_MODELS path marks
+    // the first listed model and propagates it; a failed fetch leaves the
+    // placeholder for the user to pick manually (Task 26).
 
     // --- 6. Register built-in tools ---
     haicode::register_builtin_tools(*tools_);

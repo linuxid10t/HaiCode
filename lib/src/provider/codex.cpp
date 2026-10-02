@@ -168,6 +168,7 @@ public:
     }
 
     std::string id() const override { return id_; }
+    std::string kind() const override { return "chatgpt"; }
 
     void stream(const LLMRequest& request, StreamCallbacks callbacks,
                 const std::string& stream_token = "") override {

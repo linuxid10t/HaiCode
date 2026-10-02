@@ -10,20 +10,34 @@ struct ModelPricing {
     double input       = 0.0;
     double output      = 0.0;
     double cache_read  = 0.0;
-    double cache_write = 0.0;
+    double cache_write = 0.0;  // 5-minute write (1.25x input on Anthropic);
+                               // 1-hour writes (2x) are not modeled
 };
 
-// Resolves pricing for (provider_id, model_id). Resolution is
-// longest-prefix match against the union of:
-//   1. `overrides` (from AppConfig::pricing) — keys like
-//      "anthropic:claude-sonnet-4" match all variants
-//      (claude-sonnet-4-5, claude-sonnet-4-6-20250514, ...).
-//   2. Built-in defaults for common Anthropic and OpenAI models.
-// Override entries win ties (equal prefix length) against built-ins.
-// Returns nullptr if no entry matches — caller should treat the model
-// as "unknown, zero cost".
+// Resolves pricing for (provider_id, model_id) with the legacy lookup:
+// longest-prefix match against overrides + built-ins keyed
+// "<provider_id>:<model-prefix>". Kept for compatibility.
 const ModelPricing* lookup_pricing(
     const std::string& provider_id,
+    const std::string& model_id,
+    const std::map<std::string, ModelPricing>& overrides);
+
+// Full resolution with provider-kind fallback chain (Task 26):
+//   1. config overrides, matched against "<provider_id>:<model>" and
+//      "<provider_kind>:<model>" and "<model>" (longest prefix wins, so a
+//      user can re-key a built-in entry);
+//   2. local server kinds (ollama/vllm/lmstudio/llamacpp) short-circuit to
+//      free — cloud prices must never apply to a local server;
+//   3. built-ins keyed "<kind>:<model>" (anthropic:/openai:) then
+//      "*:<model>" (globally-unique ids from other labs);
+//   4. nullptr = unknown, zero cost.
+// Model ids are normalized first: lowercase, leading vendor path segment
+// ("z-ai/glm-5.3") and cloud region prefixes ("us.", "eu.", "global.",
+// "anthropic.", "meta.", "amazon.") dropped, ":free"/":thinking"/":beta"
+// suffixes dropped (":free" also zeroes the price), "@date" snapshots kept.
+const ModelPricing* lookup_pricing(
+    const std::string& provider_id,
+    const std::string& provider_kind,
     const std::string& model_id,
     const std::map<std::string, ModelPricing>& overrides);
 
@@ -31,5 +45,22 @@ const ModelPricing* lookup_pricing(
 // Reasoning tokens are billed at the output rate (standard for
 // Anthropic extended thinking and OpenAI o-series). Result is in USD.
 double compute_cost(const TokenUsage& usage, const ModelPricing& pricing);
+
+// True for local-server provider kinds, whose inference costs nothing:
+// cloud list prices must never be applied to a user's own Ollama/vLLM/
+// LM Studio/llama.cpp instance serving a cloud-named model id.
+bool is_local_provider_kind(const std::string& provider_kind);
+
+// Resolves pricing through the kind-aware chain and computes the step cost,
+// applying long-context surcharge tiers where the model has one: above the
+// threshold (measured on total prompt tokens: input + cache_read +
+// cache_write) the WHOLE request is repriced at the higher rate (xAI's
+// documented behavior; assumed for the others). Returns 0.0 when no pricing
+// resolves (unknown model or local server).
+double compute_step_cost(const TokenUsage& usage,
+                         const std::string& provider_id,
+                         const std::string& provider_kind,
+                         const std::string& model_id,
+                         const std::map<std::string, ModelPricing>& overrides);
 
 } // namespace haicode

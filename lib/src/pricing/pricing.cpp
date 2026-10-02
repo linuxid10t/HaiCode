@@ -1,24 +1,235 @@
 #include <haicode/pricing.h>
 
+// last_verified: 2026-10-02 against MODEL_NUMBERS.md (repo root), which was
+// compiled from the labs' published tables via LiteLLM + secondary sources.
+
+#include <algorithm>
+#include <cstring>
+
 namespace haicode {
 
-// Built-in defaults (USD per 1M tokens, public list prices).
-// Keys are "provider_id:model-prefix" — longest-prefix match means
-// "anthropic:claude-sonnet-4" covers claude-sonnet-4-5, -4-6, and any
-// dated variant like claude-sonnet-4-6-20250514.
+// ---- built-in flat pricing -------------------------------------------------
+// Keys are "<kind>:<model-prefix>" (kind = provider kind, not the user's
+// provider id) or "*:<model-prefix>" for labs whose model ids are globally
+// unique and reached through arbitrary proxies/aggregators. Longest-prefix
+// match. Where the model is tiered (long-context surcharge or input-size
+// tiers), the entry here is the BASE (first-tier) price; the full ladder
+// lives in kTiered and is consulted by compute_step_cost.
 static const struct { const char* key; ModelPricing p; } kBuiltin[] = {
-    // Anthropic Claude 4.x — cache_write is 1.25x input, cache_read is 0.1x input.
-    {"anthropic:claude-opus-4",    { 15.0,  75.0, 1.50, 18.75}},
-    {"anthropic:claude-sonnet-4",  {  3.0,  15.0, 0.30,  3.75}},
-    {"anthropic:claude-haiku-4",   {  1.0,   5.0, 0.10,  1.25}},
-    // OpenAI — prompt-caching discount on cache_read; no cache_write charge.
-    {"openai:gpt-4o-mini",         {  0.15,  0.60, 0.075, 0.0}},
-    {"openai:gpt-4o",              {  2.50, 10.0,  1.25,  0.0}},
-    {"openai:o4-mini",             {  1.50,  6.0,  0.75,  0.0}},
-    {"openai:o3-mini",             {  3.0,  12.0,  1.50,  0.0}},
-    {"openai:o3",                  { 15.0,  60.0,  7.50,  0.0}},
-    {"openai:o1",                  { 15.0,  60.0,  7.50,  0.0}},
-    {"openai:gpt-5",               {  5.0,  15.0,  2.50,  0.0}},
+    // Anthropic — cache_write is the 5-minute tier (1.25x input); 1-hour
+    // writes (2x) are not modeled. Fable/Mythos 5 vs 5.1 differ in cache_read.
+    {"anthropic:claude-fable-5-1",   {10.0,  50.0,  0.25, 12.50}},
+    {"anthropic:claude-fable-5",     {10.0,  50.0,  1.00, 12.50}},
+    {"anthropic:claude-mythos-5-1",  {10.0,  50.0,  0.25, 12.50}},
+    {"anthropic:claude-mythos-5",    {10.0,  50.0,  1.00, 12.50}},
+    {"anthropic:claude-opus-5-5",    { 4.0,  20.0,  0.20,  5.00}},
+    {"anthropic:claude-opus-5",      { 5.0,  25.0,  0.50,  6.25}},
+    {"anthropic:claude-opus-4",      { 5.0,  25.0,  0.50,  6.25}},  // 4.5-4.8
+    {"anthropic:claude-sonnet-5",    { 2.0,  10.0,  0.20,  2.50}},
+    {"anthropic:claude-sonnet-4-6",  { 3.0,  15.0,  0.30,  3.75}},
+    {"anthropic:claude-sonnet-4-5",  { 3.0,  15.0,  0.30,  3.75}},  // surcharge >200K
+    {"anthropic:claude-sonnet-4",    { 3.0,  15.0,  0.30,  3.75}},
+    {"anthropic:claude-haiku-4-5",   { 1.0,   5.0,  0.10,  1.25}},
+    {"anthropic:claude-3-5-haiku",   { 0.80,  4.0,  0.08,  1.00}},
+    // Retired-but-kept ids for old sessions (pre-date the current table).
+    {"anthropic:claude-opus-4-1",    {15.0,  75.0,  1.50, 18.75}},
+    {"anthropic:claude-3-7-sonnet",  { 3.0,  15.0,  0.30,  3.75}},
+    // OpenAI — prompt-caching discount on cache_read; cache_write charge only
+    // on GPT-5.6+/GPT-6 (~1.25x input). Retired o1/gpt-4o prices kept.
+    {"openai:gpt-6-astra",           {10.0,  50.0,  1.00, 12.50}},
+    {"openai:gpt-6.1-sol",           { 2.0,  10.0,  0.10,  2.50}},
+    {"openai:gpt-6-sol",             { 2.0,  10.0,  0.20,  2.50}},
+    {"openai:gpt-6-luna",            { 0.1,   0.5,  0.01,  0.125}},
+    {"openai:gpt-5.6-terra",         { 2.0,  12.0,  0.20,  2.50}},
+    {"openai:gpt-5.6-luna",          { 0.2,   1.2,  0.02,  0.25}},
+    {"openai:gpt-5.6",               { 4.0,  20.0,  0.40,  5.00}},
+    {"openai:gpt-5.5",               { 5.0,  30.0,  0.50,  0.0}},
+    {"openai:gpt-5.4",               { 2.5,  15.0,  0.25,  0.0}},
+    {"openai:gpt-5-pro",             {15.0, 120.0,  0.00,  0.0}},
+    {"openai:gpt-5-mini",            { 0.25,  2.0,  0.025, 0.0}},
+    {"openai:gpt-5-nano",            { 0.05,  0.4,  0.005, 0.0}},
+    {"openai:gpt-5",                 { 1.25, 10.0,  0.125, 0.0}},
+    {"openai:gpt-4.1-mini",          { 0.4,   1.6,  0.10,  0.0}},
+    {"openai:gpt-4.1",               { 2.0,   8.0,  0.50,  0.0}},
+    {"openai:gpt-4o-mini",           { 0.15,  0.60, 0.075, 0.0}},
+    {"openai:gpt-4o",                { 2.50, 10.0,  1.25,  0.0}},
+    {"openai:o4-mini",               { 1.1,   4.4,  0.275, 0.0}},
+    {"openai:o3-pro",                {20.0,  80.0,  0.00,  0.0}},
+    {"openai:o3",                    { 2.0,   8.0,  0.50,  0.0}},
+    {"openai:o1",                    {15.0,  60.0,  7.50,  0.0}},
+    // Other labs — first-party list prices under the any-provider wildcard.
+    // Peak/off-peak models (DeepSeek) use the PEAK rate so cost is never
+    // under-reported; regional variants (xAI US +10%, Alibaba regions) are
+    // not modeled.
+    {"*:grok-4.20",                  { 1.25,  2.5,  0.20,  0.0}},
+    {"*:grok-4.3",                   { 1.25,  2.5,  0.20,  0.0}},
+    {"*:grok-build-latest",          { 2.0,   6.0,  0.30,  0.0}},
+    {"*:grok-4",                     { 2.0,   6.0,  0.50,  0.0}},
+    {"*:grok-code-fast",             { 1.0,   2.0,  0.20,  0.0}},
+    {"*:glm-5.3-flash",              { 0.15,  0.5,  0.03,  0.0}},
+    {"*:glm-5.3",                    { 1.4,   4.4,  0.26,  0.0}},
+    {"*:glm-5.2",                    { 1.4,   4.4,  0.26,  0.0}},
+    {"*:glm-5-code",                 { 1.2,   5.0,  0.30,  0.0}},
+    {"*:glm-5",                      { 1.0,   3.2,  0.20,  0.0}},
+    {"*:glm-4.7-flash",              { 0.0,   0.0,  0.00,  0.0}},  // free
+    {"*:glm-4.7",                    { 0.6,   2.2,  0.11,  0.0}},
+    {"*:glm-4.6",                    { 0.6,   2.2,  0.11,  0.0}},
+    {"*:glm-4.5-flash",              { 0.0,   0.0,  0.00,  0.0}},  // free
+    {"*:glm-4.5",                    { 0.6,   2.2,  0.00,  0.0}},
+    {"*:kimi-k3",                    { 3.0,  15.0,  0.30,  0.0}},
+    {"*:kimi-k2.7-code",             { 0.95,  4.0,  0.19,  0.0}},
+    {"*:kimi-k2.6",                  { 0.95,  4.0,  0.16,  0.0}},
+    {"*:kimi-k2.5",                  { 0.6,   3.0,  0.10,  0.0}},
+    {"*:minimax-m3",                 { 0.3,   1.2,  0.06,  0.0}},
+    {"*:minimax-m2",                 { 0.3,   1.2,  0.03,  0.375}},
+    {"*:deepseek-v4-pro",            { 1.32,  3.96, 0.044, 0.0}},
+    {"*:deepseek-v4-flash",          { 0.44,  1.32, 0.014, 0.0}},
+    {"*:mistral-large-latest",       { 0.5,   1.5,  0.05,  0.0}},
+    {"*:mistral-medium-latest",      { 1.5,   7.5,  0.15,  0.0}},
+    {"*:mistral-small-latest",       { 0.15,  0.6,  0.015, 0.0}},
+    {"*:ministral-14b-latest",       { 0.2,   0.2,  0.02,  0.0}},
+    {"*:ministral-8b-latest",        { 0.15,  0.15, 0.015, 0.0}},
+    {"*:ministral-3b-latest",        { 0.1,   0.1,  0.01,  0.0}},
+    {"*:muse-spark-1.3-contributor", { 0.1,   0.2,  0.002, 0.0}},
+    {"*:muse-spark",                 { 1.25,  4.25, 0.15,  0.0}},
+    {"*:qwen3.8",                    { 0.15,  0.47, 0.016, 0.2}},
+    {"*:qwen3-coder-plus",           { 1.0,   5.0,  0.10,  0.0}},
+    {"*:qwen3-coder-flash",          { 0.3,   1.5,  0.08,  0.0}},
+    {"*:doubao-seed-2-1-pro",        { 0.8625, 4.3125, 0.1725, 0.0}},
+    {"*:doubao-seed-2-1-turbo",      { 0.4313, 2.1562, 0.0862, 0.0}},
+    {"*:amazon.nova-2-pro",          { 2.1875, 17.5,  0.5469, 0.0}},
+    {"*:amazon.nova-2",              { 0.3,    2.5,   0.075,  0.0}},
+    {"*:mimo-v2.6",                  { 0.14,   0.28,  0.0028, 0.0}},
+};
+
+// ---- tier ladder (long-context surcharges + input-size tiers) -------------
+// Ordered breakpoints; tier is chosen from total prompt tokens (input +
+// cache_read + cache_write) and the WHOLE request is billed at that tier
+// (verified whole-request only for xAI; convention elsewhere). The first
+// entry's price duplicates kBuiltin so a plain lookup bills correctly.
+struct PriceTier {
+    int up_to_prompt_tokens;   // inclusive upper bound; 0 = unbounded (last)
+    ModelPricing price;
+};
+static const struct { const char* model_prefix; PriceTier tiers[4]; } kTiered[] = {
+    {"claude-sonnet-4-5", {
+        {200000, { 3.0, 15.0, 0.30, 3.75}},
+        {0,      { 6.0, 22.5, 0.60, 3.75}},  // >200K long-context rate
+    }},
+    {"gpt-6-astra", {
+        {272000, {10.0, 50.0, 1.00, 12.50}},
+        {0,      {20.0, 75.0, 2.00, 12.50}},
+    }},
+    {"gpt-6.1-sol", {
+        {272000, { 2.0, 10.0, 0.10, 2.50}},
+        {0,      { 4.0, 15.0, 0.20, 2.50}},
+    }},
+    {"gpt-6-sol", {
+        {272000, { 2.0, 10.0, 0.20, 2.50}},
+        {0,      { 4.0, 15.0, 0.40, 2.50}},
+    }},
+    {"gpt-6-luna", {
+        {272000, { 0.1,  0.5,  0.010, 0.125}},
+        {0,      { 0.2,  0.75, 0.020, 0.125}},
+    }},
+    {"gpt-5.6-terra", {
+        {272000, { 2.0, 12.0, 0.20, 2.50}},
+        {0,      { 4.0, 18.0, 0.40, 2.50}},
+    }},
+    {"gpt-5.6-luna", {
+        {272000, { 0.2,  1.2,  0.020, 0.25}},
+        {0,      { 0.4,  1.8,  0.040, 0.25}},
+    }},
+    {"gpt-5.6", {
+        {272000, { 4.0, 20.0, 0.40, 5.00}},
+        {0,      { 8.0, 30.0, 0.80, 5.00}},
+    }},
+    {"gpt-5.5", {
+        {272000, { 5.0, 30.0, 0.50, 0.0}},
+        {0,      {10.0, 45.0, 1.00, 0.0}},
+    }},
+    {"gpt-5.4", {
+        {272000, { 2.5, 15.0, 0.25, 0.0}},
+        {0,      { 5.0, 22.5, 0.50, 0.0}},
+    }},
+    {"gemini-3.1-pro", {
+        {200000, { 2.0, 12.0, 0.20, 0.0}},
+        {0,      { 4.0, 18.0, 0.40, 0.0}},
+    }},
+    {"gemini-2.5-pro", {
+        {200000, { 1.25, 10.0, 0.125, 0.0}},
+        {0,      { 2.5,  15.0, 0.25,  0.0}},
+    }},
+    // xAI thresholds are >= (at) rather than >; one token over the boundary
+    // bills the same either way in practice.
+    {"grok-4.20", {
+        {199999, { 1.25,  2.5,  0.20, 0.0}},
+        {0,      { 2.5,   5.0,  0.40, 0.0}},
+    }},
+    {"grok-4.3", {
+        {199999, { 1.25,  2.5,  0.20, 0.0}},
+        {0,      { 2.5,   5.0,  0.40, 0.0}},
+    }},
+    {"grok-build-latest", {
+        {199999, { 2.0,   6.0,  0.30, 0.0}},
+        {0,      { 4.0,  12.0,  0.60, 0.0}},
+    }},
+    {"grok-4", {
+        {199999, { 2.0,   6.0,  0.50, 0.0}},
+        {0,      { 4.0,  12.0,  1.00, 0.0}},
+    }},
+    {"minimax-m3", {
+        {512000, { 0.3,  1.2,  0.06, 0.0}},
+        {0,      { 0.6,  2.4,  0.12, 0.0}},
+    }},
+    // Alibaba input-size tiers (Singapore/international region).
+    {"qwen3-coder-plus", {
+        { 32000, { 1.0,  5.0,  0.10, 0.0}},
+        {128000, { 1.8,  9.0,  0.18, 0.0}},
+        {256000, { 3.0, 15.0,  0.30, 0.0}},
+        {0,      { 6.0, 60.0,  0.60, 0.0}},
+    }},
+    {"qwen3-coder-flash", {
+        { 32000, { 0.3,  1.5,  0.08, 0.0}},
+        {128000, { 0.5,  2.5,  0.12, 0.0}},
+        {256000, { 0.8,  4.0,  0.20, 0.0}},
+        {0,      { 1.6,  9.6,  0.40, 0.0}},
+    }},
+    {"qwen3.5-plus", {
+        {256000, { 0.4,  2.4,  0.0, 0.0}},
+        {0,      { 0.5,  3.0,  0.0, 0.0}},
+    }},
+    {"qwen-plus", {
+        {256000, { 0.4,  1.2,  0.0, 0.0}},
+        {0,      { 1.2,  3.6,  0.0, 0.0}},
+    }},
+    {"qwen-flash", {
+        {256000, { 0.05, 0.4,  0.0, 0.0}},
+        {0,      { 0.25, 2.0,  0.0, 0.0}},
+    }},
+    // ByteDance input-size tiers.
+    {"doubao-seed-2-0-pro", {
+        { 32000, { 0.46, 2.3,  0.0, 0.0}},
+        {128000, { 0.7,  3.5,  0.0, 0.0}},
+        {0,      { 1.4,  7.0,  0.0, 0.0}},
+    }},
+    {"doubao-seed-2-0-lite", {
+        { 32000, { 0.087, 0.52, 0.0, 0.0}},
+        {128000, { 0.13,  0.78, 0.0, 0.0}},
+        {0,      { 0.26,  1.6,  0.0, 0.0}},
+    }},
+};
+
+// Gemini flat entries live in kBuiltin via their own keys for lookup; the
+// surcharge models above are the only tiered ones.
+static const struct { const char* key; ModelPricing p; } kBuiltinExtra[] = {
+    {"*:gemini-3.8-flash",  { 0.75, 3.75,  0.075, 0.0}},  // intro until 2026-12-31
+    {"*:gemini-3.5-flash",  { 1.5,  9.0,   0.15,  0.0}},
+    {"*:gemini-3.1-pro",    { 2.0,  12.0,  0.20,  0.0}},  // surcharge >200K
+    {"*:gemini-2.5-pro",    { 1.25, 10.0,  0.125, 0.0}},  // surcharge >200K
+    {"*:gemini-2.5-flash",  { 0.3,  2.5,   0.03,  0.0}},
+    {"*:gemini-3-flash",    { 0.5,  3.0,   0.05,  0.0}},
+    {"*:gemini-3.5-flash-lite", { 0.3, 2.5, 0.03, 0.0}},
 };
 
 static std::string lower(std::string s) {
@@ -26,33 +237,125 @@ static std::string lower(std::string s) {
     return s;
 }
 
+static bool starts_with(const std::string& s, const char* prefix) {
+    size_t n = std::strlen(prefix);
+    return s.size() >= n && s.compare(0, n, prefix) == 0;
+}
+
+// Model-id normalization (aggregators/clouds wrap the id): lowercase, drop
+// leading region prefixes ("us.", "eu.", "global."), drop vendor wrapper
+// segments that are never part of the model name ("anthropic.", "meta.",
+// a leading "vendor/" path segment), drop ":free"/":thinking"/":beta"
+// suffixes. "amazon." is KEPT — "amazon.nova-..." is the genuine Bedrock
+// model id, not a wrapper.
+static std::string normalize_model_id(const std::string& raw, bool& is_free) {
+    std::string m = lower(raw);
+    is_free = false;
+    // ":free" / ":thinking" / ":beta" suffixes (OpenRouter variants)
+    static const char* kSuffixes[] = {":free", ":thinking", ":beta"};
+    for (const char* suf : kSuffixes) {
+        size_t n = std::strlen(suf);
+        if (m.size() > n && m.compare(m.size() - n, n, suf) == 0) {
+            if (std::string(suf) == ":free") is_free = true;
+            m.erase(m.size() - n);
+        }
+    }
+    // Bedrock inference-profile region prefixes
+    for (const char* p : {"us.", "eu.", "global."}) {
+        if (starts_with(m, p)) { m.erase(0, std::strlen(p)); break; }
+    }
+    // Vendor wrapper prefixes that are never part of the model name
+    for (const char* p : {"anthropic.", "meta."}) {
+        if (starts_with(m, p)) { m.erase(0, std::strlen(p)); break; }
+    }
+    // Aggregator path prefix ("z-ai/glm-5.3", "moonshotai/kimi-k3")
+    size_t slash = m.find('/');
+    if (slash != std::string::npos && slash < m.size() - 1)
+        m.erase(0, slash + 1);
+    return m;
+}
+
+// Longest-prefix match of "kind:model" against a table of {key, p} entries.
+template <typename Entries>
+static const ModelPricing* prefix_match(const std::string& kind,
+                                        const std::string& model,
+                                        const Entries& entries) {
+    const std::string full = kind + ":" + model;
+    const ModelPricing* best = nullptr;
+    size_t best_len = 0;
+    for (const auto& e : entries) {
+        std::string k = lower(e.key);
+        if (full.rfind(k, 0) == 0 && k.size() > best_len) {
+            // Only structured keys ("x:y") participate; a bare model key
+            // without ':' is matched by the caller's wildcard pass.
+            if (k.find(':') == std::string::npos) continue;
+            best = &e.p;
+            best_len = k.size();
+        }
+    }
+    return best;
+}
+
+bool is_local_provider_kind(const std::string& provider_kind) {
+    return provider_kind == "ollama" || provider_kind == "vllm"
+        || provider_kind == "lmstudio" || provider_kind == "llamacpp";
+}
+
 const ModelPricing* lookup_pricing(
     const std::string& provider_id,
     const std::string& model_id,
     const std::map<std::string, ModelPricing>& overrides)
 {
-    std::string full_lc = lower(provider_id + ":" + model_id);
+    return lookup_pricing(provider_id, provider_id, model_id, overrides);
+}
 
-    const ModelPricing* best = nullptr;
-    size_t best_len = 0;
+const ModelPricing* lookup_pricing(
+    const std::string& provider_id,
+    const std::string& provider_kind,
+    const std::string& model_id,
+    const std::map<std::string, ModelPricing>& overrides)
+{
+    bool free_variant = false;
+    const std::string model = normalize_model_id(model_id, free_variant);
+    if (free_variant) {
+        static const ModelPricing kFree{};
+        return &kFree;
+    }
+    // A local server (user's own Ollama/vLLM/LM Studio/llama.cpp) is free
+    // regardless of the model id it serves.
+    if (is_local_provider_kind(provider_kind)) {
+        static const ModelPricing kLocalFree{};
+        return &kLocalFree;
+    }
 
-    for (auto& e : kBuiltin) {
-        std::string k_lc = lower(e.key);
-        if (full_lc.rfind(k_lc, 0) == 0 && k_lc.size() > best_len) {
-            best = &e.p;
-            best_len = k_lc.size();
+    // Config overrides: match against provider id, provider kind, and bare
+    // model key — longest prefix wins, ties to the override (a user can
+    // re-key a built-in by reusing its key).
+    const std::string keys[3] = {
+        lower(provider_id) + ":" + model,
+        lower(provider_kind) + ":" + model,
+        model,
+    };
+    for (const std::string& full : keys) {
+        const ModelPricing* best = nullptr;
+        size_t best_len = 0;
+        for (auto& [k, v] : overrides) {
+            std::string k_lc = lower(k);
+            if (full.rfind(k_lc, 0) == 0 && k_lc.size() >= best_len) {
+                best = &v;
+                best_len = k_lc.size();
+            }
         }
+        if (best) return best;
     }
-    // Override prefix wins on tie so a user can replace a built-in entry
-    // by reusing the same key.
-    for (auto& [k, v] : overrides) {
-        std::string k_lc = lower(k);
-        if (full_lc.rfind(k_lc, 0) == 0 && k_lc.size() >= best_len) {
-            best = &v;
-            best_len = k_lc.size();
-        }
-    }
-    return best;
+
+    // Built-ins: provider-kind key first, then any-provider wildcard.
+    const std::string& kind = provider_kind.empty() ? provider_id : provider_kind;
+    if (const ModelPricing* p = prefix_match(kind, model, kBuiltin)) return p;
+    if (const ModelPricing* p = prefix_match(kind, model, kBuiltinExtra)) return p;
+    if (const ModelPricing* p = prefix_match("*", model, kBuiltin)) return p;
+    if (const ModelPricing* p = prefix_match("*", model, kBuiltinExtra)) return p;
+    return nullptr;
 }
 
 double compute_cost(const TokenUsage& u, const ModelPricing& p) {
@@ -65,6 +368,43 @@ double compute_cost(const TokenUsage& u, const ModelPricing& p) {
     cost += static_cast<double>(u.cache_read)  * p.cache_read;
     cost += static_cast<double>(u.cache_write) * p.cache_write;
     return cost / 1'000'000.0;
+}
+
+double compute_step_cost(const TokenUsage& usage,
+                         const std::string& provider_id,
+                         const std::string& provider_kind,
+                         const std::string& model_id,
+                         const std::map<std::string, ModelPricing>& overrides) {
+    const ModelPricing* base = lookup_pricing(provider_id, provider_kind,
+                                               model_id, overrides);
+    if (!base) return 0.0;
+
+    // Tier ladder: the longest-prefix entry whose thresholds cover the
+    // request's total prompt size. Tier overrides the base price only when
+    // the model actually has a ladder; flat models bill at `base`.
+    bool free_variant = false;
+    std::string model = normalize_model_id(model_id, free_variant);
+    const PriceTier* tiers = nullptr;
+    size_t tiers_count = 0;
+    size_t best_len = 0;
+    for (const auto& e : kTiered) {
+        std::string p = e.model_prefix;
+        if (model.rfind(p, 0) == 0 && p.size() > best_len) {
+            tiers = e.tiers;
+            tiers_count = sizeof(e.tiers) / sizeof(e.tiers[0]);
+            best_len = p.size();
+        }
+    }
+    if (tiers) {
+        const int prompt_tokens =
+            usage.input + usage.cache_read + usage.cache_write;
+        for (size_t i = 0; i < tiers_count; ++i) {
+            if (tiers[i].up_to_prompt_tokens == 0
+                    || prompt_tokens <= tiers[i].up_to_prompt_tokens)
+                return compute_cost(usage, tiers[i].price);
+        }
+    }
+    return compute_cost(usage, *base);
 }
 
 } // namespace haicode

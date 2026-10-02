@@ -232,6 +232,8 @@ private:
     // provider.stream pattern as refine_title_llm; runs on the engine's
     // worker thread only.
     std::string describe_image(Provider& provider,
+                               const std::string& provider_id,
+                               const std::string& session_id,
                                const std::string& model_id,
                                const nlohmann::json& att,
                                const std::atomic<bool>* interrupted,

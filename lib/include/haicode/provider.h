@@ -84,6 +84,12 @@ class Provider {
 public:
     virtual ~Provider() = default;
     virtual std::string id() const = 0;
+    // Provider *kind* for the pricing fallback chain ("anthropic", "openai"
+    // (+compat flavors), "chatgpt"): custom provider ids (proxies,
+    // aggregators) miss the "<id>:<model>" pricing keys, but the kind still
+    // resolves them. Default: the id itself (a custom id serving an unknown
+    // model is priced by the "*:<model>" wildcard anyway).
+    virtual std::string kind() const { return id(); }
     virtual void stream(const LLMRequest& request, StreamCallbacks callbacks,
                         const std::string& stream_token = "") = 0;
     virtual void cancel(const std::string& stream_token = "") = 0;
