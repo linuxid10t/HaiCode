@@ -986,6 +986,13 @@ public:
 
         std::string path = plans_dir + "/plan_" + ts + "_" + rand_suffix + ".md";
 
+        // Created on demand (only a successful proposal needs it); the GUI
+        // no longer pre-creates the directory at startup.
+        errno = 0;
+        if (!make_parent_dirs(path))
+            return {false, "", "propose_plan: cannot create " + plans_dir + ": "
+                              + strerror(errno)};
+
         std::string err = util::atomic_write_file(path,
             "<!-- haicode-status: active -->\n" + plan);
         if (!err.empty())

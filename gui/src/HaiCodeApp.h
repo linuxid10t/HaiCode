@@ -77,6 +77,10 @@ private:
     // prompt; "Trust" stores the record and re-merges so they take effect.
     void _MaybePromptProjectTrust();
     std::string project_dir_;
+    // Set in the constructor when a command-line project directory argument
+    // is invalid (missing or not a directory); shown as a BAlert in
+    // ReadyToRun and then cleared. Empty = nothing to report.
+    std::string startup_arg_warning_;
 
     // Shared holder so the broker's delivery callback can capture MainWindow*
     // safely even if the callback outlives ReadyToRun scope

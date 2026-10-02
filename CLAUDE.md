@@ -12,7 +12,7 @@ cmake -B build -S .
 # Build everything
 make -C build -j4
 
-# Run the full test suite (32 binaries, registered with CTest)
+# Run the full test suite (33 binaries, registered with CTest)
 ctest --test-dir build --output-on-failure
 
 # Build individual targets
@@ -56,6 +56,7 @@ Build type defaults to `RelWithDebInfo` when none is given; all targets compile 
 ./build/lib/test_provider_params              # capability-driven provider params: effort/thinking mapping, thinking-block replay
 ./build/lib/test_pricing                      # model metadata: windows, output caps, pricing tiers, normalization
 ./build/lib/test_codex_params                 # ChatGPT/Codex body: cache layout, prompt_cache_key, reasoning replay
+./build/lib/test_propose_plan                 # plan-file lifecycle: on-demand .haicode/plans, propose/discard
 ```
 
 **Single instance (enforced).** The app signature `application/x-vnd.haicode` carries `B_SINGLE_LAUNCH` (compiled from `gui/haicode.rdef` and attached via `rc`/`xres` in the GUI build): a second launch does not start a new process — the running instance is activated and any project-directory argument is forwarded to its window (`HaiCodeApp::ArgvReceived`/`RefsReceived` → MainWindow's `B_REFS_RECEIVED` handler → `MSG_DIR_PROPOSED`). Agents must still never spawn a second copy for testing; verify runtime behavior in the already-running instance.

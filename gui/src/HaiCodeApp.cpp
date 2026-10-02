@@ -98,8 +98,17 @@ HaiCodeApp::HaiCodeApp(int argc, char* argv[])
 {
     // Determine project directory: command-line arg wins, then saved setting, then CWD
     if (argc > 1) {
-        project_dir_ = argv[1];
-    } else {
+        BEntry arg_entry(argv[1]);
+        if (arg_entry.Exists() && arg_entry.IsDirectory()) {
+            project_dir_ = argv[1];
+        } else {
+            // Reject the argument but keep launching; the alert is deferred
+            // to ReadyToRun — the app looper is not ready in the constructor.
+            startup_arg_warning_ = std::string("Project directory \"") + argv[1]
+                + "\" does not exist or is not a directory.";
+        }
+    }
+    if (project_dir_.empty()) {
         // Try to load saved directory from settings
         BPath settings_path;
         if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
@@ -128,6 +137,16 @@ HaiCodeApp::HaiCodeApp(int argc, char* argv[])
 void
 HaiCodeApp::ReadyToRun()
 {
+    // Report an invalid command-line project directory (checked in the
+    // constructor) before any setup; the saved-directory/CWD fallback is
+    // already in place.
+    if (!startup_arg_warning_.empty()) {
+        BAlert* alert = new BAlert("Project directory",
+                                   startup_arg_warning_.c_str(), "OK");
+        alert->Go();
+        startup_arg_warning_.clear();
+    }
+
     // --- 1. Locate settings directory for DB ---
     BPath settings_path;
     if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path, true) != B_OK) {
@@ -164,9 +183,6 @@ HaiCodeApp::ReadyToRun()
 
     BPath db_path(settings_path);
     db_path.Append("sessions.db");
-
-    // Project plans are optional for read-only projects.
-    std::filesystem::create_directories(project_dir_ + "/.haicode/plans", dir_error);
 
     // --- 2. Open database & run migrations ---
     try {
