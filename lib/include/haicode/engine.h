@@ -234,6 +234,14 @@ private:
     // Vision fallback: explicit user-selected model and registered provider.
     bool vision_fallback_ready();
 
+    // Persists one request's cost/usage (SessionStore::update_cost) and
+    // publishes CostUpdated with the session's new persisted totals, so a
+    // frontend never shows a total that drifts from the store. Every cost
+    // write goes through here — agentic steps and maintenance calls alike.
+    // `sets_context`: see SessionStore::update_cost.
+    void record_usage(const std::string& session_id, double cost,
+                      const TokenUsage& usage, bool sets_context);
+
     // One-shot describer call: sends the image to the fallback model and
     // returns its text description ("" on failure). Same synchronous
     // provider.stream pattern as refine_title_llm; runs on the engine's

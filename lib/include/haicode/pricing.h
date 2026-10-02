@@ -63,4 +63,22 @@ double compute_step_cost(const TokenUsage& usage,
                          const std::string& model_id,
                          const std::map<std::string, ModelPricing>& overrides);
 
+// Best-effort usage for a request whose final usage report hasn't arrived
+// (still streaming, interrupted, or failed mid-stream). Inputs:
+//   reported         — usage the provider reported so far (Anthropic sends
+//                      its input/cache buckets at message_start; others
+//                      report nothing until the end);
+//   streamed_chars   — text + reasoning + tool-input characters received;
+//   est_request_tokens — chars/4 estimate of the whole request;
+//   cached_prefix_tokens — prompt size of the previous step in this turn,
+//                      used as the likely cache-read share when the
+//                      provider hasn't reported input (in a tool loop the
+//                      prior request is the cached prefix of this one).
+// Reported input buckets win over the estimate; output is the larger of
+// the reported count and streamed_chars/4 (rounded up).
+TokenUsage estimate_inflight_usage(const TokenUsage& reported,
+                                   size_t streamed_chars,
+                                   int est_request_tokens,
+                                   int cached_prefix_tokens);
+
 } // namespace haicode

@@ -426,6 +426,23 @@ const ModelPricing* lookup_pricing(
     return nullptr;
 }
 
+TokenUsage estimate_inflight_usage(const TokenUsage& reported,
+                                   size_t streamed_chars,
+                                   int est_request_tokens,
+                                   int cached_prefix_tokens) {
+    TokenUsage u = reported;
+    if (reported.total_input() <= 0) {
+        const int total  = std::max(0, est_request_tokens);
+        const int cached = std::clamp(cached_prefix_tokens, 0, total);
+        u.input       = total - cached;
+        u.cache_read  = cached;
+        u.cache_write = 0;
+    }
+    const int streamed = static_cast<int>((streamed_chars + 3) / 4);
+    u.output = std::max(reported.output, streamed);
+    return u;
+}
+
 double compute_cost(const TokenUsage& u, const ModelPricing& p) {
     double cost = 0.0;
     cost += static_cast<double>(u.input)       * p.input;

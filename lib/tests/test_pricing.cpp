@@ -446,6 +446,46 @@ static bool test_compute_cost() {
     return true;
 }
 
+// ---- In-flight usage estimate (live cost, interrupted/failed streams) ----
+
+static bool test_inflight_estimate() {
+    // Nothing reported yet (OpenAI/ChatGPT until the end): input comes from
+    // the request estimate, with the previous step's prompt as cache reads.
+    TokenUsage none;
+    TokenUsage e = estimate_inflight_usage(none, 401, 10000, 8000);
+    CHECK(e.input == 2000 && e.cache_read == 8000 && e.cache_write == 0,
+          "unreported input: estimate split by cached prefix");
+    CHECK(e.output == 101, "output = streamed chars / 4, rounded up");
+
+    // First step of a turn (no previous prompt): all input uncached; a
+    // cached prefix larger than the estimate is clamped.
+    e = estimate_inflight_usage(none, 0, 5000, 0);
+    CHECK(e.input == 5000 && e.cache_read == 0 && e.output == 0,
+          "no prefix: whole estimate uncached");
+    e = estimate_inflight_usage(none, 0, 5000, 9000);
+    CHECK(e.input == 0 && e.cache_read == 5000, "prefix clamped to estimate");
+
+    // Anthropic reports input buckets at message_start: they win.
+    TokenUsage rep;
+    rep.input = 300; rep.cache_read = 40000; rep.cache_write = 1200;
+    e = estimate_inflight_usage(rep, 800, 99999, 99999);
+    CHECK(e.input == 300 && e.cache_read == 40000 && e.cache_write == 1200,
+          "reported input buckets are kept exactly");
+    CHECK(e.output == 200, "streamed output estimated");
+    rep.output = 500;
+    e = estimate_inflight_usage(rep, 800, 0, 0);
+    CHECK(e.output == 500, "a larger reported output count wins");
+
+    // Priced through the normal path: Opus 5.5 at 4/20/0.20/5.00 per M.
+    double c = compute_step_cost(e, "anthropic", "anthropic",
+                                 "claude-opus-5-5", {});
+    double expect = (300 * 4.0 + 500 * 20.0 + 40000 * 0.20 + 1200 * 5.0)
+                  / 1'000'000.0;
+    CHECK(eq(c, expect), "estimate prices like a real step");
+    std::cout << "[OK] in-flight usage estimate\n";
+    return true;
+}
+
 static bool test_cached_input_billing() {
     TokenUsage u;
     parse_openai_usage(nlohmann::json{
@@ -474,6 +514,7 @@ int main() {
     ok = test_normalization() && ok;
     ok = test_tiered_pricing() && ok;
     ok = test_compute_cost() && ok;
+    ok = test_inflight_estimate() && ok;
     if (!ok) return 1;
     std::cout << "All pricing/metadata tests passed\n";
     return 0;

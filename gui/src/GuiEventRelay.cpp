@@ -129,15 +129,43 @@ GuiEventRelay::attach()
         double cost_usd = 0.0;
         if (data.contains("usage") && data["usage"].is_object()) {
             input_tokens  = data["usage"].value("input",  0);
-            output_tokens = data["usage"].value("output", 0);
+            // Generated tokens shown to the user include reasoning (the
+            // usage buckets keep them separate for pricing).
+            output_tokens = data["usage"].value("output", 0)
+                          + data["usage"].value("reasoning", 0);
             cost_usd      = data["usage"].value("cost_usd", 0.0);
         }
         BMessage msg(MSG_STEP_ENDED);
         msg.AddString("finish_reason", finish_reason.c_str());
         msg.AddInt32("usage_input",  input_tokens);
         msg.AddInt32("usage_output", output_tokens);
-        msg.AddInt32("context_tokens", data.value("context_tokens", 0));
+        // Absent when the step was interrupted before any usage report.
+        if (data.contains("context_tokens"))
+            msg.AddInt32("context_tokens", data.value("context_tokens", 0));
         msg.AddDouble("cost_usd",    cost_usd);
+        main_window_.SendMessage(&msg);
+    });
+
+    // CostUpdated → MSG_COST_UPDATED (persisted totals after every cost
+    // write, including title/compaction/image-description calls).
+    bus_.subscribe(EventType::CostUpdated, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+        BMessage msg(MSG_COST_UPDATED);
+        msg.AddDouble("cost_usd", data.value("cost_usd", 0.0));
+        msg.AddInt32("input",  data.value("input", 0));
+        msg.AddInt32("output", data.value("output", 0)
+                             + data.value("reasoning", 0));
+        main_window_.SendMessage(&msg);
+    });
+
+    // CostProgress → MSG_COST_PROGRESS (throttled in-flight estimate).
+    bus_.subscribe(EventType::CostProgress, [this](const json& data) {
+        std::string sid = data.value("session_id", "");
+        if (!is_active_session(sid)) return;
+        BMessage msg(MSG_COST_PROGRESS);
+        msg.AddDouble("provisional_cost_usd",
+                      data.value("provisional_cost_usd", 0.0));
         main_window_.SendMessage(&msg);
     });
 

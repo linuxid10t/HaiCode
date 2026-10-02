@@ -43,6 +43,14 @@ enum class EventType {
     BuildHookResult,
     AskUserRequested,
     SessionRenamed,
+    // Authoritative session totals (cost + token buckets) re-read from the
+    // store after EVERY cost write — agentic steps and maintenance calls
+    // (title, compaction summary, image description) alike — so frontends
+    // never drift from the persisted total.
+    CostUpdated,
+    // Throttled provisional cost of the in-flight request while it streams
+    // ("provisional_cost_usd", an estimate); superseded by CostUpdated.
+    CostProgress,
 };
 
 struct BaseEvent {

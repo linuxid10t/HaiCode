@@ -29,6 +29,30 @@ nlohmann::json codex_reasoning_item_for_replay(const nlohmann::json& item) {
     return out;
 }
 
+TokenUsage parse_codex_usage(const nlohmann::json& u) {
+    TokenUsage usage;
+    if (!u.is_object()) return usage;
+    auto num = [](const nlohmann::json& obj, const char* key) {
+        auto it = obj.find(key);
+        return (it != obj.end() && it->is_number_integer())
+            ? std::max(0, it->get<int>()) : 0;
+    };
+    const int total_input  = num(u, "input_tokens");
+    const int total_output = num(u, "output_tokens");
+    int cached = 0, reasoning = 0;
+    if (auto d = u.find("input_tokens_details");
+            d != u.end() && d->is_object())
+        cached = std::min(num(*d, "cached_tokens"), total_input);
+    if (auto d = u.find("output_tokens_details");
+            d != u.end() && d->is_object())
+        reasoning = std::min(num(*d, "reasoning_tokens"), total_output);
+    usage.input      = total_input - cached;
+    usage.cache_read = cached;
+    usage.output     = total_output - reasoning;
+    usage.reasoning  = reasoning;
+    return usage;
+}
+
 std::vector<nlohmann::json> translate_to_responses_items(
     const std::vector<nlohmann::json>& src)
 {

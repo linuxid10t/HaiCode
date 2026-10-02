@@ -204,12 +204,18 @@ public:
 
                         if (d.contains("usage")) {
                             state.usage.output = d["usage"].value("output_tokens", 0);
+                            if (callbacks.on_usage)
+                                callbacks.on_usage(state.usage);
                         }
                     } else if (etype == "message_start") {
                         if (d.contains("message") && d["message"].contains("usage")) {
                             state.usage.input = d["message"]["usage"].value("input_tokens", 0);
                             state.usage.cache_read = d["message"]["usage"].value("cache_read_input_tokens", 0);
                             state.usage.cache_write = d["message"]["usage"].value("cache_creation_input_tokens", 0);
+                            // Input is billed from here on: report it now so
+                            // an interrupted stream is still priced.
+                            if (callbacks.on_usage)
+                                callbacks.on_usage(state.usage);
                         }
                     }
                 } catch (...) {}

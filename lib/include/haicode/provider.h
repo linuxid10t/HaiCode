@@ -79,6 +79,12 @@ struct StreamCallbacks {
     std::function<void(const nlohmann::json& item)> on_reasoning_item;
     std::function<void(const std::string& call_id, const std::string& name,
                        const std::string& input_delta)> on_tool_input_delta;
+    // Usage reported so far for the in-flight request (cumulative, same
+    // buckets as on_finish), for providers whose API reports usage before
+    // the stream ends (Anthropic: input/cache at message_start, output at
+    // message_delta). Lets the engine price a stream that is interrupted or
+    // fails before on_finish. Optional; on_finish stays authoritative.
+    std::function<void(const TokenUsage& so_far)> on_usage;
     std::function<void(FinishReason, TokenUsage, std::vector<ToolCall>)> on_finish;
     std::function<void(const std::string& error)> on_error;
 };

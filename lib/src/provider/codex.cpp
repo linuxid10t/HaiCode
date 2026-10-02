@@ -205,25 +205,8 @@ public:
                                || e == "response.incomplete") {
                         if (d.contains("response") && d["response"].is_object()) {
                             auto& r = d["response"];
-                            if (r.contains("usage") && r["usage"].is_object()) {
-                                auto& u = r["usage"];
-                                const int total_input =
-                                    std::max(0, u.value("input_tokens", 0));
-                                usage.output = u.value("output_tokens", 0);
-                                usage.cache_read = 0;
-                                usage.cache_write = 0;
-                                if (u.contains("input_tokens_details")
-                                        && u["input_tokens_details"].is_object())
-                                    usage.cache_read = std::clamp(
-                                        u["input_tokens_details"].value(
-                                            "cached_tokens", 0), 0, total_input);
-                                usage.input = total_input - usage.cache_read;
-                                if (u.contains("output_tokens_details")
-                                        && u["output_tokens_details"].is_object())
-                                    usage.reasoning =
-                                        u["output_tokens_details"].value(
-                                            "reasoning_tokens", 0);
-                            }
+                            if (r.contains("usage") && r["usage"].is_object())
+                                usage = parse_codex_usage(r["usage"]);
                             if (e == "response.incomplete")
                                 finish_reason = FinishReason::MaxTokens;
                         }

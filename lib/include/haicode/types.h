@@ -9,7 +9,10 @@
 namespace haicode {
 
 struct TokenUsage {
-    // Input buckets are disjoint: input excludes cache reads and writes.
+    // Buckets are disjoint and billed independently: input excludes cache
+    // reads and writes, and output EXCLUDES reasoning (providers whose API
+    // folds reasoning into its output count must subtract it, or the
+    // reasoning tokens are billed twice).
     int input = 0;
     int output = 0;
     int reasoning = 0;

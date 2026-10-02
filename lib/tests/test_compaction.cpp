@@ -516,6 +516,19 @@ static bool test_last_input_tokens_roundtrip() {
           "last_input_tokens = input+cache_read+cache_write of the LAST step");
     CHECK(si->tokens.input == 2200, "cumulative input still accumulates");
 
+    // A maintenance call (title / summary / image description) or an
+    // estimated partial step is billed but must not move the seed: a title
+    // request's tiny prompt would otherwise reset the reopened meter.
+    haicode::TokenUsage maint;
+    maint.input = 150; maint.output = 10;
+    store.update_cost(sess.id, 0.25, maint, /*sets_context=*/false);
+    si = store.get(sess.id);
+    CHECK(si->last_input_tokens == 4600,
+          "sets_context=false keeps the last conversation request's size");
+    CHECK(si->tokens.input == 2350 && si->tokens.output == 10
+          && si->cost > 0.2499 && si->cost < 0.2501,
+          "sets_context=false still accumulates cost and tokens");
+
     auto listed = store.list();
     bool found = false;
     for (auto& s : listed)

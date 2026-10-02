@@ -151,6 +151,36 @@ static bool test_translate_reasoning_order() {
     return true;
 }
 
+static bool test_usage_reasoning_not_double_billed() {
+    // Responses usage: input_tokens includes cached_tokens and output_tokens
+    // INCLUDES reasoning_tokens. compute_cost bills every bucket, so the
+    // reasoning share must be split out of output, not added on top.
+    json u = {
+        {"input_tokens", 10000},
+        {"input_tokens_details", {{"cached_tokens", 8000}}},
+        {"output_tokens", 1500},
+        {"output_tokens_details", {{"reasoning_tokens", 1200}}},
+    };
+    TokenUsage t = parse_codex_usage(u);
+    CHECK(t.input == 2000 && t.cache_read == 8000, "cached split from input");
+    CHECK(t.output == 300 && t.reasoning == 1200,
+          "reasoning split out of output");
+    CHECK(t.output + t.reasoning == 1500,
+          "billed output tokens = the API's output_tokens, exactly once");
+
+    TokenUsage bad = parse_codex_usage(json{
+        {"input_tokens", 10}, {"output_tokens", 5},
+        {"input_tokens_details", {{"cached_tokens", 99}}},
+        {"output_tokens_details", {{"reasoning_tokens", 99}}}});
+    CHECK(bad.input == 0 && bad.cache_read == 10
+          && bad.output == 0 && bad.reasoning == 5,
+          "inconsistent details are clamped, never negative");
+    CHECK(parse_codex_usage(json{{"output_tokens", 7}}).output == 7,
+          "missing details: plain output");
+    std::cout << "[OK] usage: reasoning billed once\n";
+    return true;
+}
+
 static SessionMessage row(const std::string& type, const std::string& data) {
     SessionMessage m;
     m.type = type;
@@ -216,6 +246,7 @@ int main() {
     ok = test_reasoning_item_sanitize() && ok;
     ok = test_translate_reasoning_order() && ok;
     ok = test_assemble_replay_gating() && ok;
+    ok = test_usage_reasoning_not_double_billed() && ok;
     if (!ok) return 1;
     std::cout << "All codex param tests passed\n";
     return 0;

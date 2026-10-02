@@ -2087,6 +2087,44 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         bool step_failed = false;
         std::string step_error;
 
+        // In-flight usage tracking. on_finish carries the authoritative
+        // usage; until it arrives (or when it never does — interrupt, or a
+        // failure mid-stream) the cost is estimated from what the provider
+        // reported so far plus the characters streamed. That estimate
+        // drives the live provisional cost and prices partial responses,
+        // which are billed by the provider even though they never finish.
+        TokenUsage reported_usage;   // latest on_usage report
+        bool usage_final = false;    // on_finish arrived
+        size_t streamed_chars = 0;   // text + reasoning + tool input
+        int est_request_tokens = -1; // lazily computed chars/4 estimate
+        auto progress_due = std::chrono::steady_clock::time_point{};
+        auto inflight_usage = [&]() {
+            if (est_request_tokens < 0)
+                est_request_tokens = estimate_request_tokens(
+                    req.system, req.system_dynamic, req.messages, req.tools);
+            return estimate_inflight_usage(reported_usage, streamed_chars,
+                                           est_request_tokens,
+                                           prev_total_input);
+        };
+        auto reset_attempt = [&]() {
+            reported_usage = TokenUsage{};
+            streamed_chars = 0;
+            est_request_tokens = -1;
+        };
+        // Throttled (2/s): each publish re-prices the estimate and posts a
+        // GUI message.
+        auto publish_progress = [&]() {
+            auto now = std::chrono::steady_clock::now();
+            if (now < progress_due) return;
+            progress_due = now + std::chrono::milliseconds(500);
+            nlohmann::json ev;
+            ev["session_id"] = session_id;
+            ev["provisional_cost_usd"] = compute_step_cost(
+                inflight_usage(), provider_id, provider->kind(), model_id,
+                config_.pricing);
+            bus_.publish(events::EventType::CostProgress, ev);
+        };
+
         StreamCallbacks cbs;
         cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
             full_text += delta;
@@ -2096,6 +2134,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ev["text_id"] = text_id;
             ev["delta"] = delta;
             bus_.publish(events::EventType::TextDelta, ev);
+            streamed_chars += delta.size();
+            publish_progress();
         };
         cbs.on_reasoning_delta = [&](const std::string& delta) {
             if (full_reasoning.empty()) {
@@ -2110,6 +2150,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ev["assistant_message_id"] = assistant_msg_id;
             ev["delta"] = delta;
             bus_.publish(events::EventType::ReasoningDelta, ev);
+            streamed_chars += delta.size();
+            publish_progress();
         };
         cbs.on_thinking_block = [&](const std::string& thinking,
                                     const std::string& signature) {
@@ -2123,14 +2165,22 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         };
         cbs.on_tool_input_delta = [&](const std::string& call_id,
                                        const std::string& name,
-                                       const std::string& /*delta*/) {
-            // Tool call streaming — we'll collect fully via on_finish
+                                       const std::string& delta) {
+            // Tool calls are collected fully via on_finish; only the
+            // streamed size matters here (cost estimate).
             (void)call_id; (void)name;
+            streamed_chars += delta.size();
+            publish_progress();
+        };
+        cbs.on_usage = [&](const TokenUsage& so_far) {
+            reported_usage = so_far;
+            publish_progress();
         };
         cbs.on_finish = [&](FinishReason reason, TokenUsage tok,
                              std::vector<ToolCall> calls) {
             finish_reason = reason;
             usage = tok;
+            usage_final = true;
             tool_calls = std::move(calls);
         };
         cbs.on_error = [&](const std::string& error) {
@@ -2172,6 +2222,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["model_id"] = model_id;
                 bus_.publish(events::EventType::StepStarted, ev);
             }
+            reset_attempt();
             provider->stream(req, cbs, run_token);
         }
 
@@ -2204,11 +2255,23 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     ev["model_id"] = model_id;
                     bus_.publish(events::EventType::StepStarted, ev);
                 }
+                reset_attempt();
                 provider->stream(req, cbs, run_token);
             }
         }
 
         if (step_failed) {
+            // A stream that failed after producing output was still billed
+            // (input plus what streamed); errors before any output are not
+            // counted — the request was rejected or never processed.
+            if (streamed_chars > 0) {
+                TokenUsage partial = inflight_usage();
+                record_usage(session_id,
+                             compute_step_cost(partial, provider_id,
+                                               provider->kind(), model_id,
+                                               config_.pricing),
+                             partial, /*sets_context=*/false);
+            }
             nlohmann::json ev;
             ev["session_id"] = session_id;
             ev["error"] = step_error;
@@ -2298,23 +2361,39 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // Compute per-turn cost from token usage and resolved pricing
         // (kind-aware fallback chain + long-context tiers). Unknown models
         // and local servers fall back to 0.0 — silent, no warning.
+        // No on_finish means the stream was interrupted. If it got far
+        // enough to be billed (the provider reported input, or output
+        // streamed), price the partial usage instead of recording nothing.
+        bool have_usage = usage_final;
+        if (!usage_final
+                && (streamed_chars > 0 || reported_usage.total_input() > 0)) {
+            usage = inflight_usage();
+            have_usage = true;
+        }
+        // Only a real report moves the context meter / compaction input.
+        const bool exact_context = usage_final
+                                || reported_usage.total_input() > 0;
         double step_cost = compute_step_cost(usage, provider_id,
                                              provider->kind(), model_id,
                                              config_.pricing);
 
-        // Update cost
-        store_.update_cost(session_id, step_cost, usage);
+        if (have_usage)
+            record_usage(session_id, step_cost, usage, exact_context);
 
         // Track the prompt size this step reported, for next iteration's
         // compaction decision. Cache reads/writes still occupy the window, so
         // the sum is the true prompt size.
-        prev_total_input = usage.total_input();
+        if (exact_context)
+            prev_total_input = usage.total_input();
 
         // Publish step ended
         {
             nlohmann::json ev;
             ev["session_id"] = session_id;
-            ev["context_tokens"] = usage.total_input();
+            // Absent when no provider report arrived (interrupted early):
+            // frontends keep their current meter instead of showing 0.
+            if (exact_context)
+                ev["context_tokens"] = usage.total_input();
             ev["assistant_message_id"] = assistant_msg_id;
             ev["finish_reason"] =
                 (finish_reason == FinishReason::ToolUse)    ? "tool_use"
@@ -2844,7 +2923,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
             double cost = compute_step_cost(tok, provider_id, provider.kind(),
                                             model_id, config_.pricing);
-            store_.update_cost(session_id, cost, tok);
+            record_usage(session_id, cost, tok, /*sets_context=*/false);
         };
         cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
         provider.stream(r, cbs, stream_token);
@@ -2965,6 +3044,22 @@ bool SessionEngine::compact_history(const std::string& session_id,
     return true;
 }
 
+void SessionEngine::record_usage(const std::string& session_id, double cost,
+                                 const TokenUsage& usage, bool sets_context) {
+    store_.update_cost(session_id, cost, usage, sets_context);
+    auto s = store_.get(session_id);
+    if (!s) return;  // deleted concurrently — nothing to show
+    nlohmann::json ev;
+    ev["session_id"]  = session_id;
+    ev["cost_usd"]    = s->cost;
+    ev["input"]       = s->tokens.input;
+    ev["output"]      = s->tokens.output;
+    ev["reasoning"]   = s->tokens.reasoning;
+    ev["cache_read"]  = s->tokens.cache_read;
+    ev["cache_write"] = s->tokens.cache_write;
+    bus_.publish(events::EventType::CostUpdated, ev);
+}
+
 void SessionEngine::refine_title_llm(const std::string& session_id,
                                       Provider& provider,
                                       const std::string& model_id,
@@ -3046,7 +3141,7 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
         double cost = compute_step_cost(tok, provider.id(), provider.kind(),
                                         model_id, config_.pricing);
-        store_.update_cost(session_id, cost, tok);
+        record_usage(session_id, cost, tok, /*sets_context=*/false);
     };
     cbs.on_error = [&](const std::string& error) {
         failed = true;
@@ -3226,7 +3321,7 @@ std::string SessionEngine::describe_image(Provider& provider,
         // Vision-fallback descriptions are billed to the session (Task 26).
         double cost = compute_step_cost(tok, provider_id, provider.kind(),
                                         model_id, config_.pricing);
-        store_.update_cost(session_id, cost, tok);
+        record_usage(session_id, cost, tok, /*sets_context=*/false);
     };
     cbs.on_error = [&](const std::string& error) {
         failed = true;

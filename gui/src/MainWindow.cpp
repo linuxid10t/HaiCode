@@ -7,6 +7,7 @@
 #include "AskUserWindow.h"
 
 #include <Application.h>
+#include <cmath>
 #include <Window.h>
 #include <View.h>
 #include <TextView.h>
@@ -851,6 +852,12 @@ MainWindow::MessageReceived(BMessage* msg)
             break;
         case MSG_STEP_ENDED:
             _HandleStepEnded(msg);
+            break;
+        case MSG_COST_UPDATED:
+            _HandleCostUpdated(msg);
+            break;
+        case MSG_COST_PROGRESS:
+            _HandleCostProgress(msg);
             break;
         case MSG_STEP_FAILED:
             _HandleStepFailed(msg);
@@ -1713,10 +1720,12 @@ MainWindow::_RestoreSessionTotals(const std::string& session_id)
     // next live StepEnded arrives.
     last_prompt_input_  = 0;
     last_prompt_output_ = 0;
+    provisional_cost_   = 0.0;
     auto si = store_.get(session_id);
     if (si) {
         session_input_total_      = si->tokens.input;
-        session_output_total_     = si->tokens.output;
+        // Generated tokens include reasoning (stored as a separate bucket).
+        session_output_total_     = si->tokens.output + si->tokens.reasoning;
         session_cost_             = si->cost;
     } else {
         session_input_total_      = 0;
@@ -1793,6 +1802,7 @@ MainWindow::_HandleStepStarted()
     engine_running_ = true;
     streaming_state_ = "thinking";
     current_tool_name_.clear();
+    provisional_cost_ = 0.0;  // new request (or retry): estimate restarts
     _UpdateStatusStrip();
 }
 
@@ -1832,6 +1842,7 @@ MainWindow::_HandlePromptQueued(BMessage* /*msg*/)
 void
 MainWindow::_HandleTurnEnded()
 {
+    provisional_cost_ = 0.0;
     // Authoritative idle signal from the engine's foreground runner: the
     // final step's results are persisted. Re-query the live queue: a prompt
     // that raced in takes over immediately (its StepStarted follows), so the
@@ -1860,13 +1871,12 @@ MainWindow::_HandleStepEnded(BMessage* msg)
     int32 in_tok = 0, out_tok = 0;
     msg->FindInt32("usage_input",  &in_tok);
     msg->FindInt32("usage_output", &out_tok);
-    double step_cost = 0.0;
-    msg->FindDouble("cost_usd", &step_cost);
     last_prompt_input_   += in_tok;
     last_prompt_output_  += out_tok;
-    session_input_total_ += in_tok;
-    session_output_total_+= out_tok;
-    session_cost_        += step_cost;
+    // Session totals and cost are NOT accumulated here: the engine
+    // publishes the persisted totals (MSG_COST_UPDATED) just before this
+    // message, which also covers maintenance calls StepEnded never sees.
+    provisional_cost_ = 0.0;
     int32 context_tokens = 0;
     if (msg->FindInt32("context_tokens", &context_tokens) == B_OK)
         current_context_tokens_ = context_tokens;
@@ -1889,9 +1899,38 @@ MainWindow::_HandleStepEnded(BMessage* msg)
 }
 
 void
+MainWindow::_HandleCostUpdated(BMessage* msg)
+{
+    double cost = 0.0;
+    int32 in_tok = 0, out_tok = 0;
+    if (msg->FindDouble("cost_usd", &cost) == B_OK)
+        session_cost_ = cost;
+    if (msg->FindInt32("input", &in_tok) == B_OK)
+        session_input_total_ = in_tok;
+    if (msg->FindInt32("output", &out_tok) == B_OK)
+        session_output_total_ = out_tok;
+    provisional_cost_ = 0.0;
+    _UpdateStatusStrip();
+}
+
+void
+MainWindow::_HandleCostProgress(BMessage* msg)
+{
+    double provisional = 0.0;
+    if (msg->FindDouble("provisional_cost_usd", &provisional) != B_OK)
+        return;
+    // The strip shows 4 decimals; skip redraws that wouldn't change it.
+    if (std::fabs(provisional - provisional_cost_) < 0.00005) return;
+    provisional_cost_ = provisional;
+    _UpdateStatusStrip();
+}
+
+void
 MainWindow::_HandleStepFailed(BMessage* msg)
 {
     chat_view_->EndStreaming();
+    // Any billable partial usage already arrived as MSG_COST_UPDATED.
+    provisional_cost_ = 0.0;
     engine_running_ = engine_ && engine_->is_running(active_session_id_);
     interrupt_btn_->SetEnabled(engine_running_);
     streaming_state_ = engine_running_ ? "thinking" : "idle";
@@ -1909,6 +1948,7 @@ void
 MainWindow::_HandleInterrupted()
 {
     chat_view_->EndStreaming();
+    provisional_cost_ = 0.0;
     engine_running_ = engine_ && engine_->is_running(active_session_id_);
     interrupt_btn_->SetEnabled(engine_running_);
     streaming_state_ = engine_running_ ? "thinking" : "idle";
@@ -2878,13 +2918,18 @@ MainWindow::_UpdateStatusStrip()
     std::string s = badge + " " + glyph + " " + label;
 
     // Token + context strip (only if we have data)
-    if (last_prompt_input_ > 0 || last_prompt_output_ > 0 || session_input_total_ > 0) {
+    if (last_prompt_input_ > 0 || last_prompt_output_ > 0 || session_input_total_ > 0
+            || provisional_cost_ > 0.0) {
         s += "   last turn: \xe2\x86\x91" + format_tokens(last_prompt_input_)
            + " \xe2\x86\x93" + format_tokens(last_prompt_output_)
            + "   session: \xe2\x86\x91" + format_tokens(session_input_total_)
            + " \xe2\x86\x93" + format_tokens(session_output_total_);
-        if (session_cost_ > 0.0)
-            s += "  " + format_cost(session_cost_);
+        // While a request streams its estimated cost rides on top of the
+        // persisted total, marked "~" until the real usage replaces it.
+        const double shown_cost = session_cost_ + provisional_cost_;
+        if (shown_cost > 0.0)
+            s += "  " + std::string(provisional_cost_ > 0.0 ? "~" : "")
+               + format_cost(shown_cost);
     }
     if (current_context_tokens_ > 0) {
         s += "   context: " + format_tokens(current_context_tokens_);

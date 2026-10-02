@@ -292,25 +292,28 @@ bool SessionStore::update_title_if_current(const std::string& session_id,
 }
 
 void SessionStore::update_cost(const std::string& session_id, double cost,
-                                const TokenUsage& tokens) {
+                                const TokenUsage& tokens, bool sets_context) {
     std::lock_guard<std::mutex> lock(conn_mu_);
+    // tok_last_input=COALESCE(?, tok_last_input): a NULL bind keeps the
+    // current seed (maintenance calls / estimates must not move it).
     DbStmt stmt(db_.handle(),
         "UPDATE session SET cost=cost+?, tok_input=tok_input+?, tok_output=tok_output+?,"
         " tok_reasoning=tok_reasoning+?, tok_cache_read=tok_cache_read+?,"
         " tok_cache_write=tok_cache_write+?,"
-        " tok_last_input=?, time_updated=? WHERE id=?");
+        " tok_last_input=COALESCE(?, tok_last_input), time_updated=? WHERE id=?");
     stmt.bind(1, cost)
         .bind(2, tokens.input)
         .bind(3, tokens.output)
         .bind(4, tokens.reasoning)
         .bind(5, tokens.cache_read)
         .bind(6, tokens.cache_write)
-        // Per-request input size (not cumulative) — seeds the context meter on
-        // session reopen. Matches the engine's prev_total_input arithmetic.
-        .bind(7, tokens.total_input())
         .bind(8, util::now_ms())
-        .bind(9, session_id)
-        .expect_done();
+        .bind(9, session_id);
+    // Per-request input size (not cumulative) — seeds the context meter on
+    // session reopen. Matches the engine's prev_total_input arithmetic.
+    if (sets_context) stmt.bind(7, tokens.total_input());
+    else              stmt.bind_null(7);
+    stmt.expect_done();
 }
 
 void SessionStore::update_last_input_tokens(const std::string& session_id,

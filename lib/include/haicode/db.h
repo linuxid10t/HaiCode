@@ -76,6 +76,11 @@ public:
             throw DbError(std::string("bind(double) failed: ") + errmsg());
         return *this;
     }
+    DbStmt& bind_null(int idx) {
+        if (sqlite3_bind_null(stmt_, idx) != SQLITE_OK)
+            throw DbError(std::string("bind(null) failed: ") + errmsg());
+        return *this;
+    }
 
     // NULL columns read as empty/zero, matching the old column helpers.
     std::string text(int col) {
@@ -216,7 +221,13 @@ public:
                                  const std::string& title,
                                  const std::string& baseline);
     void update_directory(const std::string& session_id, const std::string& directory);
-    void update_cost(const std::string& session_id, double cost, const TokenUsage& tokens);
+    // Adds a request's cost and token buckets to the session totals. When
+    // `sets_context` is true (a real conversation request with reported
+    // usage) tok_last_input becomes this request's prompt size; maintenance
+    // calls (title, summary, image description) and estimated partial usage
+    // pass false so they never overwrite the context-meter seed.
+    void update_cost(const std::string& session_id, double cost, const TokenUsage& tokens,
+                     bool sets_context = true);
     // Overwrite just the per-request input seed (tok_last_input) — used after
     // compaction, where no provider report will arrive until the next step.
     void update_last_input_tokens(const std::string& session_id, int tokens);

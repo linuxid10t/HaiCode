@@ -26,6 +26,12 @@ bool codex_model_reasons(const std::string& model_id);
 // the item is not a reasoning item or carries no encrypted_content.
 nlohmann::json codex_reasoning_item_for_replay(const nlohmann::json& item);
 
+// Reads a Responses-API usage object into disjoint TokenUsage buckets.
+// The API's input_tokens includes cached_tokens and its output_tokens
+// INCLUDES reasoning_tokens; both are split out here so compute_cost
+// (which bills every bucket) charges each token exactly once.
+TokenUsage parse_codex_usage(const nlohmann::json& u);
+
 // Translates the engine's Anthropic-shaped context into Responses-API input
 // items (see codex.cpp header comment for the mapping).
 std::vector<nlohmann::json> translate_to_responses_items(

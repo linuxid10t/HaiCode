@@ -88,6 +88,8 @@ private:
     void _HandlePromptQueued(BMessage* msg);
     void _HandleTurnEnded();
     void _HandleStepEnded(BMessage* msg);
+    void _HandleCostUpdated(BMessage* msg);
+    void _HandleCostProgress(BMessage* msg);
     void _HandleStepFailed(BMessage* msg);
     void _HandleInterrupted();
     void _HandlePermissionReq(BMessage* msg);
@@ -290,5 +292,8 @@ private:
     int            session_output_total_  = 0;
     int            current_context_tokens_ = 0;
     int            max_context_           = 0;
-    double         session_cost_          = 0.0;
+    double         session_cost_          = 0.0;  // persisted total (MSG_COST_UPDATED)
+    // Estimated cost of the request currently streaming; shown on top of
+    // session_cost_ with a "~" until the next MSG_COST_UPDATED replaces it.
+    double         provisional_cost_      = 0.0;
 };
