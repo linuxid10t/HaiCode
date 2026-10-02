@@ -59,6 +59,11 @@ struct LLMResponse {
 struct StreamCallbacks {
     std::function<void(const std::string& text_id, const std::string& delta)> on_text_delta;
     std::function<void(const std::string& delta)> on_reasoning_delta;
+    // Complete Anthropic thinking block (summarized thinking text + its
+    // encrypted signature). Emitted once per finished thinking block, in
+    // order. The signature must be passed back unchanged when the block is
+    // replayed in later turns of a tool loop.
+    std::function<void(const std::string& thinking, const std::string& signature)> on_thinking_block;
     std::function<void(const std::string& call_id, const std::string& name,
                        const std::string& input_delta)> on_tool_input_delta;
     std::function<void(FinishReason, TokenUsage, std::vector<ToolCall>)> on_finish;

@@ -360,7 +360,10 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     inf_effort_menu_ = new BPopUpMenu("effort");
     inf_effort_menu_->SetRadioMode(true);
     inf_effort_menu_->SetLabelFromMarked(true);
-    for (const char* lbl : {"Default", "Off", "Minimal", "Low", "Medium",
+    // "Minimal" is not an Anthropic effort level (and OpenAI treats "off"
+    // per-model), so the menu offers the shared off/low..max set; stored
+    // sessions carrying "minimal" map to "low" at the provider boundary.
+    for (const char* lbl : {"Default", "Off", "Low", "Medium",
                             "High", "XHigh", "Max"}) {
         auto* it = new BMenuItem(lbl, new BMessage(MSG_REASONING_SELECTED));
         inf_effort_menu_->AddItem(it);
@@ -2674,7 +2677,6 @@ MainWindow::_SelectedReasoningEffort() const
     if (!marked) return "";
     std::string label = marked->Label();
     if (label == "Off")     return "off";
-    if (label == "Minimal") return "minimal";
     if (label == "Low")     return "low";
     if (label == "Medium")  return "medium";
     if (label == "High")    return "high";
@@ -2789,7 +2791,7 @@ MainWindow::_RestoreInferenceFrom(const haicode::InferenceParams& p)
     if (inf_effort_menu_) {
         const char* pick = "Default";
         if      (p.reasoning_effort == "off")     pick = "Off";
-        else if (p.reasoning_effort == "minimal") pick = "Minimal";
+        else if (p.reasoning_effort == "minimal") pick = "Low";  // menu has no Minimal; provider maps it to low
         else if (p.reasoning_effort == "low")     pick = "Low";
         else if (p.reasoning_effort == "medium")  pick = "Medium";
         else if (p.reasoning_effort == "high")    pick = "High";

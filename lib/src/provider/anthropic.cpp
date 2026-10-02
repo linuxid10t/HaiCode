@@ -1,5 +1,6 @@
 #include <haicode/provider.h>
 #include <haicode/util.h>
+#include <haicode/anthropic_params.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <sstream>
@@ -49,94 +50,10 @@ public:
             }
         } pop{this, stream_token, flag};
 
-        nlohmann::json body;
-        body["model"] = request.model_id;
-        // Anthropic's API has no omit-and-default for this field.
-        body["max_tokens"] = request.max_tokens.value_or(kDefaultMaxTokens);
-        body["stream"] = true;
-        if (request.temperature)
-            body["temperature"] = *request.temperature;
-        if (request.top_p)
-            body["top_p"] = *request.top_p;
-
-        // Reasoning effort → output_config.effort (adaptive thinking, Claude
-        // 4.6+). "off" must be sent explicitly — omitting the param falls back
-        // to the model default (thinking enabled), so "off" would not actually
-        // disable thinking. "minimal" is not an Anthropic effort level; we let
-        // it fall through (unset) to the model default like empty.
-        if (request.reasoning_effort == "off"
-            || request.reasoning_effort == "low"
-            || request.reasoning_effort == "medium"
-            || request.reasoning_effort == "high"
-            || request.reasoning_effort == "xhigh"
-            || request.reasoning_effort == "max") {
-            body["output_config"] = {{"effort", request.reasoning_effort}};
-        }
-
-        // System — split into a stable cached block + an uncached dynamic
-        // tail ({{STEPS_LEFT}}). The stable block carries cache_control so
-        // Anthropic can prefix-cache it across turns.
-        if (!request.system.empty()) {
-            nlohmann::json arr = nlohmann::json::array();
-            nlohmann::json stable_block;
-            stable_block["type"] = "text";
-            stable_block["text"] = request.system;
-            stable_block["cache_control"] = {{"type", "ephemeral"}};
-            arr.push_back(stable_block);
-            if (!request.system_dynamic.empty()) {
-                arr.push_back({{"type", "text"}, {"text", request.system_dynamic}});
-            }
-            body["system"] = arr;
-        }
-
-        // Messages — verbatim from the engine. cache_control on the last
-        // block of the second-to-last message is added in a post-pass
-        // below, so the conversation prefix (everything except the most
-        // recent turn) hits the cache.
-        body["messages"] = request.messages;
-
-        // Tools — cache_control on the last entry. Stable across turns.
-        if (!request.tools.empty()) {
-            nlohmann::json tools_arr = nlohmann::json::array();
-            for (auto& t : request.tools) {
-                nlohmann::json tool;
-                tool["name"] = t.name;
-                tool["description"] = t.description;
-                tool["input_schema"] = t.input_schema;
-                tools_arr.push_back(tool);
-            }
-            tools_arr.back()["cache_control"] = {{"type", "ephemeral"}};
-            body["tools"] = tools_arr;
-        }
-
-        // Conversation-prefix cache breakpoint. Mark the last block of the
-        // second-to-last message so everything older than the current turn
-        // is cached. Requires the message to expose a content array; if the
-        // message's content is a plain string, promote it to a one-element
-        // text-block array. Skip on messages that can't be normalized.
-        auto& msgs = body["messages"];
-        if (msgs.is_array() && msgs.size() >= 2) {
-            auto& target = msgs[msgs.size() - 2];
-            if (target.is_object() && target.contains("content")) {
-                auto& content = target["content"];
-                if (content.is_string()) {
-                    std::string s = content.get<std::string>();
-                    content = nlohmann::json::array({
-                        {{"type", "text"}, {"text", s}}
-                    });
-                }
-                if (content.is_array() && !content.empty()) {
-                    content.back()["cache_control"] = {{"type", "ephemeral"}};
-                }
-            }
-        }
-
-        std::map<std::string, std::string> headers = {
-            {"x-api-key", api_key_},
-            {"anthropic-version", "2023-06-01"},
-            {"content-type", "application/json"},
-            {"accept", "text/event-stream"}
-        };
+        // Body construction lives in build_anthropic_body() (pure, testable):
+        // capability-mapped effort, adaptive thinking config, sampling-param
+        // gating, cache breakpoints.
+        nlohmann::json body = build_anthropic_body(request);
 
         // SSE parse state
         struct ParseState {
@@ -146,6 +63,7 @@ public:
             std::string accumulated_tool_input;
             std::string current_text_id;
             int current_block_index = -1;
+            ThinkingBlockAcc current_thinking;
             std::vector<ToolCall> tool_calls;
             FinishReason finish_reason = FinishReason::EndTurn;
             TokenUsage usage;
@@ -159,6 +77,13 @@ public:
         std::string body_str = body.dump(-1, ' ', false,
             nlohmann::json::error_handler_t::replace);
         bool error_occurred = false;
+
+        std::map<std::string, std::string> headers = {
+            {"x-api-key", api_key_},
+            {"anthropic-version", "2023-06-01"},
+            {"content-type", "application/json"},
+            {"accept", "text/event-stream"}
+        };
 
         long code = 0;
         std::string transport_err;
@@ -195,6 +120,8 @@ public:
                             state.current_tool_call_id = block.value("id", "");
                             state.current_tool_name = block.value("name", "");
                             state.accumulated_tool_input.clear();
+                        } else if (btype == "thinking") {
+                            state.current_thinking = ThinkingBlockAcc{};
                         }
                     } else if (etype == "content_block_delta") {
                         auto& delta = d["delta"];
@@ -212,12 +139,29 @@ public:
                                     state.current_tool_call_id,
                                     state.current_tool_name,
                                     partial);
-                        } else if (dtype == "thinking_delta") {
+                        } else if (dtype == "thinking_delta"
+                                   || dtype == "signature_delta") {
+                            // Signature fragments must accumulate alongside the
+                            // thinking text: the (thinking, signature) pair is
+                            // replayed verbatim in later tool-loop turns.
+                            state.current_thinking.apply_delta(delta);
                             std::string text = delta.value("thinking", "");
-                            if (!text.empty() && callbacks.on_reasoning_delta)
+                            if (dtype == "thinking_delta"
+                                    && !text.empty()
+                                    && callbacks.on_reasoning_delta)
                                 callbacks.on_reasoning_delta(text);
                         }
                     } else if (etype == "content_block_stop") {
+                        if (state.current_block_type == "thinking") {
+                            // Deliver even with empty thinking text: signature-
+                            // only blocks (display:"omitted") must still round-
+                            // trip in tool loops.
+                            if (callbacks.on_thinking_block)
+                                callbacks.on_thinking_block(
+                                    state.current_thinking.thinking,
+                                    state.current_thinking.signature);
+                            state.current_thinking = ThinkingBlockAcc{};
+                        }
                         if (state.current_block_type == "tool_use") {
                             ToolCall tc;
                             tc.id = state.current_tool_call_id;

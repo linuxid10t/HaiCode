@@ -473,13 +473,30 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 nlohmann::json m;
                 m["role"] = "assistant";
                 std::string text = data.value("text", "");
+                // Signed thinking blocks recorded on this row replay verbatim
+                // and ahead of everything else — Anthropic requires them first
+                // in the assistant content array when continuing a tool loop.
+                nlohmann::json thinking_pre;
+                if (data.contains("thinking_blocks")
+                        && data["thinking_blocks"].is_array()) {
+                    for (auto& tb : data["thinking_blocks"]) {
+                        if (!tb.is_object()) continue;
+                        thinking_pre.push_back({
+                            {"type",      "thinking"},
+                            {"thinking",  tb.value("thinking", "")},
+                            {"signature", tb.value("signature", "")}
+                        });
+                    }
+                }
                 bool has_tools = data.contains("tool_calls")
                               && data["tool_calls"].is_array()
                               && !data["tool_calls"].empty();
                 if (has_tools) {
-                    // Build Anthropic-style content array: text + tool_use
-                    // blocks. OpenAI's translate_messages() converts on the fly.
+                    // Build Anthropic-style content array: thinking + text +
+                    // tool_use blocks. OpenAI's translate_messages() converts
+                    // (and drops thinking) on the fly.
                     nlohmann::json content = nlohmann::json::array();
+                    for (auto& tb : thinking_pre) content.push_back(tb);
                     if (!text.empty())
                         content.push_back({{"type","text"},{"text",text}});
                     for (auto& tc : data["tool_calls"]) {
@@ -2023,6 +2040,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         std::string full_reasoning;
         std::string text_id = haicode::util::make_id("txt");
         std::vector<ToolCall> tool_calls;
+        // Finished thinking blocks (thinking text + encrypted signature) in
+        // arrival order; persisted on the assistant row so later tool-loop
+        // turns replay them verbatim.
+        nlohmann::json thinking_blocks = nlohmann::json::array();
         FinishReason finish_reason = FinishReason::EndTurn;
         TokenUsage usage;
         bool step_failed = false;
@@ -2051,6 +2072,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ev["assistant_message_id"] = assistant_msg_id;
             ev["delta"] = delta;
             bus_.publish(events::EventType::ReasoningDelta, ev);
+        };
+        cbs.on_thinking_block = [&](const std::string& thinking,
+                                    const std::string& signature) {
+            thinking_blocks.push_back({
+                {"thinking", thinking},
+                {"signature", signature}
+            });
         };
         cbs.on_tool_input_delta = [&](const std::string& call_id,
                                        const std::string& name,
@@ -2222,6 +2250,11 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             data["text"] = full_text;
             if (!full_reasoning.empty())
                 data["reasoning"] = full_reasoning;
+            // Signed thinking blocks ride on the row for verbatim replay in
+            // later tool-loop turns; `reasoning` above stays as the
+            // transcript-facing text.
+            if (!thinking_blocks.empty())
+                data["thinking_blocks"] = thinking_blocks;
             if (!tool_calls.empty()) {
                 auto calls_arr = nlohmann::json::array();
                 for (auto& tc : tool_calls)
