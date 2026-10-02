@@ -1,9 +1,11 @@
 #include <haicode/provider.h>
 #include <haicode/util.h>
 #include <haicode/codex_auth.h>
+#include <haicode/codex_params.h>
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -25,137 +27,17 @@ namespace haicode {
 //            OpenAI-Beta: responses=experimental
 //   body:    instructions / input items / flat tools / stream:true
 //
-// Message translation mirrors translate_messages() in openai.cpp (same
-// Anthropic-shaped context input) but emits Responses-API items:
+// Message translation (translate_to_responses_items in codex_params.cpp)
+// mirrors translate_messages() in openai.cpp (same Anthropic-shaped context
+// input) but emits Responses-API items:
 //   user text      → {role:"user", content: string | [input_text,input_image]}
 //   assistant text → {role:"assistant", content: string}
 //   tool_use       → {type:"function_call", call_id, name, arguments}
 //   tool_result    → {type:"function_call_output", call_id, output}
-//   thinking       → dropped (we never stored encrypted reasoning content)
+//   openai_reasoning → {type:"reasoning", summary, encrypted_content}
+//                    (captured from this backend's output, replayed as-is)
+//   thinking       → dropped (Anthropic signatures mean nothing here)
 // ---------------------------------------------------------------------------
-
-static std::vector<nlohmann::json> translate_to_responses_items(
-    const std::vector<nlohmann::json>& src)
-{
-    std::vector<nlohmann::json> out;
-
-    for (auto& m : src) {
-        std::string role = m.value("role", "");
-        if (!m.contains("content")) continue;
-        auto& content = m["content"];
-
-        if (role == "assistant") {
-            if (content.is_string()) {
-                std::string text = content.get<std::string>();
-                if (!text.empty())
-                    out.push_back({{"role", "assistant"}, {"content", text}});
-                continue;
-            }
-            if (!content.is_array()) continue;
-            // Text preamble first (the common shape), then one function_call
-            // item per tool_use block. Thinking blocks are dropped: we don't
-            // keep the encrypted reasoning content the API would need to
-            // continue a reasoning chain across turns.
-            std::string text_acc;
-            std::vector<nlohmann::json> calls;
-            for (auto& block : content) {
-                std::string btype = block.value("type", "");
-                if (btype == "text") {
-                    text_acc += block.value("text", "");
-                } else if (btype == "tool_use") {
-                    nlohmann::json item;
-                    item["type"]      = "function_call";
-                    item["call_id"]   = block.value("id", "");
-                    item["name"]      = block.value("name", "");
-                    item["arguments"] = block.contains("input")
-                        ? block["input"].dump() : "{}";
-                    calls.push_back(item);
-                } else if (btype != "thinking") {
-                    fprintf(stderr, "codex: dropping unknown assistant "
-                            "content block type '%s'\n", btype.c_str());
-                }
-            }
-            if (!text_acc.empty())
-                out.push_back({{"role", "assistant"}, {"content", text_acc}});
-            for (auto& c : calls) out.push_back(c);
-            continue;
-        }
-
-        // User (or tool-result-carrying) messages.
-        if (content.is_string()) {
-            out.push_back({{"role", "user"}, {"content", content}});
-            continue;
-        }
-        if (!content.is_array()) continue;
-
-        // function_call_output items must directly follow their calls, so
-        // they are emitted before the user text/images follow-up.
-        std::vector<nlohmann::json> outputs;
-        std::string user_text;
-        nlohmann::json image_parts = nlohmann::json::array();
-        auto harvest_image = [&image_parts](const nlohmann::json& block) {
-            auto src_it = block.find("source");
-            if (src_it == block.end() || !src_it->is_object()) {
-                fprintf(stderr, "codex: image block without source object, "
-                        "dropping\n");
-                return;
-            }
-            image_parts.push_back({
-                {"type", "input_image"},
-                {"image_url", "data:" + src_it->value("media_type", "image/png")
-                              + ";base64," + src_it->value("data", "")}
-            });
-        };
-        for (auto& block : content) {
-            std::string btype = block.value("type", "");
-            if (btype == "tool_result") {
-                std::string output_text;
-                auto& bc = block["content"];
-                if (bc.is_string()) {
-                    output_text = bc.get<std::string>();
-                } else if (bc.is_array()) {
-                    for (auto& sub : bc) {
-                        if (sub.is_string())
-                            output_text += sub.get<std::string>();
-                        else if (sub.value("type", "") == "text")
-                            output_text += sub.value("text", "");
-                        else if (sub.value("type", "") == "image")
-                            harvest_image(sub);
-                        else
-                            fprintf(stderr, "codex: dropping unsupported "
-                                    "tool_result content block type '%s'\n",
-                                    sub.value("type", "(none)").c_str());
-                    }
-                }
-                nlohmann::json item;
-                item["type"]    = "function_call_output";
-                item["call_id"] = block.value("tool_use_id", "");
-                item["output"]  = output_text;
-                outputs.push_back(item);
-            } else if (btype == "text") {
-                if (!user_text.empty()) user_text += "\n";
-                user_text += block.value("text", "");
-            } else if (btype == "image") {
-                harvest_image(block);
-            } else {
-                fprintf(stderr, "codex: dropping unknown user content block "
-                        "type '%s'\n", btype.c_str());
-            }
-        }
-        for (auto& o : outputs) out.push_back(o);
-        if (!image_parts.empty()) {
-            // Mixed content must stay an array (text + input_image parts).
-            nlohmann::json uc = nlohmann::json::array();
-            if (!user_text.empty())
-                uc.push_back({{"type", "input_text"}, {"text", user_text}});
-            for (auto& ip : image_parts) uc.push_back(ip);
-            out.push_back({{"role", "user"}, {"content", uc}});
-        } else if (!user_text.empty()) {
-            out.push_back({{"role", "user"}, {"content", user_text}});
-        }
-    }
-    return out;
-}
 
 class CodexProvider : public Provider {
 public:
@@ -170,6 +52,7 @@ public:
 
     std::string id() const override { return id_; }
     std::string kind() const override { return "chatgpt"; }
+    bool replays_reasoning_items() const override { return true; }
 
     void stream(const LLMRequest& request, StreamCallbacks callbacks,
                 const std::string& stream_token = "") override {
@@ -194,49 +77,8 @@ public:
             }
         } pop{this, stream_token, flag};
 
-        // ---- Build request body ----
-        nlohmann::json body;
-        body["model"]  = request.model_id;
-        body["stream"] = true;
-        // Codex sends store:false — conversation history lives client-side.
-        body["store"] = false;
-
-        // Instructions = stable system prompt (+ dynamic tail appended, so
-        // the cacheable prefix stays byte-identical across steps).
-        std::string instructions = request.system;
-        if (!request.system_dynamic.empty()) {
-            if (!instructions.empty()) instructions += "\n\n";
-            instructions += request.system_dynamic;
-        }
-        if (!instructions.empty())
-            body["instructions"] = instructions;
-
-        if (request.max_tokens)
-            body["max_output_tokens"] = *request.max_tokens;
-        // Temperature is ignored by this backend (verified by third-party
-        // contract docs); omit rather than send a field it may reject.
-
-        // "off" is not a valid Responses effort value — omit entirely.
-        if (!request.reasoning_effort.empty()
-                && request.reasoning_effort != "off")
-            body["reasoning"] = {{"effort", request.reasoning_effort}};
-
-        body["input"] = translate_to_responses_items(request.messages);
-
-        if (!request.tools.empty()) {
-            nlohmann::json tools_arr = nlohmann::json::array();
-            for (auto& t : request.tools) {
-                tools_arr.push_back({
-                    {"type", "function"},
-                    {"name", t.name},
-                    {"description", t.description},
-                    {"parameters", t.input_schema},
-                });
-            }
-            body["tools"] = tools_arr;
-            body["tool_choice"] = "auto";
-            body["parallel_tool_calls"] = true;
-        }
+        // ---- Build request body (cache layout: see codex_params.h) ----
+        const nlohmann::json body = build_codex_body(request);
 
         // replace handler: see anthropic.cpp — degrade, never throw, on any
         // stray invalid UTF-8 byte.
@@ -262,6 +104,9 @@ public:
         // 401-rejected attempt produced no usable partial output.
         std::map<std::string, ToolCallState> item_tool;
         std::vector<std::string> item_order;
+        // Replayable reasoning items, delivered just before on_finish so a
+        // failed or interrupted attempt never reports partial reasoning.
+        std::vector<nlohmann::json> reasoning_items;
 
         // One forced refresh-and-retry on 401 (token revoked/expired server
         // side between our skew refresh and this request).
@@ -285,6 +130,7 @@ public:
 
             item_tool.clear();
             item_order.clear();
+            reasoning_items.clear();
             code = 0;
             transport_err.clear();
 
@@ -309,7 +155,16 @@ public:
                                || e == "response.output_item.done") {
                         if (d.contains("item") && d["item"].is_object()) {
                             auto& item = d["item"];
-                            if (item.value("type", "") == "function_call") {
+                            if (e == "response.output_item.done"
+                                    && item.value("type", "") == "reasoning") {
+                                // Finished reasoning item: hand the
+                                // replayable form to the engine so the next
+                                // step can continue the chain (store:false
+                                // keeps nothing server-side).
+                                auto r = codex_reasoning_item_for_replay(item);
+                                if (!r.is_null())
+                                    reasoning_items.push_back(std::move(r));
+                            } else if (item.value("type", "") == "function_call") {
                                 std::string item_id = item.value("id", "");
                                 auto ins = item_tool.emplace(item_id,
                                                              ToolCallState{});
@@ -454,6 +309,8 @@ public:
             finish_reason = any_tool_calls ? FinishReason::ToolUse
                                            : FinishReason::EndTurn;
 
+        if (callbacks.on_reasoning_item)
+            for (auto& r : reasoning_items) callbacks.on_reasoning_item(r);
         if (callbacks.on_finish)
             callbacks.on_finish(finish_reason, usage, tool_calls);
     }
@@ -478,6 +335,45 @@ public:
     }
 
     std::vector<std::string> list_models(std::string& error) override {
+        return fetch_catalog(error, 60);
+    }
+
+    // The context meter and auto-compaction need the catalog's per-model
+    // window. list_models() only runs when the GUI fetches this provider's
+    // models — not after a Settings save recreates the provider while it
+    // isn't the default — and the prefix-table fallback can overstate the
+    // backend's window several-fold, which effectively disables
+    // auto-compaction (every step then resends the whole, growing history).
+    // So a cache miss loads the catalog here, once, with a short timeout and
+    // a backoff after failures.
+    int get_model_context(const std::string& model_id) const override {
+        if (int ctx = peek_model_context(model_id); ctx > 0) return ctx;
+        std::lock_guard<std::mutex> fetch_lock(catalog_fetch_mu_);
+        if (int ctx = peek_model_context(model_id); ctx > 0) return ctx;
+        if (catalog_loaded_) return 0;  // model genuinely absent
+        auto now = std::chrono::steady_clock::now();
+        if (catalog_attempted_
+                && now - last_catalog_attempt_ < std::chrono::minutes(5))
+            return 0;
+        catalog_attempted_ = true;
+        last_catalog_attempt_ = now;
+        std::string err;
+        fetch_catalog(err, 15);
+        if (!err.empty())
+            fprintf(stderr, "[codex] context discovery failed: %s\n",
+                    err.c_str());
+        return peek_model_context(model_id);
+    }
+
+    int peek_model_context(const std::string& model_id) const override {
+        std::lock_guard<std::mutex> lock(context_cache_mu_);
+        auto it = context_cache_.find(model_id);
+        return it != context_cache_.end() ? it->second : 0;
+    }
+
+private:
+    std::vector<std::string> fetch_catalog(std::string& error,
+                                           long timeout_s) const {
         error.clear();
         std::vector<std::string> result;
         std::string token, account_id, auth_err;
@@ -492,7 +388,7 @@ public:
         if (!account_id.empty())
             headers["chatgpt-account-id"] = account_id;
         long code = 0;
-        std::string body = http_.get(models_url(), headers, 60, &code);
+        std::string body = http_.get(models_url(), headers, timeout_s, &code);
         if (code == 401) {
             // Maybe the token aged out between get_access and this GET.
             std::string refresh_err;
@@ -505,7 +401,7 @@ public:
                 if (!account_id.empty())
                     headers["chatgpt-account-id"] = account_id;
                 code = 0;
-                body = http_.get(models_url(), headers, 60, &code);
+                body = http_.get(models_url(), headers, timeout_s, &code);
             }
         }
         if (code == -1) {
@@ -557,22 +453,10 @@ public:
                 result.push_back(mid);
             }
         }
+        catalog_loaded_ = true;
         return result;
     }
 
-    int get_model_context(const std::string& model_id) const override {
-        std::lock_guard<std::mutex> lock(context_cache_mu_);
-        auto it = context_cache_.find(model_id);
-        return it != context_cache_.end() ? it->second : 0;
-    }
-
-    int peek_model_context(const std::string& model_id) const override {
-        std::lock_guard<std::mutex> lock(context_cache_mu_);
-        auto it = context_cache_.find(model_id);
-        return it != context_cache_.end() ? it->second : 0;
-    }
-
-private:
     std::string base_url_;
     std::string id_;
     mutable HttpClient http_;
@@ -584,6 +468,13 @@ private:
     // window), so the cache is mutex-guarded.
     mutable std::mutex context_cache_mu_;
     mutable std::map<std::string, int> context_cache_;
+    // Lazy catalog load state for get_model_context (guarded by
+    // catalog_fetch_mu_, except catalog_loaded_ which list_models may set
+    // from another thread).
+    mutable std::mutex catalog_fetch_mu_;
+    mutable std::atomic<bool> catalog_loaded_{false};
+    mutable bool catalog_attempted_ = false;
+    mutable std::chrono::steady_clock::time_point last_catalog_attempt_;
 
     // The models endpoint rejects requests without a client_version query
     // (FastAPI "Field required" — HTTP 400).

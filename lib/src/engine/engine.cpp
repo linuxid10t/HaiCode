@@ -7,6 +7,7 @@
 #include <haicode/provider_error.h>
 #include <haicode/compaction.h>
 #include <haicode/skills.h>
+#include <haicode/codex_params.h>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <thread>
@@ -489,6 +490,26 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                         });
                     }
                 }
+                // Provider-native reasoning items (ChatGPT/Codex encrypted
+                // reasoning) replay only to a provider that asked for them,
+                // and only for the model that produced them — encrypted
+                // content is not portable across models. Replayed on every
+                // row (not just the current turn) so the request prefix stays
+                // byte-stable across turns for the prompt cache.
+                if (!replay_reasoning_model.empty()
+                        && data.contains("reasoning_items")
+                        && data["reasoning_items"].is_array()) {
+                    for (auto& ri : data["reasoning_items"]) {
+                        if (!ri.is_object()
+                                || ri.value("model", "") != replay_reasoning_model
+                                || !ri.contains("item"))
+                            continue;
+                        thinking_pre.push_back({
+                            {"type", kOpenAIReasoningBlock},
+                            {"item", ri["item"]}
+                        });
+                    }
+                }
                 bool has_tools = data.contains("tool_calls")
                               && data["tool_calls"].is_array()
                               && !data["tool_calls"].empty();
@@ -509,6 +530,18 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                                                                : nlohmann::json::object();
                         content.push_back(block);
                     }
+                    m["content"] = content;
+                } else if (!replay_reasoning_model.empty()
+                           && !thinking_pre.empty()) {
+                    // Text-only row carrying replayable reasoning (only
+                    // reachable for a replaying provider). Anthropic thinking
+                    // blocks stay dropped on text-only rows, as before.
+                    nlohmann::json content = nlohmann::json::array();
+                    for (auto& tb : thinking_pre)
+                        if (tb.value("type", "") == kOpenAIReasoningBlock)
+                            content.push_back(tb);
+                    if (!text.empty())
+                        content.push_back({{"type","text"},{"text",text}});
                     m["content"] = content;
                 } else {
                     m["content"] = text;
@@ -1937,6 +1970,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
         ContextBuilder builder;
+        if (provider->replays_reasoning_items())
+            builder.replay_reasoning_model = model_id;
         auto tool_defs = tools_.definitions();
         // Filter tools by mode and current offline state at every step. The
         // registry applies the same predicate when a returned call executes.
@@ -1965,6 +2000,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 if (mj_now.contains("reasoning_effort"))
                     req.reasoning_effort = mj_now.value("reasoning_effort", "");
             }
+            req.cache_key = session_id;
         };
         apply_inference();
 
@@ -2042,6 +2078,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // arrival order; persisted on the assistant row so later tool-loop
         // turns replay them verbatim.
         nlohmann::json thinking_blocks = nlohmann::json::array();
+        // Provider-native reasoning items ({model, item}), persisted for
+        // replay to the same provider/model on later steps.
+        nlohmann::json reasoning_items = nlohmann::json::array();
         FinishReason finish_reason = FinishReason::EndTurn;
         TokenUsage usage;
         bool step_failed = false;
@@ -2077,6 +2116,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 {"thinking", thinking},
                 {"signature", signature}
             });
+        };
+        cbs.on_reasoning_item = [&](const nlohmann::json& item) {
+            reasoning_items.push_back({{"model", model_id}, {"item", item}});
         };
         cbs.on_tool_input_delta = [&](const std::string& call_id,
                                        const std::string& name,
@@ -2241,6 +2283,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             // transcript-facing text.
             if (!thinking_blocks.empty())
                 data["thinking_blocks"] = thinking_blocks;
+            if (!reasoning_items.empty())
+                data["reasoning_items"] = reasoning_items;
             if (!tool_calls.empty()) {
                 auto calls_arr = nlohmann::json::array();
                 for (auto& tc : tool_calls)
@@ -2977,7 +3021,15 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     req.model_id    = model_id;
     req.system      = "You generate short descriptive titles for chat sessions.";
     req.messages    = {std::move(user_msg)};
-    req.max_tokens  = 48;
+    // A title needs no deliberation. Without an explicit effort, reasoning
+    // models (gpt-5*/codex on the ChatGPT backend) reason at their default
+    // level — billed output for a six-word answer — and their reasoning
+    // counts toward max_tokens, so the old 48-token cap could be spent
+    // entirely on reasoning and yield an empty title (a wasted call). Only
+    // the first line of the reply is used, so the larger cap costs nothing
+    // on models that answer directly.
+    req.reasoning_effort = "low";
+    req.max_tokens  = 512;
 
     std::string raw_title;
     bool failed = false;
@@ -3157,6 +3209,9 @@ std::string SessionEngine::describe_image(Provider& provider,
     req.system    = "You describe images for a text-only coding assistant.";
     req.messages  = {std::move(user_msg)};
     req.max_tokens = 1024;
+    // Description is perception, not deliberation: keep reasoning models
+    // from spending their default effort (billed output) on it.
+    req.reasoning_effort = "low";
 
     std::string text;
     bool failed = false;

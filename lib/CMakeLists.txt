@@ -128,6 +128,11 @@ target_link_libraries(test_provider_params haicode)
 add_executable(test_pricing tests/test_pricing.cpp)
 target_link_libraries(test_pricing haicode)
 
+# ChatGPT (Codex) request body: prompt-cache layout (dynamic content last,
+# prompt_cache_key) and encrypted-reasoning capture + replay gating.
+add_executable(test_codex_params tests/test_codex_params.cpp)
+target_link_libraries(test_codex_params haicode)
+
 # Local-socket tests (bind/accept/recv) need libnetwork directly.
 add_executable(test_web_tools tests/test_web_tools.cpp)
 target_link_libraries(test_web_tools haicode network)
@@ -142,6 +147,6 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_db_concurrency test_config_write test_config_trust
          test_subprocess test_turn_integrity test_engine_correctness
          test_session_lifecycle test_web_tools test_provider_params
-         test_pricing)
+         test_pricing test_codex_params)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

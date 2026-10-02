@@ -43,6 +43,13 @@ public:
     // text-only primaries never receive raw image data.
     std::vector<nlohmann::json> assemble_messages(const std::vector<SessionMessage>& msgs,
                                                   bool model_accepts_images = true);
+
+    // Non-empty: replay the provider-native reasoning items persisted on
+    // assistant rows (`reasoning_items`) that were produced by this model,
+    // as leading "openai_reasoning" content blocks. Set by the engine only
+    // when the active provider replays_reasoning_items(); empty (default)
+    // keeps those blocks off every other provider's wire.
+    std::string replay_reasoning_model;
 };
 
 class SessionEngine {

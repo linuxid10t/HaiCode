@@ -36,6 +36,11 @@ struct LLMRequest {
     // "" = unset; off/minimal/low/medium/high/xhigh/max. OpenAI maps this to
     // reasoning_effort; Anthropic maps it to output_config.effort.
     std::string reasoning_effort;
+    // Stable per-conversation prompt-cache routing key ("" = none). The
+    // engine sets the session id on agentic-loop requests; the ChatGPT
+    // (Codex) provider sends it as prompt_cache_key so every step of a
+    // session reaches the server that holds its cached prefix.
+    std::string cache_key;
 };
 
 struct ToolCall {
@@ -66,6 +71,12 @@ struct StreamCallbacks {
     // order. The signature must be passed back unchanged when the block is
     // replayed in later turns of a tool loop.
     std::function<void(const std::string& thinking, const std::string& signature)> on_thinking_block;
+    // Complete provider-native reasoning item (Responses API: {type:
+    // "reasoning", summary, encrypted_content}), emitted in order just
+    // before on_finish. Opaque to the engine: it is persisted on the
+    // assistant row and replayed only to providers whose
+    // replays_reasoning_items() is true, for the model that produced it.
+    std::function<void(const nlohmann::json& item)> on_reasoning_item;
     std::function<void(const std::string& call_id, const std::string& name,
                        const std::string& input_delta)> on_tool_input_delta;
     std::function<void(FinishReason, TokenUsage, std::vector<ToolCall>)> on_finish;
@@ -103,6 +114,10 @@ public:
     // discovered window without any network I/O, so UI threads can render a
     // provisional value immediately while discovery runs asynchronously.
     virtual int peek_model_context(const std::string&) const { return 0; }
+    // True when this provider emits on_reasoning_item and wants the stored
+    // items replayed (as "openai_reasoning" content blocks) on later
+    // requests. Other providers never see those blocks.
+    virtual bool replays_reasoning_items() const { return false; }
 };
 
 class ProviderRegistry {
