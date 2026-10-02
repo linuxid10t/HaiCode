@@ -1936,9 +1936,9 @@ MainWindow::_HandleStepEnded(BMessage* msg)
     session_input_total_ += in_tok;
     session_output_total_+= out_tok;
     session_cost_        += step_cost;
-    // The input side reflects the full conversation size as the provider saw
-    // it on this step — that's our best estimate of current context usage.
-    if (in_tok > 0) current_context_tokens_ = in_tok;
+    int32 context_tokens = 0;
+    if (msg->FindInt32("context_tokens", &context_tokens) == B_OK)
+        current_context_tokens_ = context_tokens;
 
     interrupt_btn_->SetEnabled(true);
     engine_running_ = true;

@@ -1,5 +1,6 @@
 #include <haicode/openai_params.h>
 #include <haicode/model_capabilities.h>
+#include <algorithm>
 
 namespace haicode {
 
@@ -80,15 +81,16 @@ nlohmann::json build_openai_body(const LLMRequest& request, ServerFlavor flavor)
 
 void parse_openai_usage(const nlohmann::json& u, TokenUsage& usage) {
     if (!u.is_object()) return;
-    usage.input  = u.value("prompt_tokens", 0);
+    const int total_input = std::max(0, u.value("prompt_tokens", 0));
     usage.output = u.value("completion_tokens", 0);
-    // Prompt-caching discount tokens ride in a details object; without them
-    // cached input is billed (and metered) at full price.
+    usage.cache_read = 0;
+    usage.cache_write = 0;
     if (u.contains("prompt_tokens_details")
             && u["prompt_tokens_details"].is_object()) {
-        usage.cache_read =
-            u["prompt_tokens_details"].value("cached_tokens", 0);
+        usage.cache_read = std::clamp(
+            u["prompt_tokens_details"].value("cached_tokens", 0), 0, total_input);
     }
+    usage.input = total_input - usage.cache_read;
 }
 
 } // namespace haicode

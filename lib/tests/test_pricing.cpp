@@ -5,6 +5,7 @@
 // (2026-10-02); the test exists so a future table edit cannot drift.
 #include <haicode/pricing.h>
 #include <haicode/model_info.h>
+#include <haicode/openai_params.h>
 #include <iostream>
 #include <cmath>
 
@@ -445,8 +446,26 @@ static bool test_compute_cost() {
     return true;
 }
 
+static bool test_cached_input_billing() {
+    TokenUsage u;
+    parse_openai_usage(nlohmann::json{
+        {"prompt_tokens", 200000}, {"completion_tokens", 1000},
+        {"prompt_tokens_details", {{"cached_tokens", 150000}}}}, u);
+    CHECK(u.total_input() == 200000, "normalized prompt total");
+    CHECK(eq(compute_cost(u, ModelPricing{2.0, 10.0, 0.2, 0.0}),
+             (50000 * 2.0 + 1000 * 10.0 + 150000 * 0.2) / 1e6),
+          "cached input billed only at the cache rate");
+    const auto* p = lookup_pricing("openai", "openai", "gpt-5.5", {});
+    CHECK(p, "base pricing exists");
+    CHECK(eq(compute_step_cost(u, "openai", "openai", "gpt-5.5", {}),
+             compute_cost(u, *p)),
+          "200K prompt plus cached subset stays below the 272K tier");
+    return true;
+}
+
 int main() {
     bool ok = true;
+    ok = test_cached_input_billing() && ok;
     ok = test_window_table() && ok;
     ok = test_max_output_clamp() && ok;
     ok = test_refreshed_pricing() && ok;

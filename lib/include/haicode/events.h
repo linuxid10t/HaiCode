@@ -78,6 +78,7 @@ struct StepEnded : BaseEvent {
     std::string assistant_message_id;
     std::string finish_reason;  // "end_turn", "tool_use", "max_tokens"
     TokenUsage usage;
+    int context_tokens = 0;
 };
 
 struct StepFailed : BaseEvent {

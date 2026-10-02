@@ -136,6 +136,7 @@ GuiEventRelay::attach()
         msg.AddString("finish_reason", finish_reason.c_str());
         msg.AddInt32("usage_input",  input_tokens);
         msg.AddInt32("usage_output", output_tokens);
+        msg.AddInt32("context_tokens", data.value("context_tokens", 0));
         msg.AddDouble("cost_usd",    cost_usd);
         main_window_.SendMessage(&msg);
     });

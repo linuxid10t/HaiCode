@@ -464,8 +464,7 @@ double compute_step_cost(const TokenUsage& usage,
         }
     }
     if (tiers) {
-        const int prompt_tokens =
-            usage.input + usage.cache_read + usage.cache_write;
+        const int prompt_tokens = usage.total_input();
         for (size_t i = 0; i < tiers_count; ++i) {
             if (tiers[i].up_to_prompt_tokens == 0
                     || prompt_tokens <= tiers[i].up_to_prompt_tokens)

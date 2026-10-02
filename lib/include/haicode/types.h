@@ -9,11 +9,14 @@
 namespace haicode {
 
 struct TokenUsage {
+    // Input buckets are disjoint: input excludes cache reads and writes.
     int input = 0;
     int output = 0;
     int reasoning = 0;
     int cache_read = 0;
     int cache_write = 0;
+
+    int total_input() const { return input + cache_read + cache_write; }
 };
 
 // One entry in a session's todo list. `status` is one of "pending",

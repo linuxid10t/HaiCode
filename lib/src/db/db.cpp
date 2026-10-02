@@ -307,7 +307,7 @@ void SessionStore::update_cost(const std::string& session_id, double cost,
         .bind(6, tokens.cache_write)
         // Per-request input size (not cumulative) — seeds the context meter on
         // session reopen. Matches the engine's prev_total_input arithmetic.
-        .bind(7, tokens.input + tokens.cache_read + tokens.cache_write)
+        .bind(7, tokens.total_input())
         .bind(8, util::now_ms())
         .bind(9, session_id)
         .expect_done();

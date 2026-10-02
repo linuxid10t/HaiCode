@@ -3,6 +3,7 @@
 #include <haicode/codex_auth.h>
 #include <nlohmann/json.hpp>
 #include <atomic>
+#include <algorithm>
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -351,13 +352,17 @@ public:
                             auto& r = d["response"];
                             if (r.contains("usage") && r["usage"].is_object()) {
                                 auto& u = r["usage"];
-                                usage.input  = u.value("input_tokens", 0);
+                                const int total_input =
+                                    std::max(0, u.value("input_tokens", 0));
                                 usage.output = u.value("output_tokens", 0);
+                                usage.cache_read = 0;
+                                usage.cache_write = 0;
                                 if (u.contains("input_tokens_details")
                                         && u["input_tokens_details"].is_object())
-                                    usage.cache_read =
+                                    usage.cache_read = std::clamp(
                                         u["input_tokens_details"].value(
-                                            "cached_tokens", 0);
+                                            "cached_tokens", 0), 0, total_input);
+                                usage.input = total_input - usage.cache_read;
                                 if (u.contains("output_tokens_details")
                                         && u["output_tokens_details"].is_object())
                                     usage.reasoning =

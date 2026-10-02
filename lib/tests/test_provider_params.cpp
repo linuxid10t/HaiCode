@@ -331,10 +331,25 @@ static bool test_openai_usage_cached_tokens() {
         {"prompt_tokens_details", {{"cached_tokens", 640}}},
         {"completion_tokens_details", {{"reasoning_tokens", 128}}}
     }, usage);
-    CHECK(usage.input == 1000, "prompt_tokens parsed");
+    CHECK(usage.input == 360, "input excludes cached prompt tokens");
+    CHECK(usage.total_input() == 1000, "cached prompt counted exactly once");
     CHECK(usage.output == 200, "completion_tokens parsed");
     CHECK(usage.cache_read == 640,
           "cached_tokens lifted into cache_read for discount billing");
+    parse_openai_usage(json{{"prompt_tokens", 1000}}, usage);
+    CHECK(usage.input == 1000 && usage.cache_read == 0,
+          "missing details clear previous cached usage");
+    for (int cached : {1000, 1500, -100}) {
+        parse_openai_usage(json{{"prompt_tokens", 1000},
+            {"prompt_tokens_details", {{"cached_tokens", cached}}}}, usage);
+        CHECK(usage.total_input() == 1000 && usage.input >= 0,
+              "inconsistent cache counts preserve the total");
+        CHECK(usage.cache_read == (cached < 0 ? 0 : 1000),
+              "cache count clamped to the prompt size");
+    }
+    parse_openai_usage(json{{"prompt_tokens", -100},
+        {"prompt_tokens_details", {{"cached_tokens", 200}}}}, usage);
+    CHECK(usage.total_input() == 0, "negative prompt count clamped");
     std::cout << "[OK] openai usage: cached_tokens -> cache_read\n";
     return true;
 }

@@ -1954,6 +1954,19 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         });
         auto req = builder.build(messages, system, system_dynamic, tool_defs,
                                   model_id, provider_id, primary_supports_vision);
+        auto apply_inference = [&] {
+            if (mj_now.is_object()) {
+                if (int v = mj_now.value("max_tokens", 0); v > 0)
+                    req.max_tokens = clamp_max_tokens(model_id, v);
+                if (mj_now.contains("temperature"))
+                    req.temperature = mj_now.value("temperature", 0.0);
+                if (mj_now.contains("top_p"))
+                    req.top_p = mj_now.value("top_p", 0.0);
+                if (mj_now.contains("reasoning_effort"))
+                    req.reasoning_effort = mj_now.value("reasoning_effort", "");
+            }
+        };
+        apply_inference();
 
         // Auto-compaction: if the context is approaching the model's window,
         // summarize the older portion of the conversation before sending the
@@ -2002,29 +2015,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                         req = builder.build(messages, system, system_dynamic,
                                             tool_defs, model_id, provider_id,
                                             primary_supports_vision);
+                        apply_inference();
                     }
                 }
             }
         }
 
         if (interrupt_flag && interrupt_flag->load()) break;
-
-        // Apply per-session inference params (max_tokens / temperature / top_p /
-        // reasoning_effort) stored in model_json. Provider defaults win when
-        // not present.
-        auto apply_inference = [&] {
-            if (mj_now.is_object()) {
-                if (int v = mj_now.value("max_tokens", 0); v > 0)
-                    req.max_tokens = clamp_max_tokens(model_id, v);
-                if (mj_now.contains("temperature"))
-                    req.temperature = mj_now.value("temperature", 0.0);
-                if (mj_now.contains("top_p"))
-                    req.top_p = mj_now.value("top_p", 0.0);
-                if (mj_now.contains("reasoning_effort"))
-                    req.reasoning_effort = mj_now.value("reasoning_effort", "");
-            }
-        };
-        apply_inference();
 
         std::string assistant_msg_id = haicode::util::make_id("amsg");
 
@@ -2266,12 +2263,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // Track the prompt size this step reported, for next iteration's
         // compaction decision. Cache reads/writes still occupy the window, so
         // the sum is the true prompt size.
-        prev_total_input = usage.input + usage.cache_read + usage.cache_write;
+        prev_total_input = usage.total_input();
 
         // Publish step ended
         {
             nlohmann::json ev;
             ev["session_id"] = session_id;
+            ev["context_tokens"] = usage.total_input();
             ev["assistant_message_id"] = assistant_msg_id;
             ev["finish_reason"] =
                 (finish_reason == FinishReason::ToolUse)    ? "tool_use"

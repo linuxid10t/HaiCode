@@ -5,6 +5,7 @@
 #include <haicode/config.h>
 #include <haicode/provider.h>
 #include <haicode/tool.h>
+#include <haicode/openai_params.h>
 #include <chrono>
 #include <iostream>
 #include <cstdio>
@@ -524,8 +525,160 @@ static bool test_last_input_tokens_roundtrip() {
     return true;
 }
 
+class BudgetTool : public haicode::Tool {
+public:
+    std::string name() const override { return "budget_probe"; }
+    std::string description() const override { return "Return a small result"; }
+    nlohmann::json input_schema() const override { return {{"type", "object"}}; }
+    haicode::ToolResult execute(const nlohmann::json&, const haicode::ToolContext&) override {
+        return {true, "ok", ""};
+    }
+};
+
+class BudgetProvider : public FakeProvider {
+public:
+    void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb,
+                const std::string& token = "") override {
+        if (req.system == "You are a precise conversation summarizer.") {
+            FakeProvider::stream(req, cb, token);
+            return;
+        }
+        chat_requests.push_back(req);
+        if (overflow && chat_requests.size() == 1) {
+            cb.on_error("context_length_exceeded");
+            return;
+        }
+        cb.on_text_delta("t", "ok");
+        if (!overflow && chat_requests.size() == 1) {
+            haicode::ToolCall call;
+            call.id = "budget-call";
+            call.name = "budget_probe";
+            call.input = nlohmann::json::object();
+            cb.on_finish(haicode::FinishReason::ToolUse, reported, {call});
+        } else {
+            cb.on_finish(haicode::FinishReason::EndTurn, reported, {});
+        }
+    }
+    bool overflow = false;
+    haicode::TokenUsage reported;
+    std::vector<haicode::LLMRequest> chat_requests;
+};
+
+static bool test_budget_trigger(int window, int input, int cached, int output_cap,
+                               bool separate_buckets, bool expect_compaction,
+                               bool overflow = false) {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<BudgetProvider>();
+    provider->overflow = overflow;
+    if (separate_buckets) {
+        provider->reported.input = input - cached - 1000;
+        provider->reported.cache_read = cached;
+        provider->reported.cache_write = 1000;
+    } else {
+        haicode::parse_openai_usage(nlohmann::json{
+            {"prompt_tokens", input},
+            {"prompt_tokens_details", {{"cached_tokens", cached}}}}, provider->reported);
+    }
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    tools.register_tool(std::make_shared<BudgetTool>());
+    haicode::PermissionGate perms;
+    perms.set_rules({{"budget_probe", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    cfg.model_contexts["fake-model"] = window;
+    cfg.compaction_recent_context = 100;
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    auto sid = engine.create_session("/tmp/proj", "build", "fake-model", "fake");
+    haicode::InferenceParams params;
+    params.max_tokens = output_cap;
+    params.has_temperature = true;
+    params.temperature = 0.3;
+    params.has_top_p = true;
+    params.top_p = 0.8;
+    params.reasoning_effort = "low";
+    engine.update_inference(sid, params);
+    for (int i = 0; i < 3; ++i) {
+        append_user(store, sid, "old prompt " + std::to_string(i));
+        append_asst(store, sid, "old reply " + std::to_string(i));
+    }
+    std::mutex ev_mu;
+    std::vector<nlohmann::json> steps;
+    bus.subscribe(haicode::events::EventType::StepEnded,
+        [&](const nlohmann::json& ev) {
+            std::lock_guard<std::mutex> lock(ev_mu);
+            steps.push_back(ev);
+        });
+    engine.submit_prompt(sid, "run the budget probe");
+    for (int i = 0; i < 600 && engine.is_running(sid); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(!engine.is_running(sid), "budget regression finishes");
+    engine.shutdown();
+    CHECK(provider->chat_requests.size() == 2, "two chat requests sent");
+    const auto& first = provider->chat_requests.front();
+    int estimate = haicode::estimate_request_tokens(first.system, first.system_dynamic,
+                                                    first.messages, first.tools);
+    CHECK(estimate < haicode::usable_input_tokens(window,
+              output_cap > 0 ? output_cap : haicode::kDefaultMaxTokens,
+              cfg.compaction_buffer, cfg.auto_compact_threshold),
+          "first-step estimate cannot accidentally trigger compaction");
+    CHECK(provider->summary_requests.size() == (expect_compaction ? 1u : 0u),
+          "compaction follows true input size and configured output reserve");
+    CHECK(store.latest_complete_checkpoint(sid).has_value() == expect_compaction,
+          "checkpoint matches trigger decision");
+    CHECK(store.get(sid)->last_input_tokens == input,
+          "persisted context equals total input exactly once");
+    {
+        std::lock_guard<std::mutex> lock(ev_mu);
+        CHECK(steps.size() == (overflow ? 1u : 2u), "step events published");
+        for (const auto& ev : steps)
+            CHECK(ev.value("context_tokens", -1) == input,
+                  "event context agrees with persisted context");
+    }
+    for (const auto& req : provider->chat_requests) {
+        CHECK(req.max_tokens == (output_cap > 0 ? std::optional<int>(output_cap)
+                                              : std::nullopt),
+              "output limit survives request rebuild");
+        CHECK(req.temperature == 0.3 && req.top_p == 0.8
+              && req.reasoning_effort == "low",
+              "sampling and reasoning settings survive rebuild");
+    }
+    if (expect_compaction) {
+        auto text = FakeProvider::dump_messages(provider->chat_requests.back().messages);
+        CHECK(text.find("HISTORICAL CONVERSATION") != std::string::npos,
+              "rebuilt request includes checkpoint");
+    }
+    return true;
+}
+
+static bool test_usage_and_output_budget_regressions() {
+    CHECK(test_budget_trigger(200000, 100000, 80000, 4096, false, false),
+          "cached subset does not trigger early compaction");
+    CHECK(test_budget_trigger(200000, 170000, 150000, 4096, false, true),
+          "true over-threshold input triggers compaction");
+    CHECK(test_budget_trigger(200000, 170000, 150000, 4096, true, true),
+          "separate Anthropic buckets include reads and writes exactly once");
+    CHECK(test_budget_trigger(60000, 40000, 0, 4096, false, false),
+          "small configured output cap avoids default-reserve early trigger");
+    CHECK(test_budget_trigger(60000, 40000, 0, -1, false, true),
+          "unset output cap retains default reserve");
+    CHECK(test_budget_trigger(60000, 50000, 0, 4096, false, true),
+          "configured-cap threshold still compacts when exceeded");
+    CHECK(test_budget_trigger(60000, 10000, 0, 4096, false, true, true),
+          "overflow recovery retains inference settings");
+    std::cout << "[OK] cached usage, configured output reserve, and rebuild settings\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
+    ok &= test_usage_and_output_budget_regressions();
     ok &= test_last_input_tokens_roundtrip();
     ok &= test_discovery_outranks_prefix();
     ok &= test_manual_compact_unknown_window();
