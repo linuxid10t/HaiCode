@@ -702,7 +702,20 @@ SessionEngine::SessionEngine(SessionStore& store,
     , permissions_(permissions)
     , bus_(bus)
     , config_(config)
+    , model_db_(std::make_shared<const ModelOverrides>(
+          model_overrides_from(config)))
 {}
+
+std::shared_ptr<const ModelOverrides> SessionEngine::model_overrides() const {
+    std::lock_guard<std::mutex> lock(model_db_mu_);
+    return model_db_;
+}
+
+void SessionEngine::set_model_overrides(ModelOverrides overrides) {
+    auto next = std::make_shared<const ModelOverrides>(std::move(overrides));
+    std::lock_guard<std::mutex> lock(model_db_mu_);
+    model_db_ = std::move(next);
+}
 
 SessionEngine::~SessionEngine() {
     shutdown();
@@ -1965,7 +1978,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // configured, describe any not-yet-described attachments (once,
         // persisted) so assembly below emits text instead of image bytes.
         bool primary_supports_vision =
-            model_supports_vision(model_id, config_.model_vision);
+            model_supports_vision(model_id, model_overrides()->vision);
         if (!primary_supports_vision)
             backfill_attachment_descriptions(session_id, messages, interrupt_flag, run_token);
         if (interrupt_flag && interrupt_flag->load()) break;
@@ -2016,7 +2029,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // step 1 onward the real usage takes over.
         if (config_.auto_compact) {
             int window = haicode::get_context_window(provider_id, model_id,
-                                                     config_.model_contexts,
+                                                     model_overrides()->contexts,
                                                      provider.get());
             if (window > 0) {
                 int threshold = usable_input_tokens(window,
@@ -2121,7 +2134,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             ev["session_id"] = session_id;
             ev["provisional_cost_usd"] = compute_step_cost(
                 inflight_usage(), provider_id, provider->kind(), model_id,
-                config_.pricing);
+                model_overrides()->pricing);
             bus_.publish(events::EventType::CostProgress, ev);
         };
 
@@ -2269,7 +2282,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 record_usage(session_id,
                              compute_step_cost(partial, provider_id,
                                                provider->kind(), model_id,
-                                               config_.pricing),
+                                               model_overrides()->pricing),
                              partial, /*sets_context=*/false);
             }
             nlohmann::json ev;
@@ -2375,7 +2388,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                 || reported_usage.total_input() > 0;
         double step_cost = compute_step_cost(usage, provider_id,
                                              provider->kind(), model_id,
-                                             config_.pricing);
+                                             model_overrides()->pricing);
 
         if (have_usage)
             record_usage(session_id, step_cost, usage, exact_context);
@@ -2922,7 +2935,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
         // step (Task 26: maintenance usage accounting).
         cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
             double cost = compute_step_cost(tok, provider_id, provider.kind(),
-                                            model_id, config_.pricing);
+                                            model_id, model_overrides()->pricing);
             record_usage(session_id, cost, tok, /*sets_context=*/false);
         };
         cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
@@ -2946,7 +2959,7 @@ bool SessionEngine::compact_history(const std::string& session_id,
     };
 
     int window = haicode::get_context_window(provider_id, model_id,
-                                             config_.model_contexts, &provider);
+                                             model_overrides()->contexts, &provider);
     if (window <= 0) {
         // Manual compaction (and overflow recovery) must work even when the
         // window is unknown: estimate it from the current context size + 20%.
@@ -3140,7 +3153,7 @@ void SessionEngine::refine_title_llm(const std::string& session_id,
     // maintenance calls are real usage on the same bill.
     cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
         double cost = compute_step_cost(tok, provider.id(), provider.kind(),
-                                        model_id, config_.pricing);
+                                        model_id, model_overrides()->pricing);
         record_usage(session_id, cost, tok, /*sets_context=*/false);
     };
     cbs.on_error = [&](const std::string& error) {
@@ -3320,7 +3333,7 @@ std::string SessionEngine::describe_image(Provider& provider,
     cbs.on_finish = [&](FinishReason, TokenUsage tok, std::vector<ToolCall>) {
         // Vision-fallback descriptions are billed to the session (Task 26).
         double cost = compute_step_cost(tok, provider_id, provider.kind(),
-                                        model_id, config_.pricing);
+                                        model_id, model_overrides()->pricing);
         record_usage(session_id, cost, tok, /*sets_context=*/false);
     };
     cbs.on_error = [&](const std::string& error) {

@@ -2,6 +2,8 @@
 #include "types.h"
 #include <string>
 #include <map>
+#include <utility>
+#include <vector>
 
 namespace haicode {
 
@@ -23,14 +25,16 @@ const ModelPricing* lookup_pricing(
     const std::map<std::string, ModelPricing>& overrides);
 
 // Full resolution with provider-kind fallback chain (Task 26):
-//   1. config overrides, matched against "<provider_id>:<model>" and
-//      "<provider_kind>:<model>" and "<model>" (longest prefix wins, so a
-//      user can re-key a built-in entry);
-//   2. local server kinds (ollama/vllm/lmstudio/llamacpp) short-circuit to
+//   1. local server kinds (ollama/vllm/lmstudio/llamacpp) short-circuit to
 //      free — cloud prices must never apply to a local server;
-//   3. built-ins keyed "<kind>:<model>" (anthropic:/openai:) then
-//      "*:<model>" (globally-unique ids from other labs);
-//   4. nullptr = unknown, zero cost.
+//   2. config overrides, matched against "<provider_id>:<model>" and
+//      "<provider_kind>:<model>" and "<model>" (prefixes allowed) together
+//      with the built-ins keyed "<kind>:<model>" (anthropic:/openai:) then
+//      "*:<model>" (globally-unique ids from other labs), as ONE prefix
+//      database: the longest matched model part wins and an override wins a
+//      tie, so a user can re-key a built-in entry but a short override
+//      ("gpt-5") never shadows a longer built-in ("gpt-5.5");
+//   3. nullptr = unknown, zero cost.
 // Model ids are normalized first: lowercase, leading vendor path segment
 // ("z-ai/glm-5.3") and cloud region prefixes ("us.", "eu.", "global.",
 // "anthropic.", "meta.", "amazon.") dropped, ":free"/":thinking"/":beta"
@@ -55,7 +59,8 @@ bool is_local_provider_kind(const std::string& provider_kind);
 // applying long-context surcharge tiers where the model has one: above the
 // threshold (measured on total prompt tokens: input + cache_read +
 // cache_write) the WHOLE request is repriced at the higher rate (xAI's
-// documented behavior; assumed for the others). Returns 0.0 when no pricing
+// documented behavior; assumed for the others). A winning config override
+// is a flat price and replaces the tier ladder. Returns 0.0 when no pricing
 // resolves (unknown model or local server).
 double compute_step_cost(const TokenUsage& usage,
                          const std::string& provider_id,
@@ -80,5 +85,14 @@ TokenUsage estimate_inflight_usage(const TokenUsage& reported,
                                    size_t streamed_chars,
                                    int est_request_tokens,
                                    int cached_prefix_tokens);
+
+// Read-only copy of the built-in flat price table ("<kind>:<prefix>" or
+// "*:<prefix>" keys, base tier for tiered models), for the Model Database
+// editor.
+std::vector<std::pair<std::string, ModelPricing>> builtin_pricing_entries();
+
+// True when the built-in table bills this model on a long-context or
+// input-size tier ladder (the flat entry is only its base tier).
+bool has_price_tiers(const std::string& model_id);
 
 } // namespace haicode

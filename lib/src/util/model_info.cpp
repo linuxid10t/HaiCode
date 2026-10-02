@@ -1,5 +1,7 @@
 #include <haicode/model_info.h>
 #include <climits>
+#include <mutex>
+#include <vector>
 
 // last_verified: 2026-10-02 against MODEL_NUMBERS.md (repo root).
 
@@ -284,37 +286,81 @@ static bool starts_with_ci(const std::string& s, const std::string& prefix) {
     return true;
 }
 
-int get_context_window(const std::string& /*provider_id*/,
-                       const std::string& model_id,
-                       const std::map<std::string, int>& config_overrides) {
-    // 1. Exact-match config override.
-    auto it = config_overrides.find(model_id);
-    if (it != config_overrides.end() && it->second > 0)
-        return it->second;
-
-    // 2. Longest-prefix hardcoded match. Track the winning length: keeping
-    // a pointer into a loop-local copy would dangle (and first-match wins,
-    // not longest).
+// Longest matching user key (case-insensitive prefix; an exact id is just
+// the longest possible prefix). Returns the match length (0 = none).
+template <typename V>
+static size_t user_match(const std::string& model_id,
+                         const std::map<std::string, V>& overrides,
+                         const V*& out) {
     size_t best_len = 0;
-    int best_window = 0;
-    for (auto& entry : kKnownModels) {
+    out = nullptr;
+    for (auto& [k, v] : overrides) {
+        if (k.empty()) continue;
+        if (starts_with_ci(model_id, k) && k.size() > best_len) {
+            best_len = k.size();
+            out = &v;
+        }
+    }
+    return best_len;
+}
+
+// Longest matching built-in prefix in a {prefix, value} table.
+template <typename Table, typename Get>
+static size_t builtin_match(const std::string& model_id, const Table& table,
+                            Get get, decltype(get(table[0]))& out) {
+    size_t best_len = 0;
+    for (auto& entry : table) {
         const std::string p = entry.prefix;
         if (starts_with_ci(model_id, p) && p.size() > best_len) {
             best_len = p.size();
-            best_window = entry.window;
+            out = get(entry);
         }
     }
-    return best_window;  // 0 if no prefix matched
+    return best_len;
+}
+
+static int builtin_window(const std::string& model_id, size_t& len) {
+    int window = 0;
+    len = builtin_match(model_id, kKnownModels,
+                        [](const auto& e) { return e.window; }, window);
+    return window;
+}
+
+int user_context_window(const std::string& model_id,
+                        const std::map<std::string, int>& config_overrides);
+
+int get_context_window(const std::string& /*provider_id*/,
+                       const std::string& model_id,
+                       const std::map<std::string, int>& config_overrides) {
+    // User entries and the built-in table form one prefix database: the
+    // longest matching key wins, and a user key wins a tie with a built-in
+    // one (so re-keying a built-in prefix replaces it). An exact id is the
+    // longest possible key, so exact overrides always win.
+    if (int user = user_context_window(model_id, config_overrides); user > 0)
+        return user;
+    size_t builtin_len = 0;
+    return builtin_window(model_id, builtin_len);  // 0 if no prefix matched
+}
+
+int user_context_window(const std::string& model_id,
+                        const std::map<std::string, int>& config_overrides) {
+    size_t builtin_len = 0;
+    builtin_window(model_id, builtin_len);
+    const int* user = nullptr;
+    size_t user_len = user_match(model_id, config_overrides, user);
+    if (user && *user > 0 && user_len >= builtin_len)
+        return *user;
+    return 0;
 }
 
 int get_context_window(const std::string& provider_id,
                        const std::string& model_id,
                        const std::map<std::string, int>& config_overrides,
                        const Provider* provider) {
-    // 1. Exact-match config override wins over everything.
-    auto it = config_overrides.find(model_id);
-    if (it != config_overrides.end() && it->second > 0)
-        return it->second;
+    // 1. A user entry that beats (or ties) the built-in table wins over
+    // everything, discovery included.
+    if (int user = user_context_window(model_id, config_overrides); user > 0)
+        return user;
 
     // 2. Live provider discovery outranks the hardcoded prefix table: the
     // server's reported window is authoritative when available (a local
@@ -327,47 +373,56 @@ int get_context_window(const std::string& provider_id,
         if (discovered > 0) return discovered;
     }
 
-    // 3. Hardcoded prefix-table match. Reuse the 3-arg overload with an
-    // empty override map (the override was already checked in step 1).
-    return get_context_window(provider_id, model_id, {});
+    // 3. Prefix database (built-in table; a shorter user prefix only
+    // applies where no built-in entry matches).
+    return get_context_window(provider_id, model_id, config_overrides);
 }
 
 bool model_supports_vision(const std::string& model_id,
                            const std::map<std::string, bool>& config_overrides) {
-    // 1. Exact-match config override (explicit false wins over the table).
-    auto it = config_overrides.find(model_id);
-    if (it != config_overrides.end())
-        return it->second;
-
-    // 2. Longest-prefix hardcoded match.
-    const char* best_prefix = nullptr;
-    bool best_vision = false;
-    for (auto& entry : kVisionModels) {
-        std::string p = entry.prefix;
-        if (starts_with_ci(model_id, p)) {
-            if (!best_prefix || p.size() > strlen(best_prefix)) {
-                best_prefix = entry.prefix;
-                best_vision = entry.vision;
-            }
-        }
-    }
-    if (best_prefix) return best_vision;
+    // 1-2. One prefix database: longest key wins, user wins ties (so an
+    // exact-id override — explicit false included — beats the table).
+    bool builtin = false;
+    size_t builtin_len = builtin_match(model_id, kVisionModels,
+                                       [](const auto& e) { return e.vision; },
+                                       builtin);
+    const bool* user = nullptr;
+    size_t user_len = user_match(model_id, config_overrides, user);
+    if (user && user_len >= builtin_len)
+        return *user;
+    if (builtin_len > 0) return builtin;
 
     // 3. Fail-closed: unknown models are assumed text-only.
     return false;
 }
 
+// Process-wide user output caps. Providers clamp max_tokens while building
+// the request body with no access to the app config, so the overrides live
+// here; HaiCodeApp installs them whenever the merged config changes.
+static std::mutex g_max_output_mu;
+static std::map<std::string, int> g_max_output_overrides;
+
+void set_max_output_overrides(const std::map<std::string, int>& overrides) {
+    std::lock_guard<std::mutex> lock(g_max_output_mu);
+    g_max_output_overrides = overrides;
+}
+
+int get_max_output_tokens(const std::string& model_id,
+                          const std::map<std::string, int>& overrides) {
+    int builtin = 0;
+    size_t builtin_len = builtin_match(model_id, kMaxOutput,
+                                       [](const auto& e) { return e.max_out; },
+                                       builtin);
+    const int* user = nullptr;
+    size_t user_len = user_match(model_id, overrides, user);
+    if (user && *user > 0 && user_len >= builtin_len)
+        return *user;
+    return builtin;  // 0 = no known cap
+}
+
 int get_max_output_tokens(const std::string& model_id) {
-    size_t best_len = 0;
-    int best_out = 0;
-    for (auto& entry : kMaxOutput) {
-        const std::string p = entry.prefix;
-        if (starts_with_ci(model_id, p) && p.size() > best_len) {
-            best_len = p.size();
-            best_out = entry.max_out;
-        }
-    }
-    return best_out;  // 0 = no known cap
+    std::lock_guard<std::mutex> lock(g_max_output_mu);
+    return get_max_output_tokens(model_id, g_max_output_overrides);
 }
 
 int clamp_max_tokens(const std::string& model_id, int requested) {
@@ -375,6 +430,24 @@ int clamp_max_tokens(const std::string& model_id, int requested) {
     int cap = get_max_output_tokens(model_id);
     if (cap > 0 && requested > cap) return cap;
     return requested;
+}
+
+std::vector<std::pair<std::string, int>> builtin_context_windows() {
+    std::vector<std::pair<std::string, int>> out;
+    for (auto& e : kKnownModels) out.emplace_back(e.prefix, e.window);
+    return out;
+}
+
+std::vector<std::pair<std::string, int>> builtin_max_outputs() {
+    std::vector<std::pair<std::string, int>> out;
+    for (auto& e : kMaxOutput) out.emplace_back(e.prefix, e.max_out);
+    return out;
+}
+
+std::vector<std::pair<std::string, bool>> builtin_vision_entries() {
+    std::vector<std::pair<std::string, bool>> out;
+    for (auto& e : kVisionModels) out.emplace_back(e.prefix, e.vision);
+    return out;
 }
 
 } // namespace haicode

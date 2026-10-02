@@ -323,6 +323,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                                          new BMessage(MSG_SHOW_SETTINGS), ','));
     settings_menu->AddItem(new BMenuItem("Permissions" B_UTF8_ELLIPSIS,
                                          new BMessage(MSG_SHOW_PERMISSIONS)));
+    settings_menu->AddItem(new BMenuItem("Model Database" B_UTF8_ELLIPSIS,
+                                         new BMessage(MSG_SHOW_MODEL_DB)));
     menu_bar_->AddItem(settings_menu);
 
     // ---- Toolbar: New Session, Dir picker, Model selector, Interrupt ----
@@ -978,7 +980,13 @@ MainWindow::MessageReceived(BMessage* msg)
             be_app->PostMessage(msg);
             break;
         case MSG_SHOW_PERMISSIONS:
+        case MSG_SHOW_MODEL_DB:
             be_app->PostMessage(msg);
+            break;
+        case MSG_MODEL_DB_CHANGED:
+            // Model Database edit applied live to the engine: re-resolve the
+            // context meter (window entries) for the selected model.
+            _UpdateMaxContext();
             break;
         case MSG_PERM_PRESET: {
             // Quick preset picked in the prompt-row dropdown. Translate to
@@ -1083,9 +1091,10 @@ MainWindow::MessageReceived(BMessage* msg)
                          || std::string(mid) != default_model_
                          || !engine_)
                 break;
-            // Config overrides outrank discovery (get_context_window tier 1).
-            auto mcit = engine_->config().model_contexts.find(default_model_);
-            if (mcit != engine_->config().model_contexts.end() && mcit->second > 0)
+            // A winning user entry outranks discovery (get_context_window
+            // tier 1).
+            if (haicode::user_context_window(
+                    default_model_, engine_->model_overrides()->contexts) > 0)
                 break;
             if (ctx > 0) {
                 max_context_ = ctx;
@@ -1359,7 +1368,8 @@ MainWindow::_VisionAvailable()
 {
     if (!engine_) return true;
     const haicode::AppConfig& cfg = engine_->config();
-    if (haicode::model_supports_vision(default_model_, cfg.model_vision))
+    if (haicode::model_supports_vision(default_model_,
+                                       engine_->model_overrides()->vision))
         return true;
     // Relaxed fallback gate mirroring the engine: an explicitly configured
     // fallback is trusted as long as its provider is registered (no
@@ -2965,16 +2975,14 @@ MainWindow::_UpdateMaxContext()
     // Sync fast path: config override → provider cache (no I/O) → prefix
     // table. Shown immediately so the meter always tracks the selection.
     auto provider = engine_->providers().get(pid);
-    auto mcit = engine_->config().model_contexts.find(mid);
-    int override_ctx = (mcit != engine_->config().model_contexts.end())
-                     ? mcit->second : 0;
+    const auto overrides = engine_->model_overrides();
+    int override_ctx = haicode::user_context_window(mid, overrides->contexts);
     int peeked = provider ? provider->peek_model_context(mid) : 0;
     // Cache hits outrank the prefix table, mirroring get_context_window's
-    // tier order (config → discovered → table).
+    // tier order (user entry → discovered → table).
     max_context_ = (override_ctx > 0) ? override_ctx
                  : (peeked     > 0) ? peeked
-                 : haicode::get_context_window(pid, mid,
-                                               engine_->config().model_contexts);
+                 : haicode::get_context_window(pid, mid, overrides->contexts);
     _UpdateStatusStrip();
 
     // Async discovery: without an override or cache hit, ask the provider on a

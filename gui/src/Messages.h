@@ -108,6 +108,13 @@ static const uint32 MSG_PERM_RULE_DONE = 'PRrd';  // "action"/"resource"/"effect
 // PermissionsCenterWindow → be_app
 static const uint32 MSG_PERM_POLICY_SAVED = 'PMsv';  // policy file written; reload config + gate rules
 
+// Model Database window (Settings → Model Database…)
+static const uint32 MSG_SHOW_MODEL_DB     = 'MDBs';  // MainWindow → be_app: open the Model Database window
+static const uint32 MSG_MODEL_DB_CLOSED   = 'MDBq';  // window → be_app (clear the stored pointer)
+static const uint32 MSG_MODEL_DB_ACTIVATE = 'MDBa';  // be_app → window: Activate()
+static const uint32 MSG_MODEL_DB_CHANGED  = 'MDBc';  // window → be_app: global config written; be_app → MainWindow: refresh meter/vision
+static const uint32 MSG_MODEL_DB_ENTRY    = 'MDBe';  // edit dialog → window: "key" string + optional "context"/"max_output" int32, "vision" bool, "input"/"output"/"cache_read"/"cache_write" doubles
+
 // Provider/model persistence — MainWindow → be_app; "provider"+"model" strings
 static const uint32 MSG_PERSIST_PM      = 'PMps';
 

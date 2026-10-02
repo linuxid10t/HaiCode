@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+class ModelDatabaseWindow;
+
 class HaiCodeApp : public BApplication {
 public:
     HaiCodeApp(int argc, char* argv[]);
@@ -52,6 +54,8 @@ private:
     MainWindow* main_window_ = nullptr;
     // One reusable Permissions center; pointer cleared on close.
     PermissionsCenterWindow* perm_center_ = nullptr;
+    // One reusable Model Database window; pointer cleared on close.
+    ModelDatabaseWindow* model_db_window_ = nullptr;
     // Authorization outcomes since launch (bounded, in-memory).
     PermissionActivityLog perm_activity_;
     // Session-deletion workers (tracked; joined in QuitRequested and by
@@ -108,6 +112,7 @@ private:
     void _NotifyPermissionUiChanged();
     void _ShowPermissionsCenter();
     void _RefreshPermissionsCenter();
+    void _ShowModelDatabase();
     bool _ApplyProviders(const BMessage* msg);
     void _RefreshProviders();
     // Warn-and-ask before a change that would interrupt every running

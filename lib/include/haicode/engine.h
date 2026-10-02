@@ -4,6 +4,7 @@
 #include "provider.h"
 #include "tool.h"
 #include "config.h"
+#include "model_db.h"
 #include <string>
 #include <map>
 #include <set>
@@ -176,6 +177,15 @@ public:
 
     const AppConfig& config() const { return config_; }
 
+    // Live model-database overrides (context windows, vision, pricing).
+    // Seeded from the config at construction; set_model_overrides() swaps
+    // in a new snapshot that running loops pick up on their next lookup, so
+    // a Model Database edit needs no engine recreation. Thread-safe. Read
+    // these instead of config().model_contexts/model_vision/pricing, which
+    // keep their construction-time values.
+    std::shared_ptr<const ModelOverrides> model_overrides() const;
+    void set_model_overrides(ModelOverrides overrides);
+
     // Read-only access to the provider registry (used by the UI to look up
     // discovered context windows for the context meter).
     ProviderRegistry& providers() { return providers_; }
@@ -310,6 +320,8 @@ private:
     PermissionGate& permissions_;
     SessionEventBus& bus_;
     AppConfig config_;
+    mutable std::mutex model_db_mu_;
+    std::shared_ptr<const ModelOverrides> model_db_;  // guarded by model_db_mu_
     PermissionRequestBroker* perm_broker_ = nullptr;
 
     std::map<std::string, std::thread> runner_threads_;

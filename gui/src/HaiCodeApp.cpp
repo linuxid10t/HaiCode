@@ -3,6 +3,7 @@
 #include "GuiEventRelay.h"
 #include "Messages.h"
 #include "SettingsWindow.h"
+#include "ModelDatabaseWindow.h"
 
 #include <Application.h>
 #include <Alert.h>
@@ -21,6 +22,8 @@
 #include <haicode/tool.h>
 #include <haicode/config.h>
 #include <haicode/default_prompt.h>
+#include <haicode/model_db.h>
+#include <haicode/model_info.h>
 #include <haicode/util.h>
 
 #include <nlohmann/json.hpp>
@@ -566,6 +569,22 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         case MSG_PERMISSION_CENTER_CLOSED:
             perm_center_ = nullptr;
             break;
+        case MSG_SHOW_MODEL_DB:
+            _ShowModelDatabase();
+            break;
+        case MSG_MODEL_DB_CLOSED:
+            model_db_window_ = nullptr;
+            break;
+        case MSG_MODEL_DB_CHANGED:
+            // The Model Database window wrote an entry to the global config
+            // file. Reload the global layer and re-merge; _SyncMergedConfig
+            // pushes the new overrides into the running engine (no restart,
+            // no interruption — the next step resolves with them).
+            global_layer_ = haicode::load_layer(haicode::global_config_path());
+            _SyncMergedConfig();
+            if (main_window_)
+                main_window_->PostMessage(MSG_MODEL_DB_CHANGED);
+            break;
         case MSG_PERM_REFRESH:
             _RefreshPermissionsCenter();
             break;
@@ -744,6 +763,11 @@ HaiCodeApp::_SyncMergedConfig()
 {
     config_ = haicode::load_with_layers(global_layer_, project_dir_,
                                         &last_trust_);
+    // Model-database entries: output caps are clamped inside the providers
+    // (process-wide table); the rest is a live engine snapshot.
+    haicode::set_max_output_overrides(config_.model_max_output);
+    if (engine_)
+        engine_->set_model_overrides(haicode::model_overrides_from(config_));
     // The project layer may add or remove permission rules; the gate keeps
     // the previously configured set otherwise.
     if (perm_gate_)
@@ -944,6 +968,19 @@ HaiCodeApp::_ShowPermissionsCenter()
         project_dir_,
         BMessenger(this));
     perm_center_->Show();
+}
+
+void
+HaiCodeApp::_ShowModelDatabase()
+{
+    if (model_db_window_) {
+        // Activate() must run on the window's own loop.
+        model_db_window_->PostMessage(MSG_MODEL_DB_ACTIVATE);
+        return;
+    }
+    model_db_window_ = new ModelDatabaseWindow(haicode::global_config_path(),
+                                               BMessenger(this));
+    model_db_window_->Show();
 }
 
 void

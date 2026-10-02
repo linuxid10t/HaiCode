@@ -38,15 +38,21 @@ struct AppConfig {
     // Contents of <project_dir>/agents.md (or claude.md fallback), read verbatim
     // by ConfigLoader::load(). Project-specific only; never merged from global config.
     std::string agents_md;
-    // Per-model context-window overrides (keyed by exact model_id). Empty by default;
-    // populated from the top-level "models" object in config.json. Used by
-    // get_context_window() as a hard override on top of the hardcoded prefix table.
+    // Per-model context-window overrides (keyed by model id or prefix). Empty by
+    // default; populated from the top-level "models" object in config.json.
+    // Merged with the hardcoded prefix table by get_context_window(): the
+    // longest matching key wins and a user key wins ties with a built-in one.
     std::map<std::string, int> model_contexts;
-    // Per-model vision-capability overrides (keyed by exact model_id), parsed
-    // from the top-level "vision" object in config.json. Used by
-    // model_supports_vision() as a hard override on the built-in prefix table;
-    // models absent from both are treated as NOT vision-capable (fail-closed).
+    // Per-model vision-capability overrides (keyed by model id or prefix),
+    // parsed from the top-level "vision" object in config.json. Merged with the
+    // built-in prefix table by model_supports_vision() (longest key wins, user
+    // wins ties); models absent from both are treated as NOT vision-capable
+    // (fail-closed).
     std::map<std::string, bool> model_vision;
+    // Per-model output-cap overrides (max tokens per response), parsed from
+    // the top-level "max_output" object in config.json. Keyed like
+    // "models"/"vision" (model id or prefix; see model_db.h for matching).
+    std::map<std::string, int> model_max_output;
     // Vision fallback: a (provider, model) pair that IS vision-capable, used
     // to describe images for text-only primary models. Both empty = feature
     // off. Parsed from the top-level "vision_fallback" object in config.json:
