@@ -1,6 +1,7 @@
 #include <haicode/provider.h>
 #include <haicode/util.h>
 #include <haicode/model_context_parse.h>
+#include <haicode/openai_params.h>
 #include <nlohmann/json.hpp>
 #include <atomic>
 #include <set>
@@ -419,57 +420,9 @@ public:
         } pop{this, stream_token, flag};
 
         // ---- Build request body ----
-        nlohmann::json body;
-        body["model"]       = request.model_id;
-        body["stream"]      = true;
-        if (request.max_tokens)
-            body["max_tokens"] = *request.max_tokens;
-        if (request.temperature)
-            body["temperature"] = *request.temperature;
-        if (request.top_p)
-            body["top_p"] = *request.top_p;
-        // OpenAI o-series reasoning depth. Silently ignored by non-reasoning
-        // models and OpenAI-compatible endpoints that don't recognize it.
-        if (!request.reasoning_effort.empty())
-            body["reasoning_effort"] = request.reasoning_effort;
-
-        // "off" for OpenAI-compatible servers (vLLM/SGLang running Qwen3,
-        // DeepSeek-V3, etc.): these don't use reasoning_effort. The standard
-        // way to suppress their thinking mode is chat_template_kwargs under
-        // extra_body. True OpenAI ignores unknown extra fields, so this is
-        // safe to always send alongside reasoning_effort: "off".
-        if (request.reasoning_effort == "off") {
-            body["chat_template_kwargs"] = {{"enable_thinking", false}};
-        }
-
-        // Include usage in stream_options (supported by OpenAI and most compat endpoints)
-        body["stream_options"] = { {"include_usage", true} };
-
-        // llama.cpp (and LM Studio's llama.cpp-backed GGUF runtime) only
-        // populate the KV/prefix cache when explicitly asked. LM Studio's
-        // OpenAI-compat layer ignores unknown fields with a log warning, so
-        // this is safe to send; other flavors keep their exact contract
-        // (e.g. OpenAI rejects `cache_prompt`).
-        if (flavor_ == ServerFlavor::LlamaCpp || flavor_ == ServerFlavor::LMStudio)
-            body["cache_prompt"] = true;
-
-        // Translate messages (system is prepended inside)
-        body["messages"] = translate_messages(request.system, request.system_dynamic,
-                                                request.messages);
-
-        // Tools — wrap each as {"type":"function","function":{...}}
-        if (!request.tools.empty()) {
-            nlohmann::json tools_arr = nlohmann::json::array();
-            for (auto& t : request.tools) {
-                nlohmann::json fn;
-                fn["name"]        = t.name;
-                fn["description"] = t.description;
-                fn["parameters"]  = t.input_schema;
-                tools_arr.push_back({ {"type", "function"}, {"function", fn} });
-            }
-            body["tools"]       = tools_arr;
-            body["tool_choice"] = "auto";
-        }
+        // Body construction lives in build_openai_body() (pure, testable):
+        // reasoning-model token/sampling gating, per-flavor effort mapping.
+        nlohmann::json body = build_openai_body(request, flavor_);
 
         std::map<std::string, std::string> headers = {
             {"Content-Type",   "application/json"},
@@ -528,10 +481,10 @@ public:
                     // ({"choices":[],"usage":{...}}); some compat endpoints also
                     // attach usage to the last content chunk. Read it whenever present
                     // regardless of choices, then continue normal processing below.
+                    // parse_openai_usage also lifts prompt_tokens_details.
+                    // cached_tokens into cache_read.
                     if (d.contains("usage") && d["usage"].is_object()) {
-                        auto& u = d["usage"];
-                        usage.input  = u.value("prompt_tokens",     0);
-                        usage.output = u.value("completion_tokens", 0);
+                        parse_openai_usage(d["usage"], usage);
                     }
 
                     if (!d.contains("choices") || !d["choices"].is_array()

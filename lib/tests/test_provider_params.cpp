@@ -4,6 +4,7 @@
 // block fragment accumulation, and verbatim replay ahead of tool_use.
 #include <haicode/model_capabilities.h>
 #include <haicode/anthropic_params.h>
+#include <haicode/openai_params.h>
 #include <haicode/model_context_parse.h>
 #include <haicode/engine.h>
 #include <haicode/db.h>
@@ -252,6 +253,90 @@ static bool test_openai_effort_mapping() {
     return true;
 }
 
+// ---- build_openai_body: flavor × reasoning-model matrix (Task 24) ----
+
+static bool test_openai_body_reasoning_model() {
+    LLMRequest req = base_request("o3");
+    req.max_tokens = 4096;
+    req.temperature = 0.7;
+    req.top_p = 0.9;
+    req.reasoning_effort = "high";
+    json body = build_openai_body(req, ServerFlavor::Generic);
+    CHECK(body["max_completion_tokens"] == 4096,
+          "reasoning models get max_completion_tokens");
+    CHECK(!body.contains("max_tokens"),
+          "max_tokens is a 400 unsupported_parameter on reasoning models");
+    CHECK(!body.contains("temperature"), "temperature omitted on o-series");
+    CHECK(!body.contains("top_p"), "top_p omitted on o-series");
+    CHECK(body["reasoning_effort"] == "high", "effort passes through");
+
+    // Non-reasoning model keeps the legacy shape.
+    LLMRequest plain = base_request("gpt-4o");
+    plain.max_tokens = 1000;
+    plain.temperature = 0.5;
+    json body2 = build_openai_body(plain, ServerFlavor::Generic);
+    CHECK(body2["max_tokens"] == 1000, "non-reasoning keeps max_tokens");
+    CHECK(body2.contains("temperature"), "non-reasoning keeps temperature");
+    CHECK(!body2.contains("reasoning_effort"),
+          "effort omitted for models without reasoning support");
+    std::cout << "[OK] openai body: reasoning-model token/sampling gating\n";
+    return true;
+}
+
+static bool test_openai_body_flavor_effort() {
+    // Flavored local server: off → chat_template_kwargs, no reasoning_effort.
+    LLMRequest off = base_request("qwen3-32b");
+    off.reasoning_effort = "off";
+    json vllm = build_openai_body(off, ServerFlavor::VLLM);
+    CHECK(vllm["chat_template_kwargs"]["enable_thinking"] == false,
+          "vLLM off suppresses thinking via chat_template_kwargs");
+    CHECK(!vllm.contains("reasoning_effort"),
+          "flavored servers never get reasoning_effort");
+
+    json ollama = build_openai_body(off, ServerFlavor::Ollama);
+    CHECK(ollama["chat_template_kwargs"]["enable_thinking"] == false,
+          "Ollama flavor keeps the enable_thinking mapping");
+
+    // Non-off effort on flavored servers: nothing sent either way.
+    LLMRequest high = base_request("qwen3-32b");
+    high.reasoning_effort = "high";
+    json vllm2 = build_openai_body(high, ServerFlavor::VLLM);
+    CHECK(!vllm2.contains("chat_template_kwargs"),
+          "non-off effort sends no template kwargs");
+    CHECK(!vllm2.contains("reasoning_effort"),
+          "flavored servers skip reasoning_effort entirely");
+
+    // Generic: gpt-5 off → "none"; o-series off → omitted.
+    LLMRequest g5 = base_request("gpt-5");
+    g5.reasoning_effort = "off";
+    json gen5 = build_openai_body(g5, ServerFlavor::Generic);
+    CHECK(gen5["reasoning_effort"] == "none", "gpt-5 off maps to none");
+    LLMRequest o3 = base_request("o3");
+    o3.reasoning_effort = "off";
+    json gen3 = build_openai_body(o3, ServerFlavor::Generic);
+    CHECK(!gen3.contains("reasoning_effort"), "o-series off omits the param");
+    CHECK(!gen3.contains("chat_template_kwargs"),
+          "Generic never gets template kwargs");
+    std::cout << "[OK] openai body: flavor x effort matrix\n";
+    return true;
+}
+
+static bool test_openai_usage_cached_tokens() {
+    TokenUsage usage;
+    parse_openai_usage(json{
+        {"prompt_tokens", 1000},
+        {"completion_tokens", 200},
+        {"prompt_tokens_details", {{"cached_tokens", 640}}},
+        {"completion_tokens_details", {{"reasoning_tokens", 128}}}
+    }, usage);
+    CHECK(usage.input == 1000, "prompt_tokens parsed");
+    CHECK(usage.output == 200, "completion_tokens parsed");
+    CHECK(usage.cache_read == 640,
+          "cached_tokens lifted into cache_read for discount billing");
+    std::cout << "[OK] openai usage: cached_tokens -> cache_read\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_effort_off_maps_low() && ok;
@@ -265,6 +350,9 @@ int main() {
     ok = test_replay_ignored_without_tools() && ok;
     ok = test_openai_translate_drops_thinking() && ok;
     ok = test_openai_effort_mapping() && ok;
+    ok = test_openai_body_reasoning_model() && ok;
+    ok = test_openai_body_flavor_effort() && ok;
+    ok = test_openai_usage_cached_tokens() && ok;
     if (!ok) return 1;
     std::cout << "All provider param tests passed\n";
     return 0;
