@@ -46,6 +46,30 @@ std::string build_summary_prompt(const std::string& previous_summary,
                                  const std::string& aged_recent_context,
                                  const std::string& serialized_older);
 
+// Inline (cache-friendly) summarization. Instead of a standalone prompt that
+// re-sends the history as serialized text — a request sharing no prefix with
+// the conversation, so every prompt cache (llama.cpp KV, Anthropic/OpenAI
+// prompt caching) misses and the whole history is re-processed — the engine
+// sends the conversation's own next request with this instruction appended
+// as the final user text. The model summarizes the ENTIRE visible
+// conversation (earlier checkpoint summary included); the engine still keeps
+// a shorter verbatim tail after the checkpoint, so that tail is covered twice
+// by design. The instruction starts with kInlineSummaryMarker so tests (and
+// logs) can recognize the request.
+inline constexpr const char* kInlineSummaryMarker = "[CONTEXT COMPACTION REQUEST]";
+std::string build_inline_summary_instruction();
+
+// Corrective follow-up for an inline summary that failed validate_summary:
+// re-states the required headings. Sent as a new user turn after the
+// invalid attempt (itself appended as an assistant turn), so the cached
+// prefix still applies.
+std::string build_inline_summary_correction();
+
+// True when the request's final message is a user turn whose text carries
+// kInlineSummaryMarker — i.e. an inline summarization call (first attempt
+// or corrective retry), not an agentic step.
+bool is_inline_summary_request(const LLMRequest& request);
+
 // Single source of truth for the section headings validate_summary expects.
 std::vector<std::string> required_summary_sections();
 

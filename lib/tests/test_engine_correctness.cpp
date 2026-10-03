@@ -1,3 +1,4 @@
+#include <haicode/compaction.h>
 #include <haicode/engine.h>
 #include <haicode/util.h>
 #include "test_check.h"
@@ -60,7 +61,8 @@ public:
             "fallback stream entered");
     }
     void stream(const LLMRequest& req, StreamCallbacks cb, const std::string& token = "") override {
-        if (req.system == "You are a precise conversation summarizer.") {
+        if (req.system == "You are a precise conversation summarizer."
+                || is_inline_summary_request(req)) {
             ++summaries;
             cb.on_text_delta("t", "## Objective\no\n## Constraints & Decisions\nc\n"
                 "## Completed Work\nw\n## Active Work\na\n## Blockers\nb\n"
