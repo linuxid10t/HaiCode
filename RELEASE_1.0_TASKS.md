@@ -464,6 +464,8 @@ In `lib/src/provider/openai.cpp`:
 
 - Session list is capped at 50 (`store_.list(50)` in `MainWindow` and the
   Permissions center); add paging or search.
+- Finish implementing session cleanup.
+- Session sorting.  Options will be by day and by project.
 - First-run onboarding: provider setup, connection test, model selection.
 - Session export (Markdown/JSON) and a documented backup/restore of
   `sessions.db`.
