@@ -206,6 +206,12 @@ HaiCodeApp::ReadyToRun()
 
     // --- 4. Create core objects ---
     store_     = std::make_unique<haicode::SessionStore>(*db_);
+
+    // --- 4b. Startup housekeeping: reclaim rows nothing can read anymore.
+    // Runs here, single-threaded, before the engine exists and before any
+    // session can be streaming. Best-effort — a failure is logged and startup
+    // continues, exactly like the ensure_owner_only pass above.
+    _RunHousekeeping(false);
     providers_ = make_provider_registry(config_.providers);
     tools_     = std::make_unique<haicode::ToolRegistry>();
     perm_gate_ = std::make_unique<haicode::PermissionGate>();
@@ -575,10 +581,39 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             });
             break;
         }
-        case MSG_SESSION_DELETED:
+        case MSG_CLEANUP_CONFIRMED: {
+            std::vector<std::string> ids;
+            const char* sid = nullptr;
+            for (int32 i = 0; msg->FindString("session_id", i, &sid) == B_OK; ++i)
+                if (sid) ids.emplace_back(sid);
+            bool reclaim = false;
+            msg->FindBool("reclaim", &reclaim);
+            if (ids.empty() && !reclaim) break;
+            std::lock_guard<std::mutex> lock(lifecycle_mu_);
+            lifecycle_workers_.emplace_back([this, ids, reclaim]() {
+                _RunCleanup(ids, reclaim);
+            });
+            break;
+        }
+        case MSG_SESSION_DELETED: {
+            // A failed delete leaves the session in place, so its flags stay.
+            bool ok = false;
+            const char* sid = nullptr;
+            if (msg->FindBool("ok", &ok) == B_OK && ok
+                    && msg->FindString("session_id", &sid) == B_OK && sid)
+                session_flags_.erase(sid);
             if (main_window_)
                 main_window_->PostMessage(msg);
             break;
+        }
+        case MSG_SESSIONS_DELETED: {
+            const char* sid = nullptr;
+            for (int32 i = 0; msg->FindString("deleted_id", i, &sid) == B_OK; ++i)
+                if (sid) session_flags_.erase(sid);
+            if (main_window_)
+                main_window_->PostMessage(msg);
+            break;
+        }
         case MSG_SHOW_PERMISSIONS:
             _ShowPermissionsCenter();
             break;
@@ -889,6 +924,110 @@ HaiCodeApp::_ApplyProviders(const BMessage* msg)
     } catch (...) {
         return false;
     }
+}
+
+std::string
+HaiCodeApp::_RunHousekeeping(bool include_reclaim)
+{
+    // Startup pass: nothing streams yet, so the whole trio (and a reclaim) is
+    // safe. Every step is independent — one failing logs and the rest run.
+    auto note = [](const std::string& s) { fprintf(stderr, "haicode: %s\n", s.c_str()); };
+    std::string summary;
+
+    if (db_) {
+        std::string err;
+        int orphans = db_->prune_orphans(err);
+        if (!err.empty()) note("orphan sweep: " + err);
+        if (orphans > 0)
+            summary += std::to_string(orphans) + " orphaned row(s) removed\n";
+    }
+
+    if (store_) {
+        // A 'pending' marker older than an hour belongs to a process that died
+        // mid-compaction; nothing reads it. Fresh markers stay untouched.
+        const int64_t kHourMs = 60LL * 60 * 1000;
+        int stale = store_->prune_stale_checkpoints(haicode::util::now_ms() - kHourMs);
+        int cleared = store_->clear_stale_checkpoint_contexts();
+        if (stale > 0)
+            summary += std::to_string(stale) + " stale checkpoint(s) removed\n";
+        if (cleared > 0)
+            summary += std::to_string(cleared) + " retired checkpoint payload(s) cleared\n";
+    }
+
+    {
+        BPath tmp;
+        if (find_directory(B_SYSTEM_TEMP_DIRECTORY, &tmp) == B_OK) {
+            std::string err;
+            const int64_t kDayMs = 24LL * 60 * 60 * 1000;
+            int swept = haicode::util::sweep_scratch_files(
+                tmp.Path(), {"haicode_shot_", "haicode_diff_"}, kDayMs, err);
+            if (!err.empty()) note("scratch sweep: " + err);
+            if (swept > 0)
+                summary += std::to_string(swept) + " scratch file(s) removed\n";
+        }
+    }
+
+    if (include_reclaim && db_) {
+        std::string err;
+        int64_t before = 0, after = 0;
+        if (db_->reclaim_space(err, &before, &after)) {
+            int64_t freed = before - after;
+            if (freed < 0) freed = 0;
+            summary += "Reclaimed " + std::to_string(freed / 1024) + " KB ("
+                     + std::to_string(after / 1024) + " KB now in use)";
+        } else {
+            note("reclaim: " + err);
+            summary += "Could not reclaim disk space: " + err;
+        }
+    }
+
+    while (!summary.empty() && summary.back() == '\n') summary.pop_back();
+    return summary;
+}
+
+void
+HaiCodeApp::_RunCleanup(const std::vector<std::string>& session_ids, bool reclaim)
+{
+    // Runs on a lifecycle worker: engine_ and store_ are live here, and
+    // _JoinLifecycleWorkers() guarantees this thread ends before either dies.
+    int deleted = 0, failed = 0;
+    std::string first_error;
+    std::vector<std::string> deleted_ids;
+
+    for (const std::string& sid : session_ids) {
+        std::string err;
+        bool ok = engine_ ? engine_->delete_session(sid, err) : false;
+        if (ok) {
+            ++deleted;
+            deleted_ids.push_back(sid);
+        } else {
+            ++failed;
+            if (first_error.empty()) first_error = err.empty() ? "unknown error" : err;
+        }
+    }
+
+    // Housekeeping after the deletions so VACUUM sees the freed pages. A
+    // session still running (one the filter did not match) makes VACUUM wait on
+    // the shared connection, so reclaim defers instead of blocking it.
+    bool defer_reclaim = reclaim && engine_ && !engine_->running_sessions().empty();
+    std::string housekeeping = _RunHousekeeping(reclaim && !defer_reclaim);
+    if (defer_reclaim) {
+        if (!housekeeping.empty()) housekeeping += "\n";
+        housekeeping += "Disk space not reclaimed: "
+                      + std::to_string(engine_->running_sessions().size())
+                      + " session(s) still running.";
+    }
+
+    BMessage done(MSG_SESSIONS_DELETED);
+    done.AddInt32("deleted", deleted);
+    done.AddInt32("failed", failed);
+    for (const std::string& sid : deleted_ids)
+        done.AddString("deleted_id", sid.c_str());
+    if (!first_error.empty())
+        done.AddString("error", first_error.c_str());
+    if (!housekeeping.empty())
+        done.AddString("housekeeping", housekeeping.c_str());
+    PostMessage(&done);
 }
 
 void

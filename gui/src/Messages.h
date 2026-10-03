@@ -132,3 +132,8 @@ static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "se
 static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32
 static const uint32 MSG_DELETE_SESSION_CONFIRMED = 'DLcf';  // MainWindow → be_app; "session_id" — confirmed, run the retiring worker
 static const uint32 MSG_SESSION_DELETED = 'DLok';  // lifecycle worker → be_app → MainWindow; "session_id" + "ok" bool + "error" string
+
+// Bulk session cleanup (File → Cleanup…)
+static const uint32 MSG_CLEANUP_REQUEST  = 'CLrq';  // menu item → MainWindow; "criteria" string (untitled / empty / project / reclaim / older:N)
+static const uint32 MSG_CLEANUP_CONFIRMED = 'CLcf';  // MainWindow → be_app; repeated "session_id" strings (may be none) + "reclaim" bool
+static const uint32 MSG_SESSIONS_DELETED = 'CLok';  // cleanup worker → be_app → MainWindow; "deleted"/"failed" int32, optional "error", optional "housekeeping" string

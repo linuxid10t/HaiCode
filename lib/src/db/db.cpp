@@ -163,6 +163,65 @@ void Database::migrate() {
     }
 }
 
+int Database::prune_orphans(std::string& error) {
+    error.clear();
+    int removed = 0;
+    try {
+        DbTxn txn(db_);
+        static const char* kTables[] = {
+            "session_message", "session_todo", "compaction_checkpoint"
+        };
+        for (const char* table : kTables) {
+            DbStmt stmt(db_, std::string("DELETE FROM ") + table
+                + " WHERE session_id NOT IN (SELECT id FROM session)");
+            stmt.expect_done();
+            removed += sqlite3_changes(db_);
+        }
+        txn.commit();
+    } catch (const std::exception& e) {
+        error = e.what();
+        return 0;
+    }
+
+    // Confirm the cascade invariant holds after the sweep.
+    DbStmt check(db_, "PRAGMA foreign_key_check;");
+    int violations = 0;
+    while (check.expect_row()) ++violations;
+    if (violations > 0)
+        error = std::to_string(violations) + " foreign key violation(s) remain";
+    return removed;
+}
+
+bool Database::reclaim_space(std::string& error,
+                             int64_t* bytes_before, int64_t* bytes_after) {
+    error.clear();
+    auto page_bytes = [&]() -> int64_t {
+        int64_t pages = 0, size = 0;
+        DbStmt pc(db_, "PRAGMA page_count;");
+        if (pc.expect_row()) pages = pc.int64_col(0);
+        DbStmt ps(db_, "PRAGMA page_size;");
+        if (ps.expect_row()) size = ps.int64_col(0);
+        return pages * size;
+    };
+    try {
+        // The WAL must be folded back into the main file before VACUUM can
+        // shrink it. Scoped so the statement is finalized first: VACUUM refuses
+        // to run while any statement on the connection is mid-step.
+        {
+            DbStmt ckpt(db_, "PRAGMA wal_checkpoint(TRUNCATE);");
+            if (!ckpt.expect_row())
+                throw DbError("wal_checkpoint returned no row");
+        }
+        if (bytes_before) *bytes_before = page_bytes();
+        exec("VACUUM;");
+        if (bytes_after) *bytes_after = page_bytes();
+    } catch (const std::exception& e) {
+        error = e.what();
+        return false;
+    }
+    return true;
+}
+
 // ---- SessionStore ----
 
 SessionStore::SessionStore(Database& db) : db_(db) {}
@@ -257,6 +316,44 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
         results.push_back(std::move(s));
     }
     return results;
+}
+
+std::vector<std::string> SessionStore::sessions_matching(const SessionFilter& filter) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+
+    struct Arg {
+        bool is_int;
+        std::string s;
+        int64_t i;
+    };
+    std::string sql = "SELECT id FROM session WHERE 1";
+    std::vector<Arg> args;
+    if (!filter.directory.empty()) {
+        sql += " AND directory=?";
+        args.push_back({false, filter.directory, 0});
+    }
+    if (filter.updated_before_ms > 0) {
+        sql += " AND time_updated<?";
+        args.push_back({true, "", filter.updated_before_ms});
+    }
+    if (filter.untitled_only)
+        sql += " AND title=''";
+    if (filter.empty_only)
+        sql += " AND NOT EXISTS (SELECT 1 FROM session_message m"
+               " WHERE m.session_id = session.id AND m.type='user_prompted')";
+    sql += " ORDER BY time_updated DESC";
+
+    DbStmt stmt(db_.handle(), sql);
+    for (size_t i = 0; i < args.size(); ++i) {
+        const Arg& a = args[i];
+        if (a.is_int) stmt.bind(int(i) + 1, a.i);
+        else          stmt.bind(int(i) + 1, a.s);
+    }
+
+    std::vector<std::string> ids;
+    while (stmt.expect_row())
+        ids.push_back(stmt.text(0));
+    return ids;
 }
 
 void SessionStore::update_directory(const std::string& session_id, const std::string& directory) {
@@ -656,6 +753,28 @@ std::vector<CompactionCheckpoint> SessionStore::list_complete_checkpoints(
         out.push_back(std::move(cp));
     }
     return out;
+}
+
+int SessionStore::prune_stale_checkpoints(int64_t older_than_ms) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbStmt stmt(db_.handle(),
+        "DELETE FROM compaction_checkpoint"
+        " WHERE status<>'complete' AND time_updated<?");
+    stmt.bind(1, older_than_ms).expect_done();
+    return sqlite3_changes(db_.handle());
+}
+
+int SessionStore::clear_stale_checkpoint_contexts() {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbStmt stmt(db_.handle(),
+        "UPDATE compaction_checkpoint SET recent_context=''"
+        " WHERE status='complete' AND recent_context<>'' AND id NOT IN"
+        " (SELECT id FROM compaction_checkpoint c"
+        "  WHERE c.status='complete' AND c.through_seq=("
+        "   SELECT MAX(through_seq) FROM compaction_checkpoint"
+        "   WHERE session_id=c.session_id AND status='complete'))");
+    stmt.expect_done();
+    return sqlite3_changes(db_.handle());
 }
 
 void SessionStore::replace_todos(const std::string& session_id,

@@ -97,6 +97,15 @@ private:
     // clear drafts and queued approval state, refresh the list, select or
     // create a replacement when the deleted session was the active one.
     void _HandleSessionDeleted(BMessage* msg);
+    // File → Cleanup… menu item clicked: resolve the criteria into a session
+    // filter, confirm the count, then post MSG_CLEANUP_CONFIRMED with stable ids.
+    void _HandleCleanupRequest(BMessage* msg);
+    // Bulk cleanup finished: tear down each deleted session's window state and
+    // re-select when the active session was among them.
+    void _HandleSessionsDeleted(BMessage* msg);
+    // Drop every piece of window-side state held for a session that no longer
+    // exists (drafts, queued and open approvals, badge counts).
+    void _ForgetSession(const std::string& sid);
     void _ShowNextPermissionRequest(const std::string& session_id);
     void _HandlePermissionWindowClosed(BMessage* msg);
     void _HandlePermStatus(BMessage* msg);

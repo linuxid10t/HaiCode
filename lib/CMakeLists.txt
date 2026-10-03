@@ -118,6 +118,11 @@ target_link_libraries(test_engine_correctness haicode)
 add_executable(test_session_lifecycle tests/test_session_lifecycle.cpp)
 target_link_libraries(test_session_lifecycle haicode)
 
+# Bulk session cleanup: SessionFilter selection, orphan sweep, checkpoint
+# pruning, WAL/VACUUM reclaim, and the scratch-file sweep.
+add_executable(test_session_cleanup tests/test_session_cleanup.cpp)
+target_link_libraries(test_session_cleanup haicode)
+
 # Capability-driven provider params: Anthropic effort/thinking mapping,
 # thinking-block capture + replay (Task 23), OpenAI param matrix (Task 24).
 add_executable(test_provider_params tests/test_provider_params.cpp)
@@ -154,7 +159,7 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_codex_auth test_permission_requests test_db_upgrade
          test_db_concurrency test_config_write test_config_trust
          test_subprocess test_turn_integrity test_engine_correctness
-         test_session_lifecycle test_web_tools test_provider_params
+         test_session_lifecycle test_session_cleanup test_web_tools test_provider_params
          test_pricing test_codex_params test_propose_plan test_model_db)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

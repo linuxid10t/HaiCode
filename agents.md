@@ -10,7 +10,7 @@ tools with per-action permissions, and persists every session to SQLite.
 ```bash
 cmake -B build -S .            # only needed once
 make -C build -j4              # builds lib + gui + tests
-ctest --test-dir build         # runs all 31 test binaries
+ctest --test-dir build         # runs all 36 test binaries
 
 ./build/gui/haicode-gui [project_dir]
 ```
@@ -72,6 +72,22 @@ Rules:
   layers (`erase_session_state`). DB failure rolls retirement back and keeps
   the session usable. The GUI runs retirement on tracked workers and ignores
   late events for deleted sessions.
+- **Bulk cleanup reuses that retirement path.** File → Cleanup resolves a
+  `SessionFilter` (`SessionStore::sessions_matching`, uncapped on purpose —
+  the sidebar's `list(50)` is not a deletion limit), confirms with Cancel
+  default + `B_ESCAPE`, then posts stable session ids (never list indices) to
+  a tracked lifecycle worker that loops `delete_session` and finally runs
+  housekeeping: `Database::prune_orphans`, `SessionStore::prune_stale_checkpoints`
+  (non-`complete` rows only), `SessionStore::clear_stale_checkpoint_contexts`
+  (every complete row except each session's highest-`through_seq` one —
+  summaries and `previous_checkpoint_id` always survive), and
+  `Database::reclaim_space` (WAL checkpoint then `VACUUM`; never inside a
+  `DbTxn`, never while a statement is mid-step, and deferred while any session
+  streams). `util::sweep_scratch_files` ages out `haicode_shot_*` /
+  `haicode_diff_*` in the system temp directory with an mtime floor, since a
+  just-taken screenshot or a live diff scratch is still in flight. The GUI
+  never calls `SessionStore::delete_session` directly. Prune
+  `HaiCodeApp::session_flags_` whenever a session id dies.
 
 - **Image retention is wire-only.** Keep raw user/screenshot images for the
   current and immediately preceding user turn; replace older images with

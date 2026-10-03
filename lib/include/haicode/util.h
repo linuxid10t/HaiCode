@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <vector>
 #include <sys/stat.h>
 
 namespace haicode {
@@ -61,6 +62,18 @@ std::string atomic_write_file(const std::string& path, const std::string& conten
 // startup to secret files (config/token stores) that earlier releases or
 // other editors may have created world-readable.
 std::string ensure_owner_only(const std::string& path);
+
+// Remove files directly in `dir` whose name starts with any prefix in
+// `prefixes` and whose mtime is older than max_age_ms. Non-recursive:
+// directories and subdirectories are never touched, only regular files.
+// The age floor is what keeps a scratch file that is still in flight (a
+// screenshot captured moments ago, a diff scratch belonging to a running
+// tool) alive. Returns the number of files removed; `error` collects the
+// first failure (a directory that cannot be opened) — individual unlink
+// failures are skipped, since a sweep must not fail the caller's task.
+int sweep_scratch_files(const std::string& dir,
+                        const std::vector<std::string>& prefixes,
+                        int64_t max_age_ms, std::string& error);
 
 // Lowercase hex SHA-256 of `data`. Used for config trust fingerprints.
 std::string sha256_hex(const std::string& data);

@@ -2,6 +2,7 @@
 #include <haicode/haicode.h>
 #include <haicode/permission_requests.h>
 #include "test_check.h"
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -349,6 +350,70 @@ static void test_delete_db_failure() {
     engine.shutdown();
 }
 
+// Bulk cleanup is a loop over the same retirement path (HaiCodeApp::_RunCleanup).
+// One running session in the matched set must not disturb a session the filter
+// did not match: it keeps running, keeps its grants, and its rows survive.
+static void test_bulk_delete_loop() {
+    Fixture fx;
+    fx.gate.set_rules({});
+    std::string running = fx.create();     // matched, parked in a tool
+    std::string survivor = fx.create();    // NOT matched, keeps running
+
+    // parktool runs under a per-session grant rather than a global allow-all,
+    // so the grant-erasure assertions below can tell the two apart.
+    fx.gate.add_allow(fx.sid, "parktool", "/tmp");
+    fx.gate.add_allow(running, "parktool", "/tmp");
+    fx.gate.add_allow(survivor, "parktool", "/tmp");
+
+    fx.engine->submit_prompt(fx.sid, "PARK doomed");
+    fx.park->entered.wait();
+    fx.engine->submit_prompt(survivor, "PARK survivor");
+    for (int i = 0; i < 500 && fx.park->executions != 2; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    TEST_REQUIRE(fx.park->executions == 2, "both sessions reached the tool");
+
+    // Give the doomed sessions grants that must disappear with them, and the
+    // survivor grants that must not.
+    const json no_input = json::object();
+    fx.gate.add_allow(fx.sid, "bash", "/bin/doomed");
+    fx.gate.add_allow(running, "bash", "/bin/doomed");
+    fx.gate.add_allow(survivor, "bash", "/bin/keep");
+    TEST_REQUIRE(fx.gate.check(running, "bash", "/bin/doomed", no_input)
+        == PermissionEffect::Allow, "doomed grants active before deletion");
+
+    SessionFilter filter;
+    filter.directory = "/tmp";
+    auto matched = fx.store.sessions_matching(filter);
+    TEST_REQUIRE(matched.size() == 3, "filter matches the doomed sessions and the survivor");
+    matched.erase(std::remove(matched.begin(), matched.end(), survivor), matched.end());
+    TEST_REQUIRE(matched.size() == 2, "two sessions targeted");
+
+    int deleted = 0, failed = 0;
+    for (const std::string& sid : matched) {
+        std::string err;
+        if (fx.engine->delete_session(sid, err)) ++deleted; else ++failed;
+    }
+    TEST_REQUIRE(deleted == 2 && failed == 0, "bulk loop deleted both");
+
+    TEST_REQUIRE(!fx.store.get(fx.sid).has_value(), "first doomed session gone");
+    TEST_REQUIRE(!fx.store.get(running).has_value(), "second doomed session gone");
+    TEST_REQUIRE(!fx.engine->is_running(fx.sid) && !fx.engine->is_running(running),
+        "retired sessions no longer running");
+    TEST_REQUIRE(fx.park->executions == 2, "no parked tool re-ran after retirement");
+
+    // The untouched session is unaffected by the loop.
+    TEST_REQUIRE(fx.engine->is_running(survivor), "survivor still running");
+    TEST_REQUIRE(fx.gate.check(survivor, "bash", "/bin/keep", no_input)
+        == PermissionEffect::Allow, "survivor's grant intact");
+    TEST_REQUIRE(fx.gate.check(fx.sid, "bash", "/bin/doomed", no_input)
+        == PermissionEffect::Ask, "doomed grants erased");
+
+    fx.park->gate->open_gate();
+    wait_idle(*fx.engine, survivor);
+    TEST_REQUIRE(fx.store.get(survivor).has_value(), "survivor's rows intact");
+    fx.engine->shutdown();
+}
+
 int main() {
     test_delete_idle();
     test_delete_running_parked_tool();
@@ -356,5 +421,6 @@ int main() {
     test_delete_parked_ask();
     test_delete_with_pending_title();
     test_delete_db_failure();
+    test_bulk_delete_loop();
     std::puts("session lifecycle tests passed");
 }

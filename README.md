@@ -344,6 +344,33 @@ todos, and history. If the database delete fails, the session stays usable
 and the error is shown. Other sessions, including their permission grants,
 are untouched.
 
+**File → Cleanup** covers the accumulated bulk:
+
+| Item | What it removes |
+|---|---|
+| Delete Untitled Sessions | Sessions never given a title |
+| Delete Empty Sessions | Sessions no prompt was ever sent to |
+| Delete Sessions Older Than… | 7 / 30 / 90 days by last activity |
+| Delete This Project's Sessions | Every session of the open project directory |
+| Reclaim Disk Space… | WAL checkpoint + `VACUUM`, so the database file shrinks |
+
+Each item names what it targets, counts how many are running and will be
+interrupted, and confirms with *Cancel* as the default — Escape cancels and
+changes nothing. Bulk deletion runs through the same retirement path as a
+single delete, so a session the filter did not match keeps running with its
+grants intact. Selection is uncapped, unlike the 50-row sidebar, so a session
+that never appeared in the list is still deletable. Reclaim defers the
+`VACUUM` while any session is still streaming and reports that it deferred.
+
+HaiCode also does housekeeping silently at startup, before any session is
+running: orphaned message/todo/checkpoint rows, compaction checkpoints left
+`pending` or `failed` by a crashed run, the retained-context payloads of
+superseded checkpoints (only the newest one per session is ever read again),
+and scratch files older than a day left in the system temp directory
+(`haicode_shot_*`, `haicode_diff_*`). Summaries and the compaction chain are
+never touched, so a reloaded session still shows its `[context compacted]`
+entries.
+
 ### Session autonaming
 
 New sessions are created with an empty title and given a descriptive name

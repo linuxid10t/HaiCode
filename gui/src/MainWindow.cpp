@@ -48,6 +48,7 @@
 #include <haicode/pricing.h>
 #include <haicode/skills.h>
 #include <haicode/tool.h>
+#include <haicode/util.h>
 #include <haicode/codex_auth.h>
 
 #include <nlohmann/json.hpp>
@@ -293,6 +294,28 @@ static std::string dir_basename(const std::string& path) {
     return (pos == std::string::npos) ? p : p.substr(pos + 1);
 }
 
+// Sidebar title for a session: its title, or the creation time recovered from
+// the descending id when untitled. Shared by _RefreshSessionList and the
+// cleanup confirmations so both name sessions the same way.
+static std::string session_display_title(const haicode::SessionInfo& si) {
+    if (!si.title.empty()) return si.title;
+    if (si.id.size() < 20) return si.id;
+    // ID format: prefix_XXXXXXXXXXXXXXXX (16 hex descending timestamp) + 8 hex random
+    // Recover creation time: creation_ms = INT64_MAX - desc
+    try {
+        uint64_t desc = std::stoull(si.id.substr(4, 16), nullptr, 16);
+        int64_t  ms   = (int64_t)(INT64_MAX - (int64_t)desc);
+        time_t   sec  = (time_t)(ms / 1000);
+        struct tm t;
+        localtime_r(&sec, &t);
+        char buf[32];
+        strftime(buf, sizeof(buf), "%m/%d %H:%M", &t);
+        return buf;
+    } catch (...) {
+        return si.id.substr(si.id.size() - 8);
+    }
+}
+
 MainWindow::MainWindow(haicode::SessionEngine& engine,
                        haicode::SessionStore& store,
                        const std::string& project_dir,
@@ -312,7 +335,32 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     menu_bar_ = new BMenuBar("menu_bar");
     BMenu* file_menu = new BMenu("File");
     file_menu->AddItem(new BMenuItem("New Session", new BMessage(MSG_NEW_SESSION)));
-    file_menu->AddItem(new BMenu("Cleanup"));
+    BMenu* cleanup_menu = new BMenu("Cleanup");
+    {
+        auto add_item = [&](const char* label, const char* criteria) {
+            BMessage* m = new BMessage(MSG_CLEANUP_REQUEST);
+            m->AddString("criteria", criteria);
+            cleanup_menu->AddItem(new BMenuItem(label, m));
+        };
+        add_item("Delete Untitled Sessions", "untitled");
+        add_item("Delete Empty Sessions", "empty");
+        BMenu* older_menu = new BMenu("Delete Sessions Older Than");
+        for (int days : {7, 30, 90}) {
+            BMessage* m = new BMessage(MSG_CLEANUP_REQUEST);
+            std::string criteria = "older:" + std::to_string(days);
+            m->AddString("criteria", criteria.c_str());
+            older_menu->AddItem(new BMenuItem((std::to_string(days) + " days").c_str(), m));
+        }
+        cleanup_menu->AddItem(older_menu);
+        add_item("Delete This Project's Sessions", "project");
+        cleanup_menu->AddSeparatorItem();
+        add_item("Reclaim Disk Space" B_UTF8_ELLIPSIS, "reclaim");
+        // The parent menu's SetTargetForItems does not reach into submenus, so
+        // the age submenu needs its own target.
+        older_menu->SetTargetForItems(this);
+        cleanup_menu->SetTargetForItems(this);
+    }
+    file_menu->AddItem(cleanup_menu);
     offline_item_ = new BMenuItem("Offline Mode", new BMessage(MSG_OFFLINE_MODE));
     file_menu->AddItem(offline_item_);
     file_menu->AddSeparatorItem();
@@ -829,6 +877,12 @@ MainWindow::MessageReceived(BMessage* msg)
         case MSG_SESSION_DELETED:
             _HandleSessionDeleted(msg);
             break;
+        case MSG_CLEANUP_REQUEST:
+            _HandleCleanupRequest(msg);
+            break;
+        case MSG_SESSIONS_DELETED:
+            _HandleSessionsDeleted(msg);
+            break;
         case MSG_TEXT_DELTA:
             _HandleTextDelta(msg);
             break;
@@ -1189,27 +1243,7 @@ MainWindow::_RefreshSessionList()
 
     auto sessions = store_.list(50);
     for (auto& si : sessions) {
-        std::string title;
-        if (!si.title.empty()) {
-            title = si.title;
-        } else if (si.id.size() >= 20) {
-            // ID format: prefix_XXXXXXXXXXXXXXXX (16 hex descending timestamp) + 8 hex random
-            // Recover creation time: creation_ms = INT64_MAX - desc
-            try {
-                uint64_t desc = std::stoull(si.id.substr(4, 16), nullptr, 16);
-                int64_t  ms   = (int64_t)(INT64_MAX - (int64_t)desc);
-                time_t   sec  = (time_t)(ms / 1000);
-                struct tm t;
-                localtime_r(&sec, &t);
-                char buf[32];
-                strftime(buf, sizeof(buf), "%m/%d %H:%M", &t);
-                title = buf;
-            } catch (...) {
-                title = si.id.substr(si.id.size() - 8);
-            }
-        } else {
-            title = si.id;
-        }
+        std::string title = session_display_title(si);
         session_labels_.push_back(title);
         session_list_->AddItem(new BStringItem(title.c_str()));
         session_ids_.push_back(si.id);
@@ -2085,6 +2119,15 @@ MainWindow::PostPermissionRequest(const haicode::PermissionRequest& req)
 }
 
 void
+MainWindow::_ForgetSession(const std::string& sid)
+{
+    session_drafts_.erase(sid);
+    pending_perm_queue_.erase(sid);
+    open_perm_sessions_.erase(sid);
+    perm_pending_sessions_.erase(sid);
+}
+
+void
 MainWindow::_HandleSessionDeleted(BMessage* msg)
 {
     const char* sid_c = nullptr;
@@ -2112,10 +2155,7 @@ MainWindow::_HandleSessionDeleted(BMessage* msg)
     int replaced_idx = 0;
     for (size_t i = 0; i < session_ids_.size(); ++i)
         if (session_ids_[i] == sid) { replaced_idx = (int)i; break; }
-    session_drafts_.erase(sid);
-    pending_perm_queue_.erase(sid);
-    open_perm_sessions_.erase(sid);
-    perm_pending_sessions_.erase(sid);
+    _ForgetSession(sid);
     if (was_active) {
         active_session_id_.clear();
         queued_prompts_ = 0;
@@ -2134,6 +2174,150 @@ MainWindow::_HandleSessionDeleted(BMessage* msg)
         else
             _NewSession();
     }
+}
+
+void
+MainWindow::_HandleCleanupRequest(BMessage* msg)
+{
+    const char* criteria_c = nullptr;
+    if (msg->FindString("criteria", &criteria_c) != B_OK || !criteria_c) return;
+    std::string criteria = criteria_c;
+
+    if (criteria == "reclaim") {
+        BMessage go(MSG_CLEANUP_CONFIRMED);
+        go.AddBool("reclaim", true);
+        be_app->PostMessage(&go);
+        return;
+    }
+
+    haicode::SessionFilter filter;
+    std::string what;
+    if (criteria == "untitled") {
+        filter.untitled_only = true;
+        what = "untitled";
+    } else if (criteria == "empty") {
+        filter.empty_only = true;
+        what = "empty (no prompt ever sent)";
+    } else if (criteria == "project") {
+        filter.directory = project_dir_;
+        what = "in this project (" + project_dir_ + ")";
+    } else if (criteria.compare(0, 6, "older:") == 0) {
+        int days = 0;
+        try { days = std::stoi(criteria.substr(6)); } catch (...) { return; }
+        if (days <= 0) return;
+        const int64_t kDayMs = 24LL * 60 * 60 * 1000;
+        filter.updated_before_ms = haicode::util::now_ms() - days * kDayMs;
+        what = "older than " + std::to_string(days) + " days";
+    } else {
+        return;
+    }
+
+    std::vector<std::string> ids = store_.sessions_matching(filter);
+    if (ids.empty()) {
+        BAlert* alert = new BAlert("Cleanup", "Nothing to clean up.", "OK");
+        alert->Go();
+        return;
+    }
+
+    // Name up to six of them the way the sidebar names them, and say how many
+    // are running — bulk deletion interrupts those, exactly as a single delete
+    // does.
+    BString text;
+    text << "Delete " << ids.size() << " " << what.c_str() << " session(s)?\n\n";
+    int shown = 0;
+    for (const std::string& sid : ids) {
+        if (shown == 6) {
+            text << "… and " << (ids.size() - shown) << " more\n";
+            break;
+        }
+        auto si = store_.get(sid);
+        std::string title = si ? session_display_title(*si)
+            : (sid.size() > 8 ? sid.substr(sid.size() - 8) : sid);
+        text << "• " << title.c_str() << "\n";
+        ++shown;
+    }
+    int running = 0;
+    if (engine_) {
+        for (const std::string& sid : ids)
+            if (engine_->is_running(sid)) ++running;
+    }
+    if (running > 0)
+        text << "\n" << running << " of them are running and will be interrupted.";
+    text << "\n\nThe conversations, todos, and history are removed permanently.";
+
+    // Cancel is the safe choice (default + Escape) — same shape as the
+    // single-session delete confirmation.
+    BAlert* alert = new BAlert("Cleanup", text.String(),
+                               "Cancel", "Delete", nullptr,
+                               B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+    alert->SetShortcut(0, B_ESCAPE);
+    if (alert->Go() != 1) return;
+
+    // Stable ids, never indices: session_ids_ shifts under asynchronous work.
+    BMessage go(MSG_CLEANUP_CONFIRMED);
+    go.AddBool("reclaim", false);
+    for (const std::string& sid : ids)
+        go.AddString("session_id", sid.c_str());
+    be_app->PostMessage(&go);
+}
+
+void
+MainWindow::_HandleSessionsDeleted(BMessage* msg)
+{
+    int32 deleted = 0, failed = 0;
+    msg->FindInt32("deleted", &deleted);
+    msg->FindInt32("failed", &failed);
+    const char* error = nullptr;
+    msg->FindString("error", &error);
+    const char* housekeeping = nullptr;
+    msg->FindString("housekeeping", &housekeeping);
+
+    // Window-side teardown for every id the worker reports. A session whose
+    // delete failed stays in the list and keeps its drafts.
+    std::set<std::string> deleted_ids;
+    const char* sid = nullptr;
+    for (int32 i = 0; msg->FindString("deleted_id", i, &sid) == B_OK; ++i) {
+        if (!sid) continue;
+        deleted_ids.insert(sid);
+        _ForgetSession(sid);
+    }
+
+    if (failed > 0) {
+        BString text;
+        text << "Could not delete " << failed << " session(s):\n\n"
+             << (error ? error : "unknown error")
+             << "\n\n" << deleted << " session(s) were deleted.";
+        BAlert* alert = new BAlert("Cleanup", text.String(), "OK");
+        alert->Go();
+    } else if (housekeeping && *housekeeping) {
+        BAlert* alert = new BAlert("Cleanup", housekeeping, "OK");
+        alert->Go();
+    }
+
+    bool active_gone = deleted_ids.count(active_session_id_) != 0;
+    int replaced_idx = 0;
+    if (active_gone) {
+        for (size_t i = 0; i < session_ids_.size(); ++i)
+            if (session_ids_[i] == active_session_id_) { replaced_idx = (int)i; break; }
+        active_session_id_.clear();
+        queued_prompts_ = 0;
+        engine_running_ = false;
+        streaming_state_ = "idle";
+        current_tool_name_.clear();
+        build_call_id_.clear();
+        chat_view_->EndStreaming();
+        interrupt_btn_->SetEnabled(false);
+    }
+    _RefreshSessionList();
+    if (active_gone) {
+        if (!session_ids_.empty())
+            _SwitchToSession(std::min(replaced_idx,
+                                      (int)session_ids_.size() - 1));
+        else
+            _NewSession();
+    }
+    // Deleted sessions no longer have flags or grants to report.
+    be_app->PostMessage(MSG_PERM_SYNC);
 }
 
 void

@@ -150,6 +150,21 @@ public:
     void exec(const std::string& sql);
     void migrate();
 
+    // Delete session_message / session_todo / compaction_checkpoint rows whose
+    // session no longer exists. ON DELETE CASCADE makes orphans unexpected for
+    // anything this code wrote; this repairs pre-FK databases and hand-edited
+    // ones. Returns the number of rows removed; `error` is set when a delete
+    // failed or violations remain afterwards.
+    int prune_orphans(std::string& error);
+    // Truncate the WAL and VACUUM so the file actually shrinks after deletions.
+    // Never call from inside a transaction or while another thread is
+    // streaming on this connection. When supplied, `bytes_before`/`bytes_after`
+    // receive the database size (page_count * page_size) either side of the
+    // VACUUM so the caller can report what was reclaimed.
+    bool reclaim_space(std::string& error,
+                       int64_t* bytes_before = nullptr,
+                       int64_t* bytes_after = nullptr);
+
     // PRAGMA user_version — the schema version cursor for numbered migrations.
     int  user_version();
     void set_user_version(int version);
@@ -179,6 +194,15 @@ struct SessionInfo {
     int last_input_tokens = 0;
     int64_t time_created = 0;
     int64_t time_updated = 0;
+};
+
+// Which stored sessions a bulk cleanup targets. Every predicate left at its
+// default matches everything, so an all-default filter means "all sessions".
+struct SessionFilter {
+    std::string directory;             // "" = any project
+    int64_t updated_before_ms = 0;     // 0 = no age limit
+    bool untitled_only = false;        // title = ''
+    bool empty_only = false;           // no 'user_prompted' message row
 };
 
 struct SessionMessage {
@@ -216,6 +240,10 @@ public:
                        const std::string& model_json);
     std::optional<SessionInfo> get(const std::string& session_id);
     std::vector<SessionInfo> list(int limit = 50);
+    // Ids of every stored session matching `filter`, newest first. Deliberately
+    // uncapped (unlike list()'s 50) so a bulk cleanup can reach sessions that
+    // never made it into the sidebar.
+    std::vector<std::string> sessions_matching(const SessionFilter& filter);
     void update_title(const std::string& session_id, const std::string& title);
     bool update_title_if_current(const std::string& session_id,
                                  const std::string& title,
@@ -298,6 +326,16 @@ public:
     // the exact point each compaction occurred, without storing message rows.
     std::vector<CompactionCheckpoint> list_complete_checkpoints(
         const std::string& session_id);
+    // Delete non-complete checkpoint rows (crash "pending" markers and "failed"
+    // attempts) older than `older_than_ms`. Complete rows are never deleted —
+    // they are the [context compacted] transcript source and the compaction
+    // chain. Returns the number of rows removed.
+    int prune_stale_checkpoints(int64_t older_than_ms);
+    // Blank recent_context on every complete checkpoint except each session's
+    // newest-by-through_seq one: only that row is ever read again (by
+    // compact_history). The chain and every summary stay intact. Returns the
+    // number of rows cleared.
+    int clear_stale_checkpoint_contexts();
 
     // Atomic whole-list replace for the todo_write tool. Deletes every
     // existing row for the session and inserts the new list in one

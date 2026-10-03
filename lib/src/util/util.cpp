@@ -327,6 +327,47 @@ int make_secure_temp(const std::string& tmpl_prefix, std::string& out_path) {
     return fd;
 }
 
+int sweep_scratch_files(const std::string& dir,
+                       const std::vector<std::string>& prefixes,
+                       int64_t max_age_ms, std::string& error) {
+    error.clear();
+    if (prefixes.empty()) return 0;
+
+    DIR* d = opendir(dir.c_str());
+    if (!d) {
+        error = "Cannot open " + dir + ": " + strerror(errno);
+        return 0;
+    }
+
+    const int64_t now = now_ms();
+    int removed = 0;
+    while (struct dirent* ent = readdir(d)) {
+        std::string name = ent->d_name;
+        if (name == "." || name == "..") continue;
+        bool matched = false;
+        for (const std::string& p : prefixes) {
+            if (!p.empty() && name.compare(0, p.size(), p) == 0) { matched = true; break; }
+        }
+        if (!matched) continue;
+
+        std::string path = dir;
+        if (!path.empty() && path.back() != '/') path += '/';
+        path += name;
+
+        struct stat st{};
+        if (stat(path.c_str(), &st) != 0) continue;
+        // Directories are never swept, whatever they are named.
+        if (!S_ISREG(st.st_mode)) continue;
+        int64_t mtime_ms = (int64_t)st.st_mtim.tv_sec * 1000
+                         + (int64_t)st.st_mtim.tv_nsec / 1000000;
+        if (now - mtime_ms < max_age_ms) continue;
+        if (unlink(path.c_str()) != 0) continue;
+        ++removed;
+    }
+    closedir(d);
+    return removed;
+}
+
 } // namespace util
 
 // ---- HttpClient ----

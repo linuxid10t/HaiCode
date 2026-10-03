@@ -464,7 +464,15 @@ In `lib/src/provider/openai.cpp`:
 
 - Session list is capped at 50 (`store_.list(50)` in `MainWindow` and the
   Permissions center); add paging or search.
-- Finish implementing session cleanup.
+- ~~Finish implementing session cleanup.~~ Done: File → Cleanup offers Delete
+  Untitled / Empty / Older Than 7-30-90 days / This Project's Sessions and
+  Reclaim Disk Space, all confirmed with Cancel default and Escape, all
+  deleting through `SessionEngine::delete_session` (running sessions
+  interrupted, unrelated sessions untouched). Startup housekeeping sweeps
+  orphaned rows, crashed/failed compaction checkpoints, superseded checkpoint
+  payloads, and aged `haicode_shot_*`/`haicode_diff_*` scratch files;
+  `Database::reclaim_space` runs the WAL checkpoint + `VACUUM` the deletions
+  need. See `test_session_cleanup` and `lib/tests/test_session_cleanup.cpp`.
 - Session sorting.  Options will be by day and by project.
 - First-run onboarding: provider setup, connection test, model selection.
 - Session export (Markdown/JSON) and a documented backup/restore of
