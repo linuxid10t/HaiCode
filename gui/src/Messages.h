@@ -21,7 +21,7 @@ static const uint32 MSG_BUILD_HOOK     = 'BHrs';   // "success" bool, "exit_code
 static const uint32 MSG_INTERRUPTED    = 'INtd';   // engine → UI: interrupt completed
 static const uint32 MSG_COMPACTION     = 'CMpt';   // "phase" string ("start"/"end"), counts
 static const uint32 MSG_SESSION_RENAMED= 'SRnm';   // "title" string — refresh session list
-static const uint32 MSG_COST_UPDATED   = 'CSup';   // persisted session totals: "cost_usd" double, "input"/"output" int32 (output includes reasoning)
+static const uint32 MSG_COST_UPDATED   = 'CSup';   // persisted session totals: "cost_usd" double, "input"/"output"/"cache_read"/"cache_write" int32 (input is uncached only; output includes reasoning)
 static const uint32 MSG_COST_PROGRESS  = 'CSpg';   // in-flight estimate: "provisional_cost_usd" double
 
 // UI → Engine / UI internal

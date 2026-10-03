@@ -318,8 +318,9 @@ static const char* kSkillRow =
 static void test_assemble_skill_rows() {
     haicode::ContextBuilder builder;
 
-    // Current-turn row carries the framed body; a past-turn copy of the
-    // same row collapses to the compact marker (one-shot drop-off).
+    // The framed body renders identically whether or not the row is the
+    // current turn's prompt (append-only history: a past turn is never
+    // rewritten, so the prompt cache and thinking-block binding survive).
     std::vector<haicode::SessionMessage> msgs;
     msgs.push_back(make_msg(1, kSkillRow));
     msgs.push_back(make_msg(2, kSkillRow));
@@ -327,9 +328,9 @@ static void test_assemble_skill_rows() {
     CHECK(out.size() == 2);
     std::string past = out[0]["content"].get<std::string>();
     std::string cur  = out[1]["content"].get<std::string>();
-    CHECK(past.find("no longer apply") != std::string::npos);
-    CHECK(past.find("Alpha body.") == std::string::npos);
-    CHECK(past.find("do the thing") != std::string::npos);   // args stay
+    CHECK(past == cur);
+    CHECK(past.find("no longer apply") == std::string::npos);
+    CHECK(cur.find("they do not apply to later turns") != std::string::npos);
     CHECK(cur.find("[skill invoked: /alpha") != std::string::npos);
     CHECK(cur.find("Alpha body.") != std::string::npos);
     CHECK(cur.find("do the thing") != std::string::npos);
@@ -467,8 +468,11 @@ static void test_engine_slash_e2e() {
         CHECK(reqd.find("do the thing") != std::string::npos);
         CHECK(reqd.find("/alpha do the thing") == std::string::npos);
 
-        // Second, plain turn: body drops off; only the compact marker
-        // references the earlier invocation.
+        // Second, plain turn: the first turn's row goes out byte-identical
+        // (append-only, so the cached prefix is reused) and the body is not
+        // duplicated onto the new prompt.
+        const nlohmann::json turn1_first =
+            provider->last_chat_request.messages.at(0);
         engine.submit_prompt(sid, "plain second prompt");
         for (int i = 0; i < 100; ++i) {
             if (store.load_messages(sid).size() >= 4) break;
@@ -478,9 +482,11 @@ static void test_engine_slash_e2e() {
         std::string reqd2 = FakeProvider::dump_messages(
             provider->last_chat_request.messages);
         CHECK(reqd2.find("plain second prompt") != std::string::npos);
-        CHECK(reqd2.find("Alpha body.") == std::string::npos);
-        CHECK(reqd2.find("[skill invoked:") == std::string::npos);
-        CHECK(reqd2.find("no longer apply") != std::string::npos);
+        CHECK(provider->last_chat_request.messages.at(0) == turn1_first);
+        auto body_at = reqd2.find("Alpha body.");
+        CHECK(body_at != std::string::npos);
+        CHECK(reqd2.find("Alpha body.", body_at + 1) == std::string::npos);
+        CHECK(reqd2.find("no longer apply") == std::string::npos);
 
         // The stored row keeps the verbatim command for transcript replay.
         auto rows = store.load_messages(sid);

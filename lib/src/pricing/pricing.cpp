@@ -476,6 +476,16 @@ TokenUsage estimate_inflight_usage(const TokenUsage& reported,
     return u;
 }
 
+int cache_hit_percent(const TokenUsage& u) {
+    // 64-bit: session totals are int and cache_read * 100 overflows int32
+    // past ~21M cached tokens, which a long session easily reaches.
+    const long long total = static_cast<long long>(std::max(0, u.input))
+                          + std::max(0, u.cache_read)
+                          + std::max(0, u.cache_write);
+    if (total <= 0) return -1;
+    return static_cast<int>(std::max(0, u.cache_read) * 100LL / total);
+}
+
 double compute_cost(const TokenUsage& u, const ModelPricing& p) {
     double cost = 0.0;
     cost += static_cast<double>(u.input)       * p.input;

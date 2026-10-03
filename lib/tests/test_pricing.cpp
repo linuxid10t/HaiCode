@@ -503,6 +503,28 @@ static bool test_cached_input_billing() {
     return true;
 }
 
+static bool test_cache_hit_percent() {
+    TokenUsage u;
+    CHECK(cache_hit_percent(u) == -1, "no prompt -> -1 (nothing to measure)");
+    u.input = 1000;
+    CHECK(cache_hit_percent(u) == 0, "uncached prompt -> 0%");
+    u.input = 0; u.cache_read = 5000;
+    CHECK(cache_hit_percent(u) == 100, "all cache reads -> 100%");
+    // Writes count as prompt but not as hits: a full rewrite is a miss.
+    u.cache_read = 0; u.cache_write = 5000;
+    CHECK(cache_hit_percent(u) == 0, "all cache writes -> 0%");
+    // Floored: 100% is reserved for a prompt with no uncached tokens.
+    u.input = 1; u.cache_read = 999; u.cache_write = 0;
+    CHECK(cache_hit_percent(u) == 99, "999/1000 floors to 99%");
+    u.input = 100; u.cache_read = 800; u.cache_write = 100;
+    CHECK(cache_hit_percent(u) == 80, "mixed buckets");
+    // Session totals: cache_read * 100 must not overflow int32.
+    u.input = 1000000; u.cache_read = 2000000000; u.cache_write = 0;
+    CHECK(cache_hit_percent(u) == 99, "large totals don't overflow");
+    std::cout << "[OK] cache hit percent\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_cached_input_billing() && ok;
@@ -515,6 +537,7 @@ int main() {
     ok = test_tiered_pricing() && ok;
     ok = test_compute_cost() && ok;
     ok = test_inflight_estimate() && ok;
+    ok = test_cache_hit_percent() && ok;
     if (!ok) return 1;
     std::cout << "All pricing/metadata tests passed\n";
     return 0;

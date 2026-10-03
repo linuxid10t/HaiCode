@@ -45,6 +45,15 @@ public:
     std::vector<nlohmann::json> assemble_messages(const std::vector<SessionMessage>& msgs,
                                                   bool model_accepts_images = true);
 
+    // Appends a per-step status update (see next_status_update) as a text
+    // block at the tail of `messages`: onto the last message's content when
+    // it is a user turn, else as its own user turn. assemble_messages
+    // replays persisted updates through this same function, so a step's
+    // update renders identically when it is the live tail and in every later
+    // request (append-only history). No-op for empty text.
+    static void append_status_block(std::vector<nlohmann::json>& messages,
+                                    const std::string& text);
+
     // Non-empty: replay the provider-native reasoning items persisted on
     // assistant rows (`reasoning_items`) that were produced by this model,
     // as leading "openai_reasoning" content blocks. Set by the engine only
@@ -431,5 +440,32 @@ std::string render_dynamic_prompt(const std::string& model,
                                   const std::string& project_dir,
                                   int steps_left,
                                   int max_steps);
+
+// Per-step status the agentic loop keeps the model anchored to: the
+// final-stretch step-budget text (render_dynamic_prompt), the rendered todo
+// list (todos_tracked=false in Plan mode, which doesn't show it), and the
+// offline flag.
+struct StepStatus {
+    std::string budget;
+    std::string todos;
+    bool todos_tracked = true;
+    bool offline = false;
+};
+
+// Decides what status text the next request carries. The text lives in the
+// conversation history (persisted on the step's assistant row as `status`
+// and replayed in place), so only the parts that CHANGED since the last
+// persisted update (`previous`, null when none is in context) are sent;
+// unchanged state is already in context. Parts that disappeared get an
+// explicit line (budget renewed, todo list empty, offline off) so a stale
+// earlier copy is never the model's latest word. Returns null when nothing
+// changed, else {"text", "budget", "todos", "offline"} — the full current
+// state, which the next call compares against.
+nlohmann::json next_status_update(const StepStatus& now,
+                                  const nlohmann::json& previous);
+
+// The most recent persisted status update among `messages` (the
+// post-checkpoint context rows), or null.
+nlohmann::json last_status_update(const std::vector<SessionMessage>& messages);
 
 } // namespace haicode

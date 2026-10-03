@@ -95,4 +95,11 @@ std::vector<std::pair<std::string, ModelPricing>> builtin_pricing_entries();
 // input-size tier ladder (the flat entry is only its base tier).
 bool has_price_tiers(const std::string& model_id);
 
+// Share of the prompt (input + cache reads + cache writes) served from the
+// provider's prompt cache, floored to a whole percent: 100 only when every
+// prompt token was a cache read. -1 when there is no prompt to measure.
+// Callers decide whether to show it — a provider that never reports cache
+// activity (most local servers) would otherwise read as a constant 0%.
+int cache_hit_percent(const TokenUsage& usage);
+
 } // namespace haicode
