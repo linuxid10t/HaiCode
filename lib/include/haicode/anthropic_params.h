@@ -14,9 +14,11 @@ namespace haicode {
 // thinking with display:"summarized", the stable system block (cached),
 // verbatim messages, and tools with a trailing cache breakpoint. Post-pass:
 // cache breakpoints on the last block of the last and second-to-last
-// messages, then `system_dynamic` appended as a trailing user text block
+// messages, then any `system_dynamic` appended as a trailing user text block
 // AFTER them — never in `system`, where a per-step change would invalidate
-// the cached conversation behind it.
+// the cached conversation behind it. (The engine leaves `system_dynamic`
+// empty and sends per-step state as persisted status updates inside
+// `messages`; the field remains for other callers.)
 nlohmann::json build_anthropic_body(const LLMRequest& request);
 
 // Accumulates one streaming thinking content block. thinking_delta and

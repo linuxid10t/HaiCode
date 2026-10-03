@@ -211,10 +211,11 @@ std::vector<nlohmann::json> translate_messages(
         }
     }
 
-    // The dynamic system tail ({{STEPS_LEFT}} budget warnings, todo list)
-    // changes every step, so it must go at the END of the message list.
-    // Everything before it (system + full history) then stays byte-identical
-    // across steps and llama.cpp's prefix KV cache keeps hitting.
+    // A non-empty dynamic system tail may change per request, so it must go
+    // at the END of the message list. Everything before it (system + full
+    // history) then stays byte-identical across steps and llama.cpp's prefix
+    // KV cache keeps hitting. (The engine sends it empty — its per-step
+    // state rides `src` as persisted status updates.)
     //
     // Alternation rules require care:
     // - last message user   → append the dynamic text to its content. Two

@@ -27,7 +27,11 @@ inline constexpr int kDefaultMaxTokens = 32768;
 struct LLMRequest {
     std::string model_id;
     std::string system;          // byte-stable across turns (cacheable prefix)
-    std::string system_dynamic;  // per-step content that varies (e.g. {{STEPS_LEFT}})
+    // Optional per-request text every provider sends after the last message,
+    // never in the system prompt. The engine leaves it empty — its per-step
+    // state rides `messages` as persisted status updates so each request is
+    // a byte-identical prefix of the next; the field stays for other callers.
+    std::string system_dynamic;
     std::vector<nlohmann::json> messages;
     std::vector<ToolDefinition> tools;
     std::optional<int> max_tokens;  // unset = provider/model default

@@ -223,11 +223,12 @@ nlohmann::json build_codex_body(const LLMRequest& request) {
         body["prompt_cache_key"] = request.cache_key;
 
     auto input = translate_to_responses_items(request.messages);
-    // Per-step dynamic content goes LAST (same strategy as the OpenAI
-    // provider): everything before it stays byte-identical between steps,
-    // and on the next step the new items land where this one was. The
-    // Responses API has no strict role alternation, so a separate trailing
-    // user item is always legal.
+    // Any dynamic content goes LAST (same strategy as the OpenAI provider):
+    // everything before it stays byte-identical between steps, and on the
+    // next step the new items land where this one was. The Responses API
+    // has no strict role alternation, so a separate trailing user item is
+    // always legal. (The engine sends `system_dynamic` empty — its per-step
+    // state rides `input` as persisted status updates.)
     if (!request.system_dynamic.empty())
         input.push_back({{"role", "user"}, {"content", request.system_dynamic}});
     body["input"] = input;
