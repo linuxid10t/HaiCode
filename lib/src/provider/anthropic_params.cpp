@@ -42,13 +42,14 @@ nlohmann::json build_anthropic_body(const LLMRequest& request) {
     if (caps.thinking == ThinkingMode::Adaptive)
         body["thinking"] = {{"type", "adaptive"}, {"display", "summarized"}};
 
-    // System — the byte-stable body only, with a cache breakpoint. The
-    // per-step dynamic text (todos, step budget, offline note) must NOT
-    // live here: the cache prefix is tools → system → messages, so a
-    // changing system block invalidates the cache for the whole
-    // conversation behind it. It rides at the tail of the messages instead
-    // (below). Exception: with no messages to carry it, it stays a second
-    // system block.
+    // System — the byte-stable body only, with a cache breakpoint. Any
+    // per-request dynamic text (`system_dynamic`) must NOT live here: the
+    // cache prefix is tools → system → messages, so a changing system block
+    // invalidates the cache for the whole conversation behind it. It rides
+    // at the tail of the messages instead (below). Exception: with no
+    // messages to carry it, it stays a second system block. (The engine
+    // sends the field empty — its per-step state is already inside
+    // `messages` as persisted status updates.)
     if (!request.system.empty() || (request.messages.empty()
                                     && !request.system_dynamic.empty())) {
         nlohmann::json arr = nlohmann::json::array();
@@ -93,8 +94,9 @@ nlohmann::json build_anthropic_body(const LLMRequest& request) {
     //     window (many parallel tool results).
     // Together with system and tools that is 4 breakpoints — the API max.
     //
-    // (3) system_dynamic is appended as a text block AFTER breakpoint (1),
-    //     so it changes every step without invalidating anything cached.
+    // (3) A non-empty system_dynamic is appended as a text block AFTER
+    //     breakpoint (1), so it can change per request without invalidating
+    //     anything cached.
     //     A trailing text block after tool_result blocks is legal. If the
     //     conversation ends on an assistant turn, it becomes its own user
     //     message (user after assistant keeps alternation legal).

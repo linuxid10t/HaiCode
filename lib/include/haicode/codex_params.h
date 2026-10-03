@@ -39,9 +39,9 @@ std::vector<nlohmann::json> translate_to_responses_items(
 
 // Builds the /codex/responses request body. Cache-relevant layout:
 //   - `instructions` carries only the byte-stable system prompt;
-//   - `system_dynamic` (todos, step budget, offline note — changes between
-//     steps) is the LAST input item, so the whole history before it stays a
-//     reusable cached prefix;
+//   - a non-empty `system_dynamic` is the LAST input item, so the whole
+//     history before it stays a reusable cached prefix (the engine sends it
+//     empty — per-step state rides `messages` as persisted status updates);
 //   - `prompt_cache_key` = request.cache_key (the session id) routes every
 //     step of a session to the same prompt cache;
 //   - reasoning models get `include: ["reasoning.encrypted_content"]` so

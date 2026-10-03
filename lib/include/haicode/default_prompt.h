@@ -14,9 +14,11 @@ namespace haicode {
 //
 // SPLIT: kDefaultSystemPrompt is byte-stable across turns so Anthropic's
 // prefix cache can hit on it. The {{STEPS_LEFT}} sentence lives in
-// kDynamicSystemPrompt below and every provider sends it at the TAIL of
-// the conversation (after the last message), never in the system prompt:
-// a per-step change there would invalidate the cached history behind it.
+// kDynamicSystemPromptNeutral below and reaches the model as part of the
+// engine's per-step status update — a text block appended to the
+// conversation history and persisted there (see "Append-only history" in
+// CLAUDE.md), never in the system prompt: a per-step change there would
+// invalidate the cached history behind it.
 // Per-agent overrides (config.agents.<id>.
 // system_prompt) use the same placeholders; unmatched placeholders are
 // left as-is.
@@ -152,12 +154,14 @@ When in doubt, ask first. A user approving an action once does not authorize it 
 - Do not echo secrets in logs or error messages.
 )HPCODE";
 
-// Re-rendered every step and sent after the last conversation message
-// (never inside the cached system body) — but only once the turn enters its final stretch:
-// while steps_left > max(1, min(10, max_steps / 2)) this entire block is
-// omitted (render_dynamic_prompt returns an empty string). Kept short so
-// the per-step byte delta is minimal. Splitting this out is what lets the
-// stable body hit Anthropic's prefix cache.
+// Re-rendered every step; the engine sends it as the budget part of a
+// status update in the conversation history (never inside the cached
+// system body), and only when it changed — and only once the turn enters
+// its final stretch: while steps_left > max(1, min(10, max_steps / 2))
+// this entire block is omitted (render_dynamic_prompt returns an empty
+// string). Kept short because every emitted copy stays in the history.
+// Splitting this out is what lets the stable body hit Anthropic's prefix
+// cache.
 //
 // Escalation within the emitted window (render_dynamic_prompt in engine.cpp):
 //   steps_left 5–14  → "Budget is getting tight"
