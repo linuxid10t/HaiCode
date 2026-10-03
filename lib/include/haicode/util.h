@@ -102,8 +102,9 @@ public:
     // Cancellation/liveness: cancel() aborts the transfer from any phase
     // (including connect and silent header waits) via the progress callback.
     // There is no total timeout; instead a connect gets 30 s and a transfer
-    // sustained below 1 byte/s for 60 s aborts (CURLE_LOW_SPEED) — long
-    // generations legitimately run for minutes. Redirects are never
+    // sustained below 1 byte/s for stall_timeout() seconds (default 60)
+    // aborts (CURLE_OPERATION_TIMEDOUT) — long generations legitimately run
+    // for minutes. Redirects are never
     // followed: the request carries credentials that must not be re-sent
     // cross-host. The unparsed stream buffer is capped at 2 MB — a larger
     // single line/stream aborts with transport_error "response line/stream
@@ -139,6 +140,16 @@ public:
                           bool* truncated = nullptr);
 
     void cancel();
+
+    // Silent-stream limit for post_sse(): seconds below 1 byte/s before the
+    // transfer aborts. Default kDefaultStallTimeoutSec suits hosted APIs,
+    // which send keep-alives; local servers (llama.cpp, Ollama, ...) stay
+    // silent for the whole prompt prefill, which on a large prompt runs for
+    // minutes, so their providers raise it. <= 0 disables the check (cancel()
+    // still works). Applies to requests started after the call.
+    static constexpr long kDefaultStallTimeoutSec = 60;
+    void set_stall_timeout(long seconds);
+    long stall_timeout() const;
 
 private:
     struct State;

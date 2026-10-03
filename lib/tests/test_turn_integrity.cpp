@@ -1,3 +1,4 @@
+#include <haicode/compaction.h>
 #include <haicode/engine.h>
 #include <haicode/haicode.h>
 #include <haicode/permission_requests.h>
@@ -144,7 +145,8 @@ public:
             cb.on_finish(FinishReason::EndTurn, {}, {});
             return;
         }
-        if (sys.find("precise conversation summarizer") != std::string::npos) {
+        if (sys.find("precise conversation summarizer") != std::string::npos
+                || is_inline_summary_request(req)) {
             ++summarize_calls;
             summarize_entered.open_gate();
             if (summarize_gate) summarize_gate->wait();

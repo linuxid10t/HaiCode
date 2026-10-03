@@ -284,6 +284,37 @@ void ContextBuilder::append_status_block(std::vector<nlohmann::json>& messages,
                         {"content", nlohmann::json::array({block})}});
 }
 
+LLMRequest build_step_request(const StepRequestShape& shape,
+                              const std::vector<SessionMessage>& messages,
+                              nlohmann::json* status_update_out) {
+    // Status update for this request: only what changed since the last
+    // update still in context (a compaction can drop earlier copies, so it
+    // is recomputed from `messages` on every rebuild).
+    nlohmann::json update = next_status_update(shape.status,
+                                               last_status_update(messages));
+    ContextBuilder builder;
+    builder.replay_reasoning_model = shape.replay_reasoning_model;
+    LLMRequest r = builder.build(messages, shape.system, "", shape.tools,
+                                 shape.model_id, shape.provider_id,
+                                 shape.accepts_images);
+    if (update.is_object())
+        ContextBuilder::append_status_block(r.messages, update.value("text", ""));
+    const auto& inf = shape.inference;
+    if (inf.is_object()) {
+        if (int v = inf.value("max_tokens", 0); v > 0)
+            r.max_tokens = clamp_max_tokens(shape.model_id, v);
+        if (inf.contains("temperature"))
+            r.temperature = inf.value("temperature", 0.0);
+        if (inf.contains("top_p"))
+            r.top_p = inf.value("top_p", 0.0);
+        if (inf.contains("reasoning_effort"))
+            r.reasoning_effort = inf.value("reasoning_effort", "");
+    }
+    r.cache_key = shape.cache_key;
+    if (status_update_out) *status_update_out = std::move(update);
+    return r;
+}
+
 // Derive a short, human-readable session title from the first user message.
 // Takes the first non-empty line, collapses internal whitespace to single
 // spaces, strips leading/trailing whitespace, and truncates to ~60 characters
@@ -1427,6 +1458,7 @@ bool SessionEngine::delete_session(const std::string& session_id,
         fallback_providers_.erase(session_id);
         session_stream_tokens_.erase(session_id);
         last_compaction_step_.erase(session_id);
+        last_request_shape_.erase(session_id);
         pending_mode_notice_.erase(session_id);
         prompt_queue_.erase(session_id);
         compaction_in_progress_.erase(session_id);
@@ -2059,9 +2091,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             backfill_attachment_descriptions(session_id, messages, interrupt_flag, run_token);
         if (interrupt_flag && interrupt_flag->load()) break;
 
-        ContextBuilder builder;
-        if (provider->replays_reasoning_items())
-            builder.replay_reasoning_model = model_id;
         auto tool_defs = tools_.definitions();
         // Filter tools by mode and current offline state at every step. The
         // registry applies the same predicate when a returned call executes.
@@ -2077,37 +2106,35 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             return td.name == "screenshot"
                 && !primary_supports_vision && !vision_fallback_ready();
         });
-        // Status update for this request: only what changed since the last
-        // update still in context (recomputed whenever `messages` reloads —
-        // a compaction can drop earlier copies). Persisted on this step's
-        // assistant row so later requests replay it in place.
+        // Everything but the messages that shapes this step's request. Kept
+        // per session so a manual compact_now can rebuild the request the
+        // provider's prompt cache holds (inline summarization).
+        StepRequestShape shape;
+        shape.system = system;
+        shape.tools = tool_defs;
+        shape.model_id = model_id;
+        shape.provider_id = provider_id;
+        shape.accepts_images = primary_supports_vision;
+        if (provider->replays_reasoning_items())
+            shape.replay_reasoning_model = model_id;
+        shape.status = step_status;
+        if (mj_now.is_object()) {
+            for (const char* key : {"max_tokens", "temperature", "top_p",
+                                    "reasoning_effort"})
+                if (mj_now.contains(key)) shape.inference[key] = mj_now[key];
+        }
+        shape.cache_key = session_id;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            last_request_shape_[session_id] = shape;
+        }
+        // Status update for this request (see build_step_request): persisted
+        // on this step's assistant row so later requests replay it in place.
         nlohmann::json status_update;
         auto build_request = [&] {
-            status_update = next_status_update(step_status,
-                                               last_status_update(messages));
-            LLMRequest r = builder.build(messages, system, "", tool_defs,
-                                         model_id, provider_id,
-                                         primary_supports_vision);
-            if (status_update.is_object())
-                ContextBuilder::append_status_block(
-                    r.messages, status_update.value("text", ""));
-            return r;
+            return build_step_request(shape, messages, &status_update);
         };
         LLMRequest req = build_request();
-        auto apply_inference = [&] {
-            if (mj_now.is_object()) {
-                if (int v = mj_now.value("max_tokens", 0); v > 0)
-                    req.max_tokens = clamp_max_tokens(model_id, v);
-                if (mj_now.contains("temperature"))
-                    req.temperature = mj_now.value("temperature", 0.0);
-                if (mj_now.contains("top_p"))
-                    req.top_p = mj_now.value("top_p", 0.0);
-                if (mj_now.contains("reasoning_effort"))
-                    req.reasoning_effort = mj_now.value("reasoning_effort", "");
-            }
-            req.cache_key = session_id;
-        };
-        apply_inference();
 
         // Auto-compaction: if the context is approaching the model's window,
         // summarize the older portion of the conversation before sending the
@@ -2145,16 +2172,19 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 if (!already_compacting
                         && should_compact_with_hysteresis(current_tokens, threshold,
                                                           iter, lcs)) {
+                    // Pass this step's request: the summary is generated
+                    // inline on top of it, so the prompt cache covers the
+                    // history instead of a full re-prefill.
                     if (compact_history(session_id, *provider, model_id,
                                         provider_id, interrupt_flag,
-                                        current_tokens, threshold, run_token)) {
+                                        current_tokens, threshold, run_token,
+                                        &req)) {
                         {
                             std::lock_guard<std::mutex> lock(mu_);
                             last_compaction_step_[session_id] = iter;
                         }
                         messages = load_context_messages(session_id);
                         req = build_request();
-                        apply_inference();
                     }
                 }
             }
@@ -2345,7 +2375,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                 interrupt_flag, prev_total_input, 0, run_token)) {
                 messages = load_context_messages(session_id);
                 req = build_request();
-                apply_inference();
                 step_failed = false;
                 step_error.clear();
                 {
@@ -2913,7 +2942,8 @@ bool SessionEngine::compact_history(const std::string& session_id,
                                      std::atomic<bool>* interrupt_flag,
                                      int prev_input_tokens,
                                      int threshold_tokens,
-                                     const std::string& stream_token)
+                                     const std::string& stream_token,
+                                     const LLMRequest* cached_request)
 {
     // Single-flight: the auto path (agentic loop thread) and compact_now
     // (background worker) both check/set this under mu_.
@@ -2931,8 +2961,12 @@ bool SessionEngine::compact_history(const std::string& session_id,
     int prev_through_seq = prev_cp_opt ? prev_cp_opt->through_seq : 0;
 
     auto messages = store_.load_messages(session_id);
-    int through_seq = split_history(messages, config_.compaction_recent_context,
-                                    prev_through_seq);
+    // Inline summaries cover the whole conversation, retained tail included,
+    // so that tail is kept shorter: it is context the summary duplicates.
+    const int recent_budget = cached_request
+        ? config_.compaction_recent_context / 2
+        : config_.compaction_recent_context;
+    int through_seq = split_history(messages, recent_budget, prev_through_seq);
     if (through_seq < 0) { clear_guard(); return false; }
 
     std::vector<SessionMessage> older, recent;
@@ -3003,16 +3037,10 @@ bool SessionEngine::compact_history(const std::string& session_id,
         bus_.publish(events::EventType::CompactionProgress, ev);
     };
 
-    auto run_summary = [&](const std::string& prompt, std::string& out,
-                           std::string& err) -> bool {
-        LLMRequest r;
-        r.model_id   = model_id;
-        r.system     = "You are a precise conversation summarizer.";
-        r.max_tokens = summary_cap;
-        nlohmann::json m;
-        m["role"] = "user";
-        m["content"] = prompt;
-        r.messages = {m};
+    // One summarizer call; `out` collects the streamed text. Tool calls and
+    // reasoning are ignored — only the text is the summary.
+    auto stream_summary = [&](const LLMRequest& r, std::string& out,
+                              std::string& err) -> bool {
         out.clear();
         bool failed = false;
         StreamCallbacks cbs;
@@ -3032,6 +3060,45 @@ bool SessionEngine::compact_history(const std::string& session_id,
         cbs.on_error = [&](const std::string& e) { failed = true; err = e; };
         provider.stream(r, cbs, stream_token);
         return !failed;
+    };
+
+    // Standalone summarizer: a fresh request carrying the serialized history.
+    auto run_summary = [&](const std::string& prompt, std::string& out,
+                           std::string& err) -> bool {
+        LLMRequest r;
+        r.model_id   = model_id;
+        r.system     = "You are a precise conversation summarizer.";
+        r.max_tokens = summary_cap;
+        nlohmann::json m;
+        m["role"] = "user";
+        m["content"] = prompt;
+        r.messages = {m};
+        return stream_summary(r, out, err);
+    };
+
+    // Inline summarizer: the conversation's own request (system prompt,
+    // tools, messages, inference settings untouched, so the provider's prompt
+    // cache still matches) with the summary instruction appended to the
+    // tail. One corrective retry appends the invalid draft as an assistant
+    // turn plus a correction — still a cached-prefix extension.
+    auto summarize_inline = [&](std::string& out, std::string& err) -> bool {
+        LLMRequest r = *cached_request;
+        ContextBuilder::append_status_block(r.messages,
+                                            build_inline_summary_instruction());
+        if (!stream_summary(r, out, err)) return false;
+        if (validate_summary(out, summary_cap)) return true;
+        if (interrupt_flag && interrupt_flag->load()) return false;
+        fprintf(stderr, "[engine] inline summary failed validation; retrying once\n");
+        last_progress = -1;
+        // Anthropic rejects empty text content; a tool-call-only reply
+        // leaves `out` empty.
+        r.messages.push_back({{"role", "assistant"},
+                              {"content", out.empty() ? std::string("(no summary)")
+                                                      : out}});
+        ContextBuilder::append_status_block(r.messages,
+                                            build_inline_summary_correction());
+        if (!stream_summary(r, out, err)) return false;
+        return validate_summary(out, summary_cap);
     };
 
     // Generate + validate, with one corrective retry re-sending the template
@@ -3077,7 +3144,19 @@ bool SessionEngine::compact_history(const std::string& session_id,
 
     std::string summary, err;
     bool generated = false;
-    {
+    if (cached_request) {
+        generated = summarize_inline(summary, err);
+        if (interrupt_flag && interrupt_flag->load())
+            return fail("interrupted", "");
+        if (!generated) {
+            fprintf(stderr, "[engine] inline summary unusable (%s); falling back "
+                            "to the standalone summarizer\n",
+                    err.empty() ? "invalid summary" : err.c_str());
+            err.clear();
+            last_progress = -1;
+        }
+    }
+    if (!generated) {
         std::string prompt = build_summary_prompt(previous_summary, aged_context,
                                                   serialized_older);
         if (room <= 0 || estimate_text_tokens(prompt) < room) {
@@ -3569,6 +3648,18 @@ void SessionEngine::compact_now(const std::string& session_id) {
         return;
     }
 
+    // The last agentic step's request shape, when it targeted the model and
+    // provider this compaction uses: rebuilding it over the current context
+    // reproduces the request the provider's prompt cache holds, so the
+    // summary can be generated inline. A different model (or no step yet in
+    // this process) means no usable cache — the standalone summarizer runs.
+    std::optional<StepRequestShape> shape;
+    if (auto sh = last_request_shape_.find(session_id);
+            sh != last_request_shape_.end()
+            && sh->second.model_id == model_id
+            && sh->second.provider_id == provider_id)
+        shape = sh->second;
+
     auto th_it = runner_threads_.find(session_id);
     if (th_it != runner_threads_.end() && th_it->second.joinable())
         retired = std::move(th_it->second);
@@ -3578,7 +3669,8 @@ void SessionEngine::compact_now(const std::string& session_id) {
     session_providers_[session_id] = provider;
     session_running_[session_id] = true;
     runner_threads_[session_id] = std::thread(
-        [this, session_id, provider, model_id, provider_id, flag]() {
+        [this, session_id, provider, model_id, provider_id, flag,
+         shape = std::move(shape)]() {
             // Exception barrier, same contract as runner_main: a throw out
             // of compact_history must surface as CompactionEnded, never
             // escape the thread (std::terminate → abort).
@@ -3593,10 +3685,15 @@ void SessionEngine::compact_now(const std::string& session_id) {
                     run_token = "s:" + session_id + ":r" + std::to_string(next_run_seq_++);
                     session_stream_tokens_[session_id] = run_token;
                 }
+                std::optional<LLMRequest> cached;
+                if (shape)
+                    cached = build_step_request(*shape,
+                                                load_context_messages(session_id));
                 // Sentinel threshold of 0 — compact_history only echoes it in the
                 // CompactionStarted payload, not in the decision logic.
                 bool committed = compact_history(session_id, *provider, model_id,
-                                                 provider_id, flag, 0, 0, run_token);
+                                                 provider_id, flag, 0, 0, run_token,
+                                                 cached ? &*cached : nullptr);
                 if (!committed) {
                     // Manual compactions must not fail silently: the user pressed
                     // a button. Explain why nothing changed.

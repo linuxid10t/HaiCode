@@ -473,6 +473,7 @@ struct RequestState {
 struct HttpClient::State {
     std::mutex mu;
     std::set<RequestState*> inflight;
+    std::atomic<long> stall_timeout_s{HttpClient::kDefaultStallTimeoutSec};
 };
 
 namespace {
@@ -503,6 +504,14 @@ HttpClient::HttpClient() : state_(std::make_unique<State>()) {
 }
 
 HttpClient::~HttpClient() = default;
+
+void HttpClient::set_stall_timeout(long seconds) {
+    state_->stall_timeout_s = seconds;
+}
+
+long HttpClient::stall_timeout() const {
+    return state_->stall_timeout_s;
+}
 
 void HttpClient::cancel() {
     // Fans the cancel out to every in-flight request on this client. Per-stream
@@ -573,10 +582,14 @@ void HttpClient::post_sse(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
     // No total timeout: long generations legitimately stream for minutes.
     // Instead: bound the connect phase, and abort a transfer sustained below
-    // 1 byte/s for 60 s (a live-but-silent server, not a slow one).
+    // 1 byte/s for the stall timeout (a live-but-silent server, not a slow
+    // one). Local-server providers raise it: their prompt prefill is silent.
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+    const long stall_s = state_->stall_timeout_s;
+    if (stall_s > 0) {
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, stall_s);
+    }
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 #if LIBCURL_VERSION_NUM >= 0x075500
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");

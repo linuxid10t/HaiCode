@@ -33,9 +33,36 @@ public:
         return it == context_override.end() ? 0 : it->second;
     }
     std::map<std::string, int> context_override;
+    // How the fake answers inline (cache-friendly) summary requests.
+    enum class InlineReply { Valid, Invalid, ToolCallOnly, Error };
+    InlineReply inline_reply = InlineReply::Valid;
+
     void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb, const std::string& = "") override {
         ++calls;
-        if (req.system == "You are a precise conversation summarizer.") {
+        const bool inline_summary = haicode::is_inline_summary_request(req);
+        if (inline_summary) {
+            inline_requests.push_back(req);
+            switch (inline_reply) {
+                case InlineReply::Valid: break;
+                case InlineReply::Invalid:
+                    cb.on_text_delta("t", "not a structured summary");
+                    cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+                    return;
+                case InlineReply::ToolCallOnly: {
+                    haicode::ToolCall call;
+                    call.id = "inline-call";
+                    call.name = "read";
+                    call.input = nlohmann::json::object();
+                    cb.on_finish(haicode::FinishReason::ToolUse, {}, {call});
+                    return;
+                }
+                case InlineReply::Error:
+                    cb.on_error("server exploded");
+                    return;
+            }
+        }
+        if (inline_summary
+                || req.system == "You are a precise conversation summarizer.") {
             summary_requests.push_back(req);
             cb.on_text_delta("t",
                 "## Objective\no\n\n## Constraints & Decisions\nc\n\n"
@@ -46,14 +73,26 @@ public:
             return;
         }
         last_chat_request = req;
+        all_chat_requests.push_back(req);
         cb.on_text_delta("t", "ok");
         haicode::TokenUsage u;
         u.input = 999999;  // over any threshold → arms/re-fires the trigger
         cb.on_finish(haicode::FinishReason::EndTurn, u, {});
     }
     int calls = 0;
+    // Every summarizer call that produced the valid summary (inline or
+    // standalone); inline_requests holds every inline attempt, valid or not.
     std::vector<haicode::LLMRequest> summary_requests;
+    std::vector<haicode::LLMRequest> inline_requests;
     haicode::LLMRequest last_chat_request;
+    std::vector<haicode::LLMRequest> all_chat_requests;
+
+    int standalone_summaries() const {
+        int n = 0;
+        for (const auto& r : summary_requests)
+            if (r.system == "You are a precise conversation summarizer.") ++n;
+        return n;
+    }
 
     static std::string dump_messages(const std::vector<nlohmann::json>& msgs) {
         std::string out;
@@ -145,6 +184,32 @@ static bool test_end_to_end_checkpoint() {
     CHECK(store.load_messages(sid).size() == 4,
           "all four rows survive compaction");
     CHECK(!provider->summary_requests.empty(), "summarizer call happened");
+    // Auto-compaction summarizes INLINE: the conversation's own request with
+    // the instruction at the tail, so the prompt cache covers the history.
+    CHECK(provider->inline_requests.size() == 1, "auto-compaction summarized inline");
+    CHECK(provider->standalone_summaries() == 0,
+          "no standalone (cache-missing) summarizer call");
+    {
+        const auto& inl = provider->inline_requests.front();
+        const auto& turn1 = provider->all_chat_requests.front();
+        CHECK(inl.system == turn1.system,
+              "inline request keeps the conversation's system prompt");
+        CHECK(inl.tools.size() == turn1.tools.size(),
+              "inline request keeps the conversation's tool list");
+        CHECK(inl.max_tokens == turn1.max_tokens
+              && inl.reasoning_effort == turn1.reasoning_effort
+              && inl.cache_key == turn1.cache_key,
+              "inline request keeps the inference settings and cache key");
+        CHECK(inl.messages.size() > turn1.messages.size(),
+              "inline request extends the conversation");
+        for (size_t i = 0; i < turn1.messages.size(); ++i)
+            CHECK(inl.messages[i] == turn1.messages[i],
+                  "turn 1's request is an exact prefix of the inline request");
+        std::string tail = inl.messages.back().dump();
+        CHECK(tail.find("TURNTWO-MARKER") != std::string::npos
+              && tail.find(haicode::kInlineSummaryMarker) != std::string::npos,
+              "instruction rides the live tail after the new prompt");
+    }
     std::string reqd = FakeProvider::dump_messages(provider->last_chat_request.messages);
     CHECK(reqd.find("TURNONE-MARKER") == std::string::npos,
           "post-compaction request excludes pre-checkpoint turns");
@@ -262,6 +327,8 @@ static bool test_manual_compact_unknown_window() {
     CHECK(store.load_messages(sid).size() == 6,
           "all rows survive the windowless compaction");
     CHECK(!provider->summary_requests.empty(), "summarizer actually ran");
+    CHECK(provider->inline_requests.empty(),
+          "no step ran in this process: no request shape, standalone path");
     std::cout << "[OK] manual compact works with unknown context window\n";
     return true;
 }
@@ -552,7 +619,8 @@ class BudgetProvider : public FakeProvider {
 public:
     void stream(const haicode::LLMRequest& req, haicode::StreamCallbacks cb,
                 const std::string& token = "") override {
-        if (req.system == "You are a precise conversation summarizer.") {
+        if (req.system == "You are a precise conversation summarizer."
+                || haicode::is_inline_summary_request(req)) {
             FakeProvider::stream(req, cb, token);
             return;
         }
@@ -670,6 +738,187 @@ static bool test_budget_trigger(int window, int input, int cached, int output_ca
     return true;
 }
 
+
+// Inline summary attempts that never validate fall back to the standalone
+// summarizer: an invalid draft and a tool-call-only reply each get one
+// corrective retry (a cached-prefix extension), a transport error none.
+static bool test_inline_fallback(FakeProvider::InlineReply mode,
+                                 size_t want_inline, const char* what) {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    provider->inline_reply = mode;
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "fake-model";
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    cfg.model_contexts["fake-model"] = 2000;
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid = engine.create_session("/tmp/proj", "build",
+                                            "fake-model", "fake");
+
+    engine.submit_prompt(sid, "TURNONE-MARKER first prompt");
+    CHECK(wait_for(store, sid, 2, false), "turn 1 completes");
+    engine.submit_prompt(sid, "TURNTWO-MARKER second prompt");
+    bool settled = false;
+    for (int i = 0; i < 600 && !settled; ++i) {
+        settled = store.load_messages(sid).size() >= 4
+               && store.latest_complete_checkpoint(sid).has_value();
+        if (!settled) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    for (int i = 0; i < 200 && engine.is_running(sid); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(settled, std::string(what) + ": fallback still commits a checkpoint");
+    CHECK(provider->inline_requests.size() == want_inline,
+          std::string(what) + ": inline attempts = "
+          + std::to_string(provider->inline_requests.size()));
+    CHECK(provider->standalone_summaries() == 1,
+          std::string(what) + ": standalone summarizer ran once");
+    if (want_inline == 2) {
+        const auto& first = provider->inline_requests[0];
+        const auto& retry = provider->inline_requests[1];
+        CHECK(retry.messages.size() == first.messages.size() + 2,
+              "retry adds the draft and a correction");
+        for (size_t i = 0; i < first.messages.size(); ++i)
+            CHECK(retry.messages[i] == first.messages[i],
+                  "first inline request is a prefix of the retry");
+        const auto& draft = retry.messages[first.messages.size()];
+        CHECK(draft.value("role", "") == "assistant"
+              && !draft["content"].get<std::string>().empty(),
+              "invalid draft replayed as a non-empty assistant turn");
+    }
+    std::string reqd = FakeProvider::dump_messages(provider->last_chat_request.messages);
+    CHECK(reqd.find("TURNONE-MARKER") == std::string::npos
+          && reqd.find("HISTORICAL CONVERSATION") != std::string::npos,
+          std::string(what) + ": post-compaction request is sliced");
+    engine.shutdown();
+    std::cout << "[OK] inline summary fallback: " << what << "\n";
+    return true;
+}
+
+// Manual Compact after a turn ran rebuilds that turn's request shape over the
+// current context and summarizes inline; a model switch since then (no
+// usable cache) uses the standalone summarizer.
+static bool test_manual_compact_inline(bool switch_model) {
+    remove(kDbPath);
+    haicode::Database db(kDbPath);
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<FakeProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "fake-model";
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    cfg.auto_compact = false;  // only the manual path compacts here
+    haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+    std::string sid = engine.create_session("/tmp/proj", "build",
+                                            "fake-model", "fake");
+    for (int t = 1; t <= 3; ++t) {
+        engine.submit_prompt(sid, "manual turn " + std::to_string(t));
+        CHECK(wait_for(store, sid, 2u * t, false), "turn completes");
+        for (int i = 0; i < 200 && engine.is_running(sid); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (switch_model)
+        engine.update_provider_model(sid, "fake", "other-model");
+
+    engine.compact_now(sid);
+    bool committed = false;
+    for (int i = 0; i < 200 && !committed; ++i) {
+        committed = store.latest_complete_checkpoint(sid).has_value();
+        if (!committed) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    for (int i = 0; i < 200 && engine.is_running(sid); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(committed, "manual compact commits a checkpoint");
+    if (switch_model) {
+        CHECK(provider->inline_requests.empty(),
+              "a model switch disables the inline path");
+        CHECK(provider->standalone_summaries() == 1, "standalone summarizer ran");
+    } else {
+        CHECK(provider->inline_requests.size() == 1, "manual compact summarized inline");
+        CHECK(provider->standalone_summaries() == 0, "no standalone summarizer call");
+        const auto& inl = provider->inline_requests.front();
+        const auto& last = provider->last_chat_request;
+        CHECK(inl.system == last.system && inl.tools.size() == last.tools.size(),
+              "rebuilt request keeps the last step's system prompt and tools");
+        CHECK(inl.messages.size() > last.messages.size(), "extends the last request");
+        for (size_t i = 0; i < last.messages.size(); ++i)
+            CHECK(inl.messages[i] == last.messages[i],
+                  "last step's request is an exact prefix of the inline request");
+    }
+    engine.shutdown();
+    std::cout << "[OK] manual compact " << (switch_model ? "after model switch: standalone"
+                                                       : "summarizes inline") << "\n";
+    return true;
+}
+
+// Pure helpers: the instruction/correction text, request detection, and the
+// shared step-request builder.
+static bool test_inline_helpers() {
+    std::string ins = haicode::build_inline_summary_instruction();
+    std::string corr = haicode::build_inline_summary_correction();
+    CHECK(ins.rfind(haicode::kInlineSummaryMarker, 0) == 0
+          && corr.rfind(haicode::kInlineSummaryMarker, 0) == 0,
+          "instruction and correction lead with the marker");
+    for (const auto& sec : haicode::required_summary_sections())
+        CHECK(ins.find("## " + sec) != std::string::npos
+              && corr.find("## " + sec) != std::string::npos,
+              "every required heading is spelled out: " + sec);
+
+    haicode::LLMRequest r;
+    r.messages = {nlohmann::json{{"role", "user"}, {"content", "hello"}}};
+    CHECK(!haicode::is_inline_summary_request(r), "plain prompt is not inline");
+    haicode::ContextBuilder::append_status_block(r.messages, ins);
+    CHECK(haicode::is_inline_summary_request(r), "appended instruction detected");
+    r.messages.push_back({{"role", "assistant"}, {"content", "draft"}});
+    CHECK(!haicode::is_inline_summary_request(r), "only the final user turn counts");
+    haicode::LLMRequest s2;
+    s2.messages = {nlohmann::json{{"role", "user"}, {"content", corr}}};
+    CHECK(haicode::is_inline_summary_request(s2), "string content detected");
+
+    haicode::StepRequestShape sh;
+    sh.system = "SYS";
+    sh.model_id = "fake-model";
+    sh.provider_id = "fake";
+    sh.status.todos = "- [ ] TODO-MARKER";
+    sh.inference = {{"max_tokens", 1234}, {"temperature", 0.5},
+                    {"top_p", 0.9}, {"reasoning_effort", "low"}};
+    sh.cache_key = "sid-1";
+    haicode::SessionMessage m;
+    m.type = "user_prompted";
+    m.seq = 1;
+    m.data_json = nlohmann::json{{"text", "PROMPT-MARKER"}}.dump();
+    nlohmann::json update;
+    auto req = haicode::build_step_request(sh, {m}, &update);
+    CHECK(req.system == "SYS" && req.model_id == "fake-model",
+          "system prompt and model carried");
+    CHECK(req.max_tokens == 1234 && req.temperature == 0.5 && req.top_p == 0.9
+          && req.reasoning_effort == "low" && req.cache_key == "sid-1",
+          "inference overrides and cache key applied");
+    CHECK(update.is_object(), "first status update reported for persisting");
+    std::string tail = req.messages.back().dump();
+    CHECK(tail.find("PROMPT-MARKER") != std::string::npos
+          && tail.find("TODO-MARKER") != std::string::npos,
+          "status update rides the prompt's user turn");
+    std::cout << "[OK] inline summary helpers + build_step_request\n";
+    return true;
+}
+
 static bool test_usage_and_output_budget_regressions() {
     CHECK(test_budget_trigger(200000, 100000, 80000, 4096, false, false),
           "cached subset does not trigger early compaction");
@@ -696,6 +945,15 @@ int main() {
     ok &= test_discovery_outranks_prefix();
     ok &= test_manual_compact_unknown_window();
     ok &= test_end_to_end_checkpoint();
+    ok &= test_inline_helpers();
+    ok &= test_inline_fallback(FakeProvider::InlineReply::Invalid, 2,
+                               "invalid draft");
+    ok &= test_inline_fallback(FakeProvider::InlineReply::ToolCallOnly, 2,
+                               "tool-call-only reply");
+    ok &= test_inline_fallback(FakeProvider::InlineReply::Error, 1,
+                               "transport error");
+    ok &= test_manual_compact_inline(false);
+    ok &= test_manual_compact_inline(true);
     ok &= test_checkpoint_roundtrip();
     ok &= test_list_complete_checkpoints();
     ok &= test_messages_survive();

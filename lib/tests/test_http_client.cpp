@@ -4,6 +4,9 @@
 #include <haicode/util.h>
 #include <haicode/haicode.h>
 #include <haicode/provider.h>
+#include <memory>
+#include <cstdlib>
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -593,6 +596,185 @@ static bool test_retry_after_captured() {
     return true;
 }
 
+// Read one full HTTP request (headers + Content-Length body) into `out`.
+// The provider's POST body can span several packets, unlike drain_request's
+// single-recv assumption.
+static void read_full_request(int c, std::string& out) {
+    timeval tv{5, 0};
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char buf[4096];
+    while (true) {
+        size_t hdr_end = out.find("\r\n\r\n");
+        if (hdr_end != std::string::npos) {
+            size_t cl = 0;
+            size_t p = out.find("Content-Length:");
+            if (p == std::string::npos) p = out.find("content-length:");
+            if (p != std::string::npos && p < hdr_end)
+                cl = std::strtoul(out.c_str() + p + 15, nullptr, 10);
+            if (out.size() >= hdr_end + 4 + cl) return;
+        }
+        ssize_t n = recv(c, buf, sizeof(buf), 0);
+        if (n <= 0) return;
+        out.append(buf, n);
+    }
+}
+
+struct StallState {
+    haicode::HttpClient http;
+    std::atomic<bool> done{false};
+    long code = 42;
+    std::string terr;
+    std::vector<std::string> datas;
+};
+
+// The stall limit is per-client and honored both ways: a short limit aborts
+// a silent server (transport error, code -1), and a disabled limit (<= 0, as
+// a stand-in for the 30-minute local-server limit) rides out a silence
+// longer than the short limit's abort time, then delivers the events — the
+// llama.cpp prefill case that the fixed 60 s limit killed.
+static bool test_stall_timeout_configurable() {
+    auto run = [](long stall_s, int silent_ms, std::shared_ptr<StallState> st,
+                  double& elapsed_s) -> bool {
+        int fd = -1;
+        int port = bind_ephemeral(fd);
+        if (port <= 0) return false;
+        st->http.set_stall_timeout(stall_s);
+        std::thread srv([fd, silent_ms, st] {
+            int c = accept(fd, nullptr, nullptr);
+            if (c < 0) return;
+            drain_request(c);
+            for (int waited = 0; waited < silent_ms && !st->done; waited += 50)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            std::string r = "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: text/event-stream\r\n"
+                            "Connection: close\r\n\r\n"
+                            "data: late\n\n";
+            if (!st->done) (void)!write(c, r.data(), r.size());
+            close(c);
+        });
+        auto begin = std::chrono::steady_clock::now();
+        st->http.post_sse("http://127.0.0.1:" + std::to_string(port), {}, "{}",
+                          [st](const haicode::SSEEvent& ev) {
+                              st->datas.push_back(ev.data);
+                              return true;
+                          },
+                          &st->code, &st->terr);
+        st->done = true;
+        elapsed_s = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - begin).count();
+        srv.join();
+        close(fd);
+        return true;
+    };
+
+    CHECK(haicode::HttpClient().stall_timeout()
+              == haicode::HttpClient::kDefaultStallTimeoutSec,
+          "a fresh client starts at the 60 s default");
+
+    // Short limit vs a 25 s silence: aborts well before the server speaks.
+    auto shortst = std::make_shared<StallState>();
+    double short_s = 0;
+    CHECK(run(1, 25000, shortst, short_s), "short-limit server setup failed");
+    std::cout << "  (1 s stall limit aborted after " << short_s << " s: "
+              << shortst->terr << ")\n";
+    CHECK(shortst->code == -1, "stalled stream reports transport code -1");
+    CHECK(!shortst->terr.empty(), "stall abort carries a transport error");
+    CHECK(shortst->datas.empty(), "no events from a stalled stream");
+    CHECK(short_s < 20, "short stall limit must fire long before 25 s");
+
+    // Disabled limit vs a silence longer than the short limit took to abort.
+    auto longst = std::make_shared<StallState>();
+    double long_s = 0;
+    int silence_ms = static_cast<int>(short_s * 1000) + 2000;
+    CHECK(run(0, silence_ms, longst, long_s), "no-limit server setup failed");
+    CHECK(longst->code == 200, "silent-then-streaming server reports 200, got "
+          + std::to_string(longst->code) + " / " + longst->terr);
+    CHECK(longst->terr.empty(), "no transport error when the limit is off");
+    CHECK(longst->datas.size() == 1 && longst->datas[0] == "late",
+          "events after a long silence are delivered");
+    std::cout << "[OK] stall limit: 1 s aborts a silent server; disabled rides out "
+              << silence_ms / 1000.0 << " s of silence\n";
+    return true;
+}
+
+// llama.cpp flavor end to end: the request asks for return_progress, and the
+// prompt_progress chunks streamed during prefill (role-only delta, null
+// content) produce no text — only the real content arrives, then a clean
+// finish with usage.
+static bool test_llamacpp_progress_chunks_ignored() {
+    int fd = -1;
+    int port = bind_ephemeral(fd);
+    CHECK(port > 0, "ephemeral bind failed");
+
+    auto chunk = [](const std::string& extra_delta, const std::string& tail) {
+        return "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,"
+               "\"delta\":{" + extra_delta + "}}],"
+               "\"object\":\"chat.completion.chunk\"" + tail + "}\n\n";
+    };
+    std::string progress_delta = "\"role\":\"assistant\",\"content\":null";
+    std::string response =
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        + chunk(progress_delta, ",\"prompt_progress\":{\"total\":4096,"
+                "\"cache\":0,\"processed\":0,\"time_ms\":0}")
+        + chunk(progress_delta, ",\"prompt_progress\":{\"total\":4096,"
+                "\"cache\":0,\"processed\":2048,\"time_ms\":6800}")
+        + chunk(progress_delta, ",\"prompt_progress\":{\"total\":4096,"
+                "\"cache\":0,\"processed\":4096,\"time_ms\":13600}")
+        + chunk("\"content\":\"Hello\"", "")
+        + "data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,"
+          "\"delta\":{}}]}\n\n"
+        + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4096,"
+          "\"completion_tokens\":1}}\n\n"
+        + "data: [DONE]\n\n";
+
+    std::string request;
+    std::thread srv([&] {
+        int c = accept(fd, nullptr, nullptr);
+        if (c < 0) return;
+        read_full_request(c, request);
+        (void)!write(c, response.data(), response.size());
+        close(c);
+    });
+
+    auto provider = haicode::make_openai_compat_provider(
+        "", "http://127.0.0.1:" + std::to_string(port) + "/v1", "llama",
+        "llamacpp");
+    haicode::LLMRequest req;
+    req.model_id = "qwen3-32b";
+    req.messages = {nlohmann::json{{"role", "user"}, {"content", "hi"}}};
+
+    std::string text, err;
+    bool finished = false;
+    haicode::TokenUsage usage;
+    haicode::FinishReason reason = haicode::FinishReason::ToolUse;
+    haicode::StreamCallbacks cbs;
+    cbs.on_text_delta = [&](const std::string&, const std::string& d) { text += d; };
+    cbs.on_error = [&](const std::string& e) { err = e; };
+    cbs.on_finish = [&](haicode::FinishReason fr, haicode::TokenUsage u,
+                        std::vector<haicode::ToolCall>) {
+        finished = true; reason = fr; usage = u;
+    };
+    provider->stream(req, cbs);
+    srv.join();
+    close(fd);
+
+    size_t body_at = request.find("\r\n\r\n");
+    auto body = nlohmann::json::parse(
+        body_at == std::string::npos ? "" : request.substr(body_at + 4),
+        nullptr, false);
+    CHECK(!body.is_discarded(), "server should receive a JSON request body");
+    CHECK(body.value("return_progress", false),
+          "llama.cpp request carries return_progress:true");
+    CHECK(err.empty(), "progress chunks must not raise an error, got: " + err);
+    CHECK(finished, "stream finishes normally after progress chunks");
+    CHECK(text == "Hello", "only real content becomes text, got: '" + text + "'");
+    CHECK(reason == haicode::FinishReason::EndTurn, "finish_reason stop -> EndTurn");
+    CHECK(usage.output == 1, "usage chunk still parsed after progress chunks");
+    std::cout << "[OK] llama.cpp: return_progress sent, prompt_progress chunks skipped\n";
+    return true;
+}
+
 int main() {
     std::cout.setf(std::ios::unitbuf);
     std::cout << "=== HttpClient post_sse failure reporting ===\n\n";
@@ -611,6 +793,8 @@ int main() {
     ok &= test_get_cross_host_redirect_not_followed();
     ok &= test_post_sse_never_follows_redirect();
     ok &= test_retry_after_captured();
+    ok &= test_stall_timeout_configurable();
+    ok &= test_llamacpp_progress_chunks_ignored();
     std::cout << (ok ? "\nAll http client tests passed!\n"
                      : "\nSome tests FAILED.\n");
     return ok ? 0 : 1;

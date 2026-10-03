@@ -308,6 +308,68 @@ std::string build_summary_prompt(const std::string& previous_summary,
     return p.str();
 }
 
+std::string build_inline_summary_instruction() {
+    std::ostringstream p;
+    p << kInlineSummaryMarker << "\n"
+         "Stop working on the task for this one reply. The conversation is "
+         "about to be compacted: everything above will be replaced by a "
+         "summary, followed by only the last few exchanges verbatim. Write "
+         "that summary now, as Markdown with EXACTLY these `##` sections, in "
+         "this order:\n";
+    for (const auto& s : required_summary_sections())
+        p << "\n## " << s;
+    p << "\n\nRules:\n"
+         "- Summarize the WHOLE conversation above. If it begins with an "
+         "earlier summary, merge it in: produce ONE summary, not "
+         "segment-by-segment archives.\n"
+         "- Preserve unresolved user requests and earlier constraints even "
+         "when recent messages do not repeat them.\n"
+         "- Prefer newer corrections: when the user reverses an earlier "
+         "decision, the newer instruction wins, but note the reversal.\n"
+         "- Retain exact identifiers: file paths, function/class names, IDs, "
+         "commands, error messages.\n"
+         "- Distinguish verified facts (tool output confirmed) from "
+         "assumptions or proposals.\n"
+         "- The latest exchanges stay in context verbatim, so cover them "
+         "briefly, but keep Active Work and Next Actions current.\n"
+         "- Be concise; omit chatter and duplicate tool noise.\n"
+         "- Do NOT call any tools. Write only the summary: no preamble, no "
+         "commentary.\n";
+    return p.str();
+}
+
+std::string build_inline_summary_correction() {
+    std::ostringstream p;
+    p << kInlineSummaryMarker << "\n"
+         "That summary is invalid: it must contain every one of these `##` "
+         "headings, in this order, and stay concise:\n";
+    for (const auto& s : required_summary_sections())
+        p << "\n## " << s;
+    p << "\n\nRewrite it with exactly that structure, keeping its content. "
+         "Do NOT call any tools. Write only the summary.\n";
+    return p.str();
+}
+
+bool is_inline_summary_request(const LLMRequest& request) {
+    if (request.messages.empty()) return false;
+    const auto& last = request.messages.back();
+    if (!last.is_object() || last.value("role", "") != "user"
+            || !last.contains("content"))
+        return false;
+    const auto& content = last["content"];
+    if (content.is_string())
+        return content.get<std::string>().find(kInlineSummaryMarker)
+            != std::string::npos;
+    if (!content.is_array()) return false;
+    for (const auto& block : content) {
+        if (block.is_object() && block.value("type", "") == "text"
+                && block.value("text", "").find(kInlineSummaryMarker)
+                       != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
 bool validate_summary(const std::string& summary, int max_tokens) {
     if (summary.empty()) return false;
     if (max_tokens > 0 && estimate_text_tokens(summary) > max_tokens)

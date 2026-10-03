@@ -62,6 +62,35 @@ public:
     std::string replay_reasoning_model;
 };
 
+// Per-step status the agentic loop keeps the model anchored to: the
+// final-stretch step-budget text (render_dynamic_prompt), the rendered todo
+// list (todos_tracked=false in Plan mode, which doesn't show it), and the
+// offline flag.
+struct StepStatus {
+    std::string budget;
+    std::string todos;
+    bool todos_tracked = true;
+    bool offline = false;
+};
+
+// Everything besides the stored messages that determines an agentic step's
+// request. The loop fills one per step; the engine keeps the latest per
+// session so compact_now can rebuild the request the conversation's prompt
+// cache already holds (inline summarization).
+struct StepRequestShape {
+    std::string system;
+    std::vector<ToolDefinition> tools;
+    std::string model_id;
+    std::string provider_id;
+    bool accepts_images = true;
+    std::string replay_reasoning_model;  // ContextBuilder::replay_reasoning_model
+    StepStatus status;
+    // Session inference overrides (model_json subset): max_tokens,
+    // temperature, top_p, reasoning_effort. Absent keys leave defaults.
+    nlohmann::json inference = nlohmann::json::object();
+    std::string cache_key;
+};
+
 class SessionEngine {
 public:
     SessionEngine(SessionStore& store,
@@ -227,6 +256,17 @@ private:
     // the DB; only context assembly changes. Returns true when a checkpoint
     // was committed (caller must rebuild the request). On failure/interrupt
     // the checkpoint is marked failed and the previous boundary stays active.
+    //
+    // cached_request (optional): the conversation's own next request, exactly
+    // as the agentic loop would send it. When given, the summary is first
+    // generated INLINE — that request plus build_inline_summary_instruction()
+    // at the tail — so the provider's prompt cache covers the whole history
+    // (seconds instead of a full re-prefill on a local server). The verbatim
+    // tail kept after the checkpoint is then budgeted at half of
+    // compaction_recent_context (the summary covers it too). If the inline
+    // attempt (plus one corrective retry) errors or never validates, the
+    // standalone serialized summarizer runs as before. Overflow recovery
+    // passes nothing: its request no longer fits.
     bool compact_history(const std::string& session_id,
                          Provider& provider,
                          const std::string& model_id,
@@ -234,7 +274,8 @@ private:
                          std::atomic<bool>* interrupt_flag,
                          int prev_input_tokens,
                          int threshold_tokens,
-                         const std::string& stream_token = "");
+                         const std::string& stream_token = "",
+                         const LLMRequest* cached_request = nullptr);
 
     // One-shot LLM call that produces a concise (≤6-word) session title from
     // the conversation's user prompts. Runs on its own tracked maintenance
@@ -355,6 +396,11 @@ private:
     // session. Negative = "never compacted this turn". Reset to -1 in
     // submit_prompt so each new user turn rearms the trigger. Guarded by mu_.
     std::map<std::string, int> last_compaction_step_;
+    // Request shape of each session's most recent agentic step, so a manual
+    // compact_now can rebuild the request the prompt cache holds and
+    // summarize inline. Absent until a step ran in this process (compact_now
+    // then uses the standalone summarizer). Guarded by mu_.
+    std::map<std::string, StepRequestShape> last_request_shape_;
     // Mode-change notice queued by set_mode, flushed as metadata on the next
     // user_prompted row by submit_prompt. Only the last flip before a send
     // survives; never persisted as its own message row. Guarded by mu_.
@@ -441,17 +487,6 @@ std::string render_dynamic_prompt(const std::string& model,
                                   int steps_left,
                                   int max_steps);
 
-// Per-step status the agentic loop keeps the model anchored to: the
-// final-stretch step-budget text (render_dynamic_prompt), the rendered todo
-// list (todos_tracked=false in Plan mode, which doesn't show it), and the
-// offline flag.
-struct StepStatus {
-    std::string budget;
-    std::string todos;
-    bool todos_tracked = true;
-    bool offline = false;
-};
-
 // Decides what status text the next request carries. The text lives in the
 // conversation history (persisted on the step's assistant row as `status`
 // and replayed in place), so only the parts that CHANGED since the last
@@ -467,5 +502,14 @@ nlohmann::json next_status_update(const StepStatus& now,
 // The most recent persisted status update among `messages` (the
 // post-checkpoint context rows), or null.
 nlohmann::json last_status_update(const std::vector<SessionMessage>& messages);
+
+// The single request-assembly path for an agentic step: messages →
+// ContextBuilder::build, the status update for this step appended at the
+// tail, then inference overrides and the cache key. *status_update_out
+// receives the update (null when nothing changed) for persisting on the
+// step's assistant row.
+LLMRequest build_step_request(const StepRequestShape& shape,
+                              const std::vector<SessionMessage>& messages,
+                              nlohmann::json* status_update_out = nullptr);
 
 } // namespace haicode

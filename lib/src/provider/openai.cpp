@@ -391,7 +391,11 @@ public:
                              const std::string& id = "openai",
                              ServerFlavor flavor = ServerFlavor::Generic)
         : api_key_(api_key), base_url_(base_url),
-          id_(id.empty() ? "openai" : id), flavor_(flavor) {}
+          id_(id.empty() ? "openai" : id), flavor_(flavor) {
+        // Local servers prefill silently for minutes on large prompts — see
+        // openai_stall_timeout().
+        http_.set_stall_timeout(openai_stall_timeout(flavor_));
+    }
 
     std::string id() const override { return id_; }
     // Compatibility flavors resolve to "openai" for pricing — custom ids
