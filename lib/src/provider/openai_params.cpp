@@ -1,5 +1,6 @@
 #include <haicode/openai_params.h>
 #include <haicode/model_capabilities.h>
+#include <haicode/util.h>
 #include <algorithm>
 
 namespace haicode {
@@ -58,6 +59,15 @@ nlohmann::json build_openai_body(const LLMRequest& request, ServerFlavor flavor)
     if (flavor == ServerFlavor::LlamaCpp || flavor == ServerFlavor::LMStudio)
         body["cache_prompt"] = true;
 
+    // llama.cpp is silent while it prefills the prompt unless asked to report
+    // progress: with return_progress each processed batch streams a chunk
+    // ({"choices":[{"delta":{"role":"assistant","content":null}}],
+    //   "prompt_progress":{total,cache,processed,time_ms}}), keeping a long
+    // prefill visibly alive. Builds that predate the field ignore it. Other
+    // flavors don't implement it, so they keep their exact contract.
+    if (flavor == ServerFlavor::LlamaCpp)
+        body["return_progress"] = true;
+
     // Translate messages (system is prepended inside)
     body["messages"] = translate_messages(request.system, request.system_dynamic,
                                           request.messages);
@@ -77,6 +87,20 @@ nlohmann::json build_openai_body(const LLMRequest& request, ServerFlavor flavor)
     }
 
     return body;
+}
+
+long openai_stall_timeout(ServerFlavor flavor) {
+    switch (flavor) {
+        case ServerFlavor::VLLM:
+        case ServerFlavor::LlamaCpp:
+        case ServerFlavor::LMStudio:
+        case ServerFlavor::Ollama:
+            return kLocalServerStallTimeoutSec;
+        case ServerFlavor::OpenRouter:
+        case ServerFlavor::Generic:
+            break;
+    }
+    return HttpClient::kDefaultStallTimeoutSec;
 }
 
 void parse_openai_usage(const nlohmann::json& u, TokenUsage& usage) {

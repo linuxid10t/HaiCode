@@ -5,6 +5,7 @@
 #include <haicode/model_capabilities.h>
 #include <haicode/anthropic_params.h>
 #include <haicode/openai_params.h>
+#include <haicode/util.h>
 #include <haicode/model_context_parse.h>
 #include <haicode/provider_error.h>
 #include <haicode/engine.h>
@@ -444,6 +445,35 @@ static bool test_openai_body_flavor_effort() {
     return true;
 }
 
+// llama.cpp prefill-progress opt-in and the per-flavor stall limit: a large
+// uncached prompt (compaction's summarizer) prefills silently for minutes on
+// a local server, and the hosted-API 60 s stall limit killed it mid-prefill.
+static bool test_openai_local_server_liveness() {
+    LLMRequest req = base_request("qwen3-32b");
+    CHECK(build_openai_body(req, ServerFlavor::LlamaCpp)["return_progress"] == true,
+          "llama.cpp asks for prompt_progress chunks");
+    for (ServerFlavor f : {ServerFlavor::Generic, ServerFlavor::OpenRouter,
+                           ServerFlavor::VLLM, ServerFlavor::LMStudio,
+                           ServerFlavor::Ollama})
+        CHECK(!build_openai_body(req, f).contains("return_progress"),
+              "return_progress is llama.cpp-only");
+
+    for (ServerFlavor f : {ServerFlavor::VLLM, ServerFlavor::LlamaCpp,
+                           ServerFlavor::LMStudio, ServerFlavor::Ollama})
+        CHECK(openai_stall_timeout(f) == kLocalServerStallTimeoutSec,
+              "local servers get the long stall limit");
+    CHECK(kLocalServerStallTimeoutSec >= 10 * 60,
+          "local stall limit covers a multi-minute prefill");
+    CHECK(openai_stall_timeout(ServerFlavor::Generic)
+              == HttpClient::kDefaultStallTimeoutSec,
+          "hosted OpenAI keeps the 60 s default");
+    CHECK(openai_stall_timeout(ServerFlavor::OpenRouter)
+              == HttpClient::kDefaultStallTimeoutSec,
+          "OpenRouter keeps the 60 s default");
+    std::cout << "[OK] openai body: llama.cpp return_progress + local stall limit\n";
+    return true;
+}
+
 static bool test_openai_usage_cached_tokens() {
     TokenUsage usage;
     parse_openai_usage(json{
@@ -564,6 +594,7 @@ int main() {
     ok = test_openai_effort_mapping() && ok;
     ok = test_openai_body_reasoning_model() && ok;
     ok = test_openai_body_flavor_effort() && ok;
+    ok = test_openai_local_server_liveness() && ok;
     ok = test_openai_usage_cached_tokens() && ok;
     ok = test_error_classification() && ok;
     ok = test_retry_backoff_and_parse() && ok;
