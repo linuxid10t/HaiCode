@@ -195,6 +195,95 @@ static std::string render_todos_block(const std::vector<Todo>& todos) {
     return out;
 }
 
+static std::string trim_ws(const std::string& s) {
+    const char* ws = " \t\r\n";
+    size_t a = s.find_first_not_of(ws);
+    if (a == std::string::npos) return {};
+    size_t b = s.find_last_not_of(ws);
+    return s.substr(a, b - a + 1);
+}
+
+nlohmann::json next_status_update(const StepStatus& now,
+                                  const nlohmann::json& previous) {
+    const bool have_prev = previous.is_object();
+    const std::string prev_budget  = have_prev ? previous.value("budget", "") : "";
+    const std::string prev_todos   = have_prev ? previous.value("todos", "") : "";
+    const bool        prev_offline = have_prev && previous.value("offline", false);
+
+    const std::string budget = trim_ws(now.budget);
+    // Plan mode doesn't show the list: carry the last known state forward so
+    // leaving Plan doesn't read as a change (and entering it isn't "empty").
+    const std::string todos = now.todos_tracked ? trim_ws(now.todos) : prev_todos;
+
+    std::vector<std::string> parts;
+    if (budget != prev_budget) {
+        if (!budget.empty())
+            parts.push_back(budget);
+        else
+            parts.push_back("Step budget renewed: there is no step pressure "
+                            "now — disregard earlier step-budget warnings.");
+    }
+    if (todos != prev_todos) {
+        if (!todos.empty())
+            parts.push_back(todos);
+        else
+            parts.push_back("# Active todos\n\nThe todo list is now empty.");
+    }
+    if (now.offline != prev_offline) {
+        if (now.offline)
+            parts.push_back("# Offline mode\n\n"
+                "Offline mode is enabled: the web_search and web_extract tools "
+                "are unavailable. Do not attempt web lookups or claim their "
+                "results — answer from local files, project context, and your "
+                "own knowledge.");
+        else
+            parts.push_back("# Offline mode\n\nOffline mode is now off: "
+                            "web_search and web_extract are available again.");
+    }
+    if (parts.empty()) return nullptr;
+
+    // Labeled: it rides in a user turn, but the user didn't write it.
+    std::string text = "[HaiCode status update — automatic, not written by "
+                       "the user]";
+    for (const auto& p : parts) text += "\n\n" + p;
+    return {{"text", text}, {"budget", budget}, {"todos", todos},
+            {"offline", now.offline}};
+}
+
+nlohmann::json last_status_update(const std::vector<SessionMessage>& messages) {
+    for (size_t i = messages.size(); i > 0; --i) {
+        const auto& m = messages[i - 1];
+        if (m.type != "assistant_text") continue;
+        auto data = nlohmann::json::parse(m.data_json, nullptr, false);
+        if (data.is_object() && data.contains("status")
+                && data["status"].is_object())
+            return data["status"];
+    }
+    return nullptr;
+}
+
+void ContextBuilder::append_status_block(std::vector<nlohmann::json>& messages,
+                                         const std::string& text) {
+    if (text.empty()) return;
+    nlohmann::json block = {{"type", "text"}, {"text", text}};
+    if (!messages.empty() && messages.back().is_object()
+            && messages.back().value("role", "") == "user") {
+        auto& content = messages.back()["content"];
+        if (content.is_string()) {
+            std::string s = content.get<std::string>();
+            content = nlohmann::json::array();
+            if (!s.empty())  // empty text blocks are rejected by Anthropic
+                content.push_back({{"type", "text"}, {"text", s}});
+        }
+        if (content.is_array()) {
+            content.push_back(block);
+            return;
+        }
+    }
+    messages.push_back({{"role", "user"},
+                        {"content", nlohmann::json::array({block})}});
+}
+
 // Derive a short, human-readable session title from the first user message.
 // Takes the first non-empty line, collapses internal whitespace to single
 // spaces, strips leading/trailing whitespace, and truncates to ~60 characters
@@ -350,23 +439,20 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
     const std::vector<SessionMessage>& msgs,
     bool model_accepts_images)
 {
-    // Tool results from past user turns are truncated to keep context lean.
-    // "Past turn" = before the most recent user_prompted message.
-    // Everything from the current user's turn (same agentic loop run) is kept
-    // in full — truncating mid-turn would hide tool outputs the model just
-    // produced and cause it to think its tools are failing.
-    static const size_t MAX_OLD_TOOL_RESULT = 10 * 1024;
-
-    // Find the index of the last user_prompted message.
-    // Tool results before that index are from previous turns and can be trimmed.
-    size_t last_user_prompt_idx = 0;
-    for (size_t i = 0; i < msgs.size(); ++i) {
-        if (msgs[i].type == "user_prompted")
-            last_user_prompt_idx = i;
-    }
+    // History is emitted APPEND-ONLY: a row renders the same bytes on every
+    // request, whichever turn is current. Rewriting an earlier row (e.g. the
+    // old turn-boundary truncation of past tool results) breaks the prompt
+    // cache from that row onward — every later token is re-written instead
+    // of read — and invalidates every later thinking block on models that
+    // bind them to the conversation prefix (a 400 on enforced accounts).
+    // Context growth is bounded by compaction instead, whose serializer
+    // truncates large outputs when it summarizes them.
 
     const size_t image_boundary = recent_image_boundary(msgs);
     std::vector<nlohmann::json> result;
+    // result index of an assistant turn → the status text its request
+    // carried after the preceding message.
+    std::map<size_t, std::string> status_tails;
 
     for (size_t i = 0; i < msgs.size(); ++i) {
         auto& msg = msgs[i];
@@ -382,41 +468,35 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 std::string notice = data.value("mode_notice", "");
                 // One-shot slash-command skill invocation: submit_prompt
                 // resolved "/<id> args" at submit time and stored the body
-                // on this row. The framed body is emitted only while this
-                // row is the current turn's prompt (same past-turn rule as
-                // MAX_OLD_TOOL_RESULT); later turns see a compact marker so
-                // the body applies to exactly one turn. The model receives
-                // the args, not the raw "/<id>" command text.
+                // on this row. The framed body renders identically in every
+                // turn (append-only — swapping it for a marker once the turn
+                // is over rewrote the whole previous turn); its framing
+                // scopes it to this one message. The model receives the
+                // args, not the raw "/<id>" command text.
                 std::string skill_prefix;
                 std::string text_out = data.value("text", "");
                 if (data.contains("skill")) {
                     std::string sid   = data.value("skill", "");
                     std::string sargs = data.value("skill_args", "");
-                    if (i == last_user_prompt_idx) {
-                        if (data.contains("skill_block")) {
-                            skill_prefix = "[skill invoked: /" + sid
-                                + " — apply the following skill instructions "
-                                  "to this message; they override your "
-                                  "defaults for this turn only]\n"
-                                + data.value("skill_block", "")
-                                + "\n[end of skill /" + sid
-                                + " instructions — they do not apply to "
-                                  "later turns]";
-                        } else if (data.value("skill_active", false)) {
-                            skill_prefix = "[skill '/" + sid
-                                + "' invoked for this message; it is already "
-                                  "active this session — apply it now with "
-                                  "priority]";
-                        } else {
-                            // Matched at submit but the body could not be
-                            // resolved (file vanished / unreadable).
-                            skill_prefix = "[skill '/" + sid
-                                + "' invoked but its file could not be read]";
-                        }
-                    } else {
+                    if (data.contains("skill_block")) {
+                        skill_prefix = "[skill invoked: /" + sid
+                            + " — apply the following skill instructions "
+                              "to this message; they override your "
+                              "defaults for this turn only]\n"
+                            + data.value("skill_block", "")
+                            + "\n[end of skill /" + sid
+                            + " instructions — they do not apply to "
+                              "later turns]";
+                    } else if (data.value("skill_active", false)) {
                         skill_prefix = "[skill '/" + sid
-                            + "' was invoked one-shot for this turn; its "
-                              "instructions no longer apply]";
+                            + "' invoked for this message; it is already "
+                              "active this session — apply it now with "
+                              "priority]";
+                    } else {
+                        // Matched at submit but the body could not be
+                        // resolved (file vanished / unreadable).
+                        skill_prefix = "[skill '/" + sid
+                            + "' invoked but its file could not be read]";
                     }
                     text_out = sargs;
                 }
@@ -546,6 +626,11 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 } else {
                     m["content"] = text;
                 }
+                // Status update the step's request carried at its tail;
+                // re-attached in the repair pass below, ahead of this turn.
+                if (data.contains("status") && data["status"].is_object())
+                    status_tails[result.size()] =
+                        data["status"].value("text", "");
                 result.push_back(m);
             } else if (msg.type == "compaction_summary") {
                 // A prior compaction's summary. Emit it as an assistant turn
@@ -590,21 +675,9 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
                 content["type"] = "tool_result";
                 content["tool_use_id"] = data.value("call_id", "");
                 content["is_error"] = !data.value("success", true);
+                // Verbatim in every turn (append-only — see the top of this
+                // function). Tools already cap their output at 100 KB.
                 std::string output = data.value("output", "");
-                // Truncate outputs from previous user turns. The model already
-                // acted on them; keeping them full inflates context on every step.
-                // Tool results from the current turn are never truncated so the
-                // model can see every tool it called within this agentic run.
-                if (i < last_user_prompt_idx
-                        && output.size() > MAX_OLD_TOOL_RESULT) {
-                    size_t orig = output.size();
-                    output = util::truncate_utf8(output, MAX_OLD_TOOL_RESULT);
-                    // Recompute from the actual cut: a UTF-8-safe boundary
-                    // may sit a few bytes below the cap.
-                    size_t dropped = orig - output.size();
-                    output += "\n[truncated: " + std::to_string(dropped)
-                            + " more bytes]";
-                }
                 // Images returned by tools (e.g. screenshot) are persisted in
                 // an "attachments" array. Anthropic tool_result content
                 // accepts mixed text + image blocks; OpenAI's
@@ -667,6 +740,11 @@ std::vector<nlohmann::json> ContextBuilder::assemble_messages(
     std::vector<nlohmann::json> repaired;
     for (size_t i = 0; i < result.size(); ++i) {
         if (result_rows.count(i)) continue;
+        // Replay the step's status update exactly where its request put it:
+        // at the tail of everything before this assistant turn (the regrouped
+        // tool results or the user prompt). Same helper as the live tail.
+        if (auto st = status_tails.find(i); st != status_tails.end())
+            append_status_block(repaired, st->second);
         repaired.push_back(result[i]);
         const auto& message = result[i];
         if (message.value("role", "") != "assistant"
@@ -1824,13 +1902,13 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                        + plan_mode_block
                        + chat_mode_block;
 
-    // Dynamic per-step content ({{STEPS_LEFT}}, todos, offline note).
-    // Providers send it after the last conversation message, so the stable
-    // body above AND the history stay byte-identical across steps and hit
-    // the prefix cache.
-    std::string system_dynamic = render_dynamic_prompt(model_id, os_info,
-                                                       session.directory,
-                                                       max_steps, max_steps);
+    // Dynamic per-step state ({{STEPS_LEFT}}, todos, offline note) is not
+    // part of the system prompt: each step's changes ride the conversation
+    // as a status update at the request's tail and stay there (persisted on
+    // the step's assistant row), so the stable body AND the history stay
+    // byte-identical across steps — prompt cache and thinking-block binding
+    // both depend on it. Rebuilt every step below.
+    StepStatus step_status;
 
     fprintf(stderr, "[engine] session=%s dir='%s' agent=%s mode=%s max_steps=%d (renewable, ceiling=%d) instructions=%zu\n",
             session_id.c_str(), session.directory.c_str(), session.agent.c_str(),
@@ -1951,31 +2029,24 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                               + latest_plan_block
                               + instructions_block + plan_mode_block + chat_mode_block;
         // steps_left changes each step (and resets on renewal) → re-render the
-        // dynamic block too.
-        system_dynamic = render_dynamic_prompt(model_id, os_info,
-                                               session.directory,
-                                               steps_left, max_steps);
+        // budget text too (empty outside the final stretch).
+        step_status.budget = render_dynamic_prompt(model_id, os_info,
+                                                   session.directory,
+                                                   steps_left, max_steps);
 
-        // Re-inject the current todo list (Build and Chat modes) so the model
-        // stays anchored to outstanding work. Chat allows todo_write, so it
-        // must also see the list. Lives in the dynamic block to preserve the
-        // stable body's prefix cache.
-        if (mode != SessionMode::Plan) {
-            auto todos_now = store_.load_todos(session_id);
-            system_dynamic += render_todos_block(todos_now);
-        }
+        // The current todo list (Build and Chat modes) keeps the model
+        // anchored to outstanding work. Chat allows todo_write, so it must
+        // also see the list. Plan mode doesn't track it.
+        step_status.todos_tracked = (mode != SessionMode::Plan);
+        step_status.todos = step_status.todos_tracked
+            ? render_todos_block(store_.load_todos(session_id))
+            : std::string{};
 
         // Offline note: the tool list is filtered above, but the model is not
         // told why. State it explicitly so it doesn't hallucinate web lookups.
-        // Re-checked every step in the dynamic tail, so a mid-turn toggle
-        // reaches the very next request without touching the cached body.
-        if (offline_mode()) {
-            system_dynamic += "\n\n# Offline mode\n\n"
-                "Offline mode is enabled: the web_search and web_extract tools "
-                "are unavailable. Do not attempt web lookups or claim their "
-                "results — answer from local files, project context, and your "
-                "own knowledge.\n";
-        }
+        // Re-checked every step, so a mid-turn toggle reaches the very next
+        // request without touching the cached body.
+        step_status.offline = offline_mode();
 
         auto messages = load_context_messages(session_id);
 
@@ -2006,8 +2077,23 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             return td.name == "screenshot"
                 && !primary_supports_vision && !vision_fallback_ready();
         });
-        auto req = builder.build(messages, system, system_dynamic, tool_defs,
-                                  model_id, provider_id, primary_supports_vision);
+        // Status update for this request: only what changed since the last
+        // update still in context (recomputed whenever `messages` reloads —
+        // a compaction can drop earlier copies). Persisted on this step's
+        // assistant row so later requests replay it in place.
+        nlohmann::json status_update;
+        auto build_request = [&] {
+            status_update = next_status_update(step_status,
+                                               last_status_update(messages));
+            LLMRequest r = builder.build(messages, system, "", tool_defs,
+                                         model_id, provider_id,
+                                         primary_supports_vision);
+            if (status_update.is_object())
+                ContextBuilder::append_status_block(
+                    r.messages, status_update.value("text", ""));
+            return r;
+        };
+        LLMRequest req = build_request();
         auto apply_inference = [&] {
             if (mj_now.is_object()) {
                 if (int v = mj_now.value("max_tokens", 0); v > 0)
@@ -2043,7 +2129,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                     config_.auto_compact_threshold);
                 int current_tokens = prev_total_input;
                 if (current_tokens == 0) {
-                    current_tokens = estimate_request_tokens(system, system_dynamic,
+                    current_tokens = estimate_request_tokens(system, "",
                                                              req.messages,
                                                              tool_defs);
                 }
@@ -2067,9 +2153,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                             last_compaction_step_[session_id] = iter;
                         }
                         messages = load_context_messages(session_id);
-                        req = builder.build(messages, system, system_dynamic,
-                                            tool_defs, model_id, provider_id,
-                                            primary_supports_vision);
+                        req = build_request();
                         apply_inference();
                     }
                 }
@@ -2260,9 +2344,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
             if (compact_history(session_id, *provider, model_id, provider_id,
                                 interrupt_flag, prev_total_input, 0, run_token)) {
                 messages = load_context_messages(session_id);
-                req = builder.build(messages, system, system_dynamic,
-                                    tool_defs, model_id, provider_id,
-                                    primary_supports_vision);
+                req = build_request();
                 apply_inference();
                 step_failed = false;
                 step_error.clear();
@@ -2367,6 +2449,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 data["thinking_blocks"] = thinking_blocks;
             if (!reasoning_items.empty())
                 data["reasoning_items"] = reasoning_items;
+            // The status update this step's request carried; replayed ahead
+            // of this turn on every later request (append-only history).
+            if (status_update.is_object())
+                data["status"] = status_update;
             if (!tool_calls.empty()) {
                 auto calls_arr = nlohmann::json::array();
                 for (auto& tc : tool_calls)

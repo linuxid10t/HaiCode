@@ -378,7 +378,8 @@ static bool registry_offline_mode_restricts_web_tools_only() {
 }
 
 // ============================================================
-// Engine e2e: offline note rides system_dynamic, not the cached body
+// Engine e2e: offline note rides the history as a status update, not the
+// cached body
 // ============================================================
 
 #include <unistd.h>
@@ -398,6 +399,7 @@ public:
         ++calls;
         last_system = req.system;
         last_dynamic = req.system_dynamic;
+        last_messages = req.messages;
         has_web_tools = false;
         for (const auto& t : req.tools)
             if (t.name == "web_search" || t.name == "web_extract")
@@ -408,8 +410,33 @@ public:
     int calls = 0;
     std::string last_system;
     std::string last_dynamic;
+    std::vector<nlohmann::json> last_messages;
     bool has_web_tools = false;
+
+    // Text of the trailing block of the request's last message ("" if none).
+    std::string tail_text() const {
+        if (last_messages.empty()) return {};
+        const auto& c = last_messages.back()["content"];
+        if (c.is_string()) return c.get<std::string>();
+        if (c.is_array() && !c.empty()) return c.back().value("text", "");
+        return {};
+    }
+    std::string dump() const {
+        std::string out;
+        for (const auto& m : last_messages) out += m.dump();
+        return out;
+    }
 };
+
+// True when `prefix` is an element-wise prefix of `full` — the append-only
+// property the prompt cache depends on.
+static bool is_prefix(const std::vector<nlohmann::json>& prefix,
+                      const std::vector<nlohmann::json>& full) {
+    if (prefix.size() > full.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i)
+        if (prefix[i] != full[i]) return false;
+    return true;
+}
 
 static void rm_rf_dir(const std::string& path) {
     DIR* d = opendir(path.c_str());
@@ -466,40 +493,60 @@ static bool engine_offline_note_rides_dynamic_block() {
             return false;
         };
 
-        // Online: no note anywhere, web tools on the wire.
+        // Online: no note anywhere (nothing to report: no todos, budget not
+        // in its final stretch), web tools on the wire.
         engine.submit_prompt(sid, "hello");
         CHECK(turn(1), "first turn completes");
-        CHECK(provider->last_dynamic.find("Offline mode") == std::string::npos,
-              "online: dynamic block must not mention offline mode");
+        CHECK(provider->last_dynamic.empty(),
+              "per-step state never rides system_dynamic");
+        CHECK(provider->dump().find("Offline mode") == std::string::npos,
+              "online: history must not mention offline mode");
         CHECK(provider->last_system.find("Offline mode") == std::string::npos,
               "online: stable system prompt must not mention offline mode");
         CHECK(provider->has_web_tools, "online: web tools must be on the wire");
+        auto turn1 = provider->last_messages;
 
-        // Offline: note in system_dynamic only; web tools filtered.
+        // Offline: note as a status update at the request's tail; web tools
+        // filtered; the previous request is an exact prefix.
         set_offline_mode(true);
         engine.submit_prompt(sid, "hello again");
         CHECK(turn(2), "offline turn completes");
-        CHECK(provider->last_dynamic.find("# Offline mode") != std::string::npos,
-              "offline: dynamic block must carry the offline note");
-        CHECK(provider->last_dynamic.find("web_search") != std::string::npos,
+        CHECK(provider->last_dynamic.empty(),
+              "per-step state never rides system_dynamic");
+        CHECK(provider->tail_text().find("# Offline mode") != std::string::npos,
+              "offline: request tail must carry the offline note");
+        CHECK(provider->tail_text().find("web_search") != std::string::npos,
               "offline note should name the unavailable tools");
         CHECK(provider->last_system.find("Offline mode") == std::string::npos,
               "offline: cached stable body must stay byte-stable");
         CHECK(!provider->has_web_tools, "offline: web tools must be filtered");
+        CHECK(is_prefix(turn1, provider->last_messages),
+              "offline turn's request extends turn 1's verbatim");
+        auto turn2 = provider->last_messages;
 
-        // Back online: note gone, web tools restored.
+        // Back online: the earlier note stays in place (append-only), an
+        // explicit "now off" update supersedes it, web tools restored.
         set_offline_mode(false);
         engine.submit_prompt(sid, "hello once more");
         CHECK(turn(3), "return-to-online turn completes");
-        CHECK(provider->last_dynamic.find("Offline mode") == std::string::npos,
-              "back online: note must disappear");
+        CHECK(is_prefix(turn2, provider->last_messages),
+              "back online: turn 2's request (with its note) replays verbatim");
+        CHECK(provider->tail_text().find("Offline mode is now off")
+                  != std::string::npos,
+              "back online: explicit update supersedes the earlier note");
         CHECK(provider->has_web_tools,
               "back online: web tools must return to the wire");
+
+        // Nothing changed: no new status update.
+        engine.submit_prompt(sid, "and again");
+        CHECK(turn(4), "unchanged-state turn completes");
+        CHECK(provider->tail_text() == "and again",
+              "unchanged state adds no status update");
     }  // ~SessionEngine joins the loop threads
 
     set_offline_mode(false);
     rm_rf_dir(tmp);
-    std::cout << "[OK] engine offline note rides system_dynamic only\n";
+    std::cout << "[OK] engine offline note rides the history, append-only\n";
     return true;
 }
 
@@ -587,6 +634,9 @@ static bool truncate_mid_sequence_is_valid_utf8() {
 // Reproduces the shipped crash: assemble_messages byte-cut an old-turn tool
 // result mid-character, then estimate_request_tokens dumped it — strict
 // serializer threw type_error.316 on the runner thread → std::terminate.
+// Past-turn results are no longer truncated at all (history is append-only
+// so the prompt cache and thinking-block binding survive a new turn), so the
+// same input must now go out byte-identical to the stored output.
 static bool crash_repro_old_tool_result_truncation() {
     using haicode::SessionMessage;
     // 10239 ASCII bytes, then a 3-byte 中 starting exactly at byte 10240
@@ -613,14 +663,17 @@ static bool crash_repro_old_tool_result_truncation() {
     auto assembled = builder.assemble_messages({assistant, tr, up});
     CHECK(assembled.size() == 3, "complete tool exchange and next prompt assembled");
 
-    // The truncated tool result must be valid UTF-8 with the marker intact.
+    // The old-turn tool result goes out verbatim: valid UTF-8, no marker,
+    // and identical to what the same rows assembled before the new turn.
     std::string out = assembled[1]["content"][0]["content"].get<std::string>();
+    CHECK(out == big, "past-turn tool result must not be rewritten");
     CHECK(haicode::util::sanitize_utf8(out) == out,
-          "truncated old tool result must be valid UTF-8");
-    CHECK(out.find("[truncated: 603 more bytes]") != std::string::npos,
-          "honest dropped-byte marker (603 = 3 + 600)");
-    CHECK(out.find("\xe4\xb8\xad") == std::string::npos,
-          "split character must not survive into the output");
+          "old tool result must be valid UTF-8");
+    CHECK(out.find("[truncated: ") == std::string::npos,
+          "no turn-boundary truncation marker");
+    auto before = builder.assemble_messages({assistant, tr});
+    CHECK(before.size() == 2 && before[1] == assembled[1],
+          "tool result renders the same bytes before and after the next prompt");
 
     // The exact crash frame: this used to throw type_error.316.
     bool threw = false;

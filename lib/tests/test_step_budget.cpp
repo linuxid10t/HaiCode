@@ -1355,6 +1355,128 @@ static bool test_hard_ceiling_terminates_e2e() {
     return true;
 }
 
+// ============================================================
+// Per-step status updates: diffing + append-only replay
+// ============================================================
+
+static bool test_status_update_diffing() {
+    using haicode::StepStatus;
+    using haicode::next_status_update;
+
+    // Nothing to report → no update.
+    StepStatus st;
+    CHECK(next_status_update(st, nullptr).is_null(), "empty state, no update");
+
+    // First todo list → update carries it, labeled as automatic.
+    st.todos = "\n\n# Active todos\n\n- [ ] Add thing\n";
+    auto u1 = next_status_update(st, nullptr);
+    CHECK(u1.is_object(), "first todos produce an update");
+    std::string t1 = u1.value("text", "");
+    CHECK(t1.find("automatic, not written by the user") != std::string::npos,
+          "update is labeled");
+    CHECK(t1.find("- [ ] Add thing") != std::string::npos, "todos included");
+    CHECK(u1.value("todos", "") == "# Active todos\n\n- [ ] Add thing",
+          "stored todos are trimmed");
+
+    // Unchanged → nothing (the earlier copy is still in context).
+    CHECK(next_status_update(st, u1).is_null(), "unchanged state, no update");
+
+    // Budget enters its final stretch → only the budget part is sent.
+    st.budget = haicode::render_dynamic_prompt("m", "os", "/tmp", 8, 50);
+    auto u2 = next_status_update(st, u1);
+    CHECK(u2.is_object(), "budget change produces an update");
+    std::string t2 = u2.value("text", "");
+    CHECK(t2.find("8 step(s) remaining") != std::string::npos, "budget sent");
+    CHECK(t2.find("Add thing") == std::string::npos,
+          "unchanged todos are not repeated");
+    CHECK(u2.value("todos", "") == u1.value("todos", ""),
+          "full state carried for the next comparison");
+
+    // Renewal: budget text disappears → explicit renewal line.
+    st.budget.clear();
+    auto u3 = next_status_update(st, u2);
+    CHECK(u3.is_object(), "budget disappearing produces an update");
+    CHECK(u3.value("text", "").find("Step budget renewed") != std::string::npos,
+          "renewal is stated explicitly");
+
+    // Todos cleared → explicit empty-list line.
+    st.todos.clear();
+    auto u4 = next_status_update(st, u3);
+    CHECK(u4.value("text", "").find("todo list is now empty") != std::string::npos,
+          "cleared todos are stated explicitly");
+
+    // Plan mode doesn't track todos: carried, not reported as empty.
+    StepStatus plan;
+    plan.todos_tracked = false;
+    CHECK(next_status_update(plan, u1).is_null(),
+          "Plan mode carries the last todo state");
+
+    // Offline on, then off.
+    StepStatus off = st;
+    off.offline = true;
+    auto u5 = next_status_update(off, u4);
+    CHECK(u5.value("text", "").find("# Offline mode") != std::string::npos,
+          "offline note sent");
+    auto u6 = next_status_update(st, u5);
+    CHECK(u6.value("text", "").find("Offline mode is now off") != std::string::npos,
+          "leaving offline mode is stated explicitly");
+    std::cout << "[OK] status update diffing\n";
+    return true;
+}
+
+static bool test_status_replay_is_append_only() {
+    using haicode::SessionMessage;
+    auto row = [](int seq, const char* type, nlohmann::json data) {
+        SessionMessage m;
+        m.seq = seq; m.type = type; m.data_json = data.dump();
+        return m;
+    };
+    haicode::ContextBuilder builder;
+
+    // Step 1: request = [prompt] + status.
+    std::vector<SessionMessage> rows = {
+        row(1, "user_prompted", {{"text", "do it"}})};
+    auto status1 = haicode::next_status_update(
+        {"", "# Active todos\n\n- [ ] A\n", true, false}, nullptr);
+    auto req1 = builder.assemble_messages(rows);
+    haicode::ContextBuilder::append_status_block(req1, status1.value("text", ""));
+    CHECK(req1.size() == 1 && req1[0]["content"].is_array()
+          && req1[0]["content"].size() == 2, "status appended to the prompt");
+
+    // Step 1's assistant row persists the update; step 2's request must
+    // start with step 1's request verbatim.
+    rows.push_back(row(2, "assistant_text", {
+        {"text", ""}, {"status", status1},
+        {"tool_calls", nlohmann::json::array({
+            {{"id", "c1"}, {"name", "read"}, {"input", nlohmann::json::object()}}})}}));
+    rows.push_back(row(3, "tool_result", {
+        {"call_id", "c1"}, {"success", true}, {"output", "file text"}}));
+    CHECK(haicode::last_status_update(rows) == status1,
+          "last persisted update is found");
+    auto status2 = haicode::next_status_update(
+        {"", "# Active todos\n\n- [x] A\n", true, false}, status1);
+    auto req2 = builder.assemble_messages(rows);
+    haicode::ContextBuilder::append_status_block(req2, status2.value("text", ""));
+    CHECK(req2.size() == 3, "prompt, assistant, tool results");
+    CHECK(req2[0] == req1[0], "step 1's tail replays verbatim");
+    auto& tail = req2[2]["content"];
+    CHECK(tail.is_array() && tail.size() == 2
+          && tail[0].value("type", "") == "tool_result"
+          && tail[1].value("type", "") == "text",
+          "status follows the tool results in the same user turn");
+
+    // Step 2 persisted too → step 3 replays both.
+    rows.push_back(row(4, "assistant_text", {{"text", "done"}, {"status", status2}}));
+    rows.push_back(row(5, "user_prompted", {{"text", "next"}}));
+    auto req3 = builder.assemble_messages(rows);
+    CHECK(req3.size() == 5, "full history assembled");
+    for (size_t i = 0; i < req2.size(); ++i)
+        CHECK(req3[i] == req2[i], "step 2's request is a prefix of step 3's");
+    CHECK(req3[4]["content"] == "next", "a new prompt without changes is plain");
+    std::cout << "[OK] status replay is append-only\n";
+    return true;
+}
+
 int main() {
     std::cout << "=== Step Budget Gate + Escalation Tests ===\n";
 
@@ -1367,6 +1489,8 @@ int main() {
     ok &= test_firm_tier();
     ok &= test_critical_tier();
     ok &= test_placeholder_substitution();
+    ok &= test_status_update_diffing();
+    ok &= test_status_replay_is_append_only();
     ok &= test_destructor_joins_running_loop();
     ok &= test_chat_mode_write_blocked_e2e();
     ok &= test_build_mode_write_executes_e2e();
