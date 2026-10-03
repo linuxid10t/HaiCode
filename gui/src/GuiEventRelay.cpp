@@ -126,9 +126,15 @@ GuiEventRelay::attach()
         std::string finish_reason = data.value("finish_reason", "");
         int32 input_tokens  = 0;
         int32 output_tokens = 0;
+        int32 cache_read    = 0;
+        int32 cache_write   = 0;
         double cost_usd = 0.0;
         if (data.contains("usage") && data["usage"].is_object()) {
+            // "input" is the UNCACHED bucket; the cache buckets ride along
+            // so the strip can show the whole prompt and its hit rate.
             input_tokens  = data["usage"].value("input",  0);
+            cache_read    = data["usage"].value("cache_read",  0);
+            cache_write   = data["usage"].value("cache_write", 0);
             // Generated tokens shown to the user include reasoning (the
             // usage buckets keep them separate for pricing).
             output_tokens = data["usage"].value("output", 0)
@@ -139,6 +145,8 @@ GuiEventRelay::attach()
         msg.AddString("finish_reason", finish_reason.c_str());
         msg.AddInt32("usage_input",  input_tokens);
         msg.AddInt32("usage_output", output_tokens);
+        msg.AddInt32("usage_cache_read",  cache_read);
+        msg.AddInt32("usage_cache_write", cache_write);
         // Absent when the step was interrupted before any usage report.
         if (data.contains("context_tokens"))
             msg.AddInt32("context_tokens", data.value("context_tokens", 0));
@@ -156,6 +164,8 @@ GuiEventRelay::attach()
         msg.AddInt32("input",  data.value("input", 0));
         msg.AddInt32("output", data.value("output", 0)
                              + data.value("reasoning", 0));
+        msg.AddInt32("cache_read",  data.value("cache_read", 0));
+        msg.AddInt32("cache_write", data.value("cache_write", 0));
         main_window_.SendMessage(&msg);
     });
 

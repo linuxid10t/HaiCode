@@ -45,6 +45,7 @@
 #include <haicode/db.h>
 #include <haicode/default_prompt.h>
 #include <haicode/model_info.h>
+#include <haicode/pricing.h>
 #include <haicode/skills.h>
 #include <haicode/tool.h>
 #include <haicode/codex_auth.h>
@@ -1625,6 +1626,8 @@ MainWindow::_HandleRetryCommand()
 
     last_prompt_input_ = 0;
     last_prompt_output_ = 0;
+    last_prompt_cache_read_ = 0;
+    last_prompt_cache_write_ = 0;
     engine_running_ = true;
     streaming_state_ = "thinking";
     current_tool_name_.clear();
@@ -1730,16 +1733,22 @@ MainWindow::_RestoreSessionTotals(const std::string& session_id)
     // next live StepEnded arrives.
     last_prompt_input_  = 0;
     last_prompt_output_ = 0;
+    last_prompt_cache_read_  = 0;
+    last_prompt_cache_write_ = 0;
     provisional_cost_   = 0.0;
     auto si = store_.get(session_id);
     if (si) {
         session_input_total_      = si->tokens.input;
         // Generated tokens include reasoning (stored as a separate bucket).
         session_output_total_     = si->tokens.output + si->tokens.reasoning;
+        session_cache_read_       = si->tokens.cache_read;
+        session_cache_write_      = si->tokens.cache_write;
         session_cost_             = si->cost;
     } else {
         session_input_total_      = 0;
         session_output_total_     = 0;
+        session_cache_read_       = 0;
+        session_cache_write_      = 0;
         session_cost_             = 0.0;
     }
     // Seed the context meter with the last provider-reported per-request size
@@ -1830,6 +1839,8 @@ MainWindow::_HandlePromptStarted(BMessage* msg)
     chat_view_->AppendUserText(text, names);
     last_prompt_input_ = 0;
     last_prompt_output_ = 0;
+    last_prompt_cache_read_ = 0;
+    last_prompt_cache_write_ = 0;
     queued_prompts_ = static_cast<int>(engine_->queued_prompt_count(active_session_id_));
     engine_running_ = true;
     streaming_state_ = "thinking";
@@ -1883,6 +1894,11 @@ MainWindow::_HandleStepEnded(BMessage* msg)
     msg->FindInt32("usage_output", &out_tok);
     last_prompt_input_   += in_tok;
     last_prompt_output_  += out_tok;
+    int32 cache_read = 0, cache_write = 0;
+    msg->FindInt32("usage_cache_read",  &cache_read);
+    msg->FindInt32("usage_cache_write", &cache_write);
+    last_prompt_cache_read_  += cache_read;
+    last_prompt_cache_write_ += cache_write;
     // Session totals and cost are NOT accumulated here: the engine
     // publishes the persisted totals (MSG_COST_UPDATED) just before this
     // message, which also covers maintenance calls StepEnded never sees.
@@ -1919,6 +1935,11 @@ MainWindow::_HandleCostUpdated(BMessage* msg)
         session_input_total_ = in_tok;
     if (msg->FindInt32("output", &out_tok) == B_OK)
         session_output_total_ = out_tok;
+    int32 cache_read = 0, cache_write = 0;
+    if (msg->FindInt32("cache_read", &cache_read) == B_OK)
+        session_cache_read_ = cache_read;
+    if (msg->FindInt32("cache_write", &cache_write) == B_OK)
+        session_cache_write_ = cache_write;
     provisional_cost_ = 0.0;
     _UpdateStatusStrip();
 }
@@ -2921,13 +2942,34 @@ MainWindow::_UpdateStatusStrip()
 
     std::string s = badge + " " + glyph + " " + label;
 
-    // Token + context strip (only if we have data)
-    if (last_prompt_input_ > 0 || last_prompt_output_ > 0 || session_input_total_ > 0
-            || provisional_cost_ > 0.0) {
-        s += "   last turn: \xe2\x86\x91" + format_tokens(last_prompt_input_)
+    // Token + context strip (only if we have data). ↑ is the whole prompt
+    // (uncached input + cache reads + cache writes) — cached tokens still
+    // fill the request — and "N% cached" is the share served as cache reads.
+    haicode::TokenUsage turn_usage;
+    turn_usage.input       = last_prompt_input_;
+    turn_usage.cache_read  = last_prompt_cache_read_;
+    turn_usage.cache_write = last_prompt_cache_write_;
+    haicode::TokenUsage session_usage;
+    session_usage.input       = session_input_total_;
+    session_usage.cache_read  = session_cache_read_;
+    session_usage.cache_write = session_cache_write_;
+    // Only providers that report cache activity get the readout: local
+    // servers report neither bucket and would otherwise show a constant 0%.
+    // Keyed on the session so a full-miss turn still shows its 0%.
+    const bool show_cache = session_cache_read_ > 0 || session_cache_write_ > 0;
+    auto cached = [&](const haicode::TokenUsage& u) -> std::string {
+        int pct = haicode::cache_hit_percent(u);
+        if (!show_cache || pct < 0) return "";
+        return " (" + std::to_string(pct) + "% cached)";
+    };
+    if (turn_usage.total_input() > 0 || last_prompt_output_ > 0
+            || session_usage.total_input() > 0 || provisional_cost_ > 0.0) {
+        s += "   last turn: \xe2\x86\x91" + format_tokens(turn_usage.total_input())
            + " \xe2\x86\x93" + format_tokens(last_prompt_output_)
-           + "   session: \xe2\x86\x91" + format_tokens(session_input_total_)
-           + " \xe2\x86\x93" + format_tokens(session_output_total_);
+           + cached(turn_usage)
+           + "   session: \xe2\x86\x91" + format_tokens(session_usage.total_input())
+           + " \xe2\x86\x93" + format_tokens(session_output_total_)
+           + cached(session_usage);
         // While a request streams its estimated cost rides on top of the
         // persisted total, marked "~" until the real usage replaces it.
         const double shown_cost = session_cost_ + provisional_cost_;

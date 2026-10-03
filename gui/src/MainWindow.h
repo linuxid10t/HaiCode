@@ -285,11 +285,17 @@ private:
     std::string    current_tool_name_;
     std::string    build_call_id_;
 
-    // Per-prompt / per-session token accounting
+    // Per-prompt / per-session token accounting. *_input_ is the UNCACHED
+    // bucket only; the strip's ↑ shows input + cache reads + cache writes and
+    // the cache split drives its "N% cached" readout.
     int            last_prompt_input_     = 0;
     int            last_prompt_output_    = 0;
+    int            last_prompt_cache_read_  = 0;
+    int            last_prompt_cache_write_ = 0;
     int            session_input_total_   = 0;
     int            session_output_total_  = 0;
+    int            session_cache_read_    = 0;
+    int            session_cache_write_   = 0;
     int            current_context_tokens_ = 0;
     int            max_context_           = 0;
     double         session_cost_          = 0.0;  // persisted total (MSG_COST_UPDATED)
