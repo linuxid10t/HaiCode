@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <chrono>
 #include <thread>
 
 using haicode::Database;
@@ -541,6 +542,52 @@ static bool test_sweep_scratch_files() {
     return true;
 }
 
+// ---- try_update_times (sidebar timestamp refresh, non-blocking) ----
+
+static bool test_try_update_times() {
+    Fixture f;
+    f.open();
+    std::string a = make_session(*f.store, "/p", "a");
+    std::string b = make_session(*f.store, "/p", "b");
+    std::string c = make_session(*f.store, "/p", "c");
+    f.set_time("session", "id", a, 3000);
+    f.set_time("session", "id", b, 1000);
+    f.set_time("session", "id", c, 2000);
+
+    std::vector<std::pair<std::string, int64_t>> times;
+    CHECK(f.store->try_update_times(times), "uncontended read succeeds");
+    CHECK(times.size() == 3, "every session reported");
+    CHECK(times.size() == 3 && times[0] == std::make_pair(a, int64_t(3000))
+          && times[1] == std::make_pair(c, int64_t(2000))
+          && times[2] == std::make_pair(b, int64_t(1000)),
+          "newest first with exact times (list() order)");
+    CHECK(f.store->try_update_times(times, 2) && times.size() == 2,
+          "limit honored");
+
+    // Another thread holding the shared connection: refuse without waiting,
+    // leave the caller's previous result untouched.
+    std::atomic<bool> held{false}, release{false};
+    std::thread holder([&] {
+        std::lock_guard<std::mutex> lock(f.db->connection_mutex());
+        held = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    });
+    while (!held) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    auto before = times;
+    auto t0 = std::chrono::steady_clock::now();
+    bool got = f.store->try_update_times(times);
+    auto waited = std::chrono::steady_clock::now() - t0;
+    release = true;
+    holder.join();
+    CHECK(!got, "contended read refuses");
+    CHECK(waited < std::chrono::milliseconds(500), "contended read does not wait");
+    CHECK(times == before, "refused read leaves the output untouched");
+    CHECK(f.store->try_update_times(times) && times.size() == 3,
+          "read succeeds once the connection is free");
+    std::cout << "[OK] try_update_times\n";
+    return true;
+}
+
 int main() {
     int failures = 0;
     auto run = [&](const char* name, bool (*fn)()) {
@@ -557,6 +604,7 @@ int main() {
     run("housekeeping_concurrency", test_housekeeping_concurrency);
     run("housekeeping_lock_failures", test_housekeeping_lock_failures);
     run("sweep_scratch_files", test_sweep_scratch_files);
+    run("try_update_times", test_try_update_times);
 
     std::remove(kDbPath);
     std::remove("/tmp/test_haicode_cleanup.db-wal");

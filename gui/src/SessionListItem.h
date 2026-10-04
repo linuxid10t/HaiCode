@@ -48,8 +48,8 @@ public:
     const std::string& ModifiedLabel() const { return modified_label_; }
     bool IsRunning() const { return running_; }
 
-    // Both return whether the row needs a repaint: a state change always
-    // does, a spinner frame only while running.
+    // SetRunning returns whether the state changed (the glyph gutter needs a
+    // repaint); SetModifiedTime whether the label changed.
     bool SetRunning(bool running);
     void SetSpinnerFrame(int frame);
     bool SetModifiedTime(int64_t time_updated);

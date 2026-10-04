@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 #include <mutex>
+#include <utility>
 #include <sqlite3.h>
 
 namespace haicode {
@@ -241,6 +242,13 @@ public:
                        const std::string& model_json);
     std::optional<SessionInfo> get(const std::string& session_id);
     std::vector<SessionInfo> list(int limit = 50);
+    // (id, time_updated) of the newest `limit` sessions — list()'s order —
+    // without blocking: false (out untouched) when another thread holds the
+    // shared connection (e.g. housekeeping's VACUUM), so the sidebar's
+    // periodic timestamp refresh can retry later instead of freezing the
+    // GUI looper.
+    bool try_update_times(std::vector<std::pair<std::string, int64_t>>& out,
+                          int limit = 50);
     // Ids of every stored session matching `filter`, newest first. Deliberately
     // uncapped (unlike list()'s 50) so a bulk cleanup can reach sessions that
     // never made it into the sidebar.

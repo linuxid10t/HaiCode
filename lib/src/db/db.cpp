@@ -324,6 +324,20 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
     return results;
 }
 
+bool SessionStore::try_update_times(
+        std::vector<std::pair<std::string, int64_t>>& out, int limit) {
+    std::unique_lock<std::mutex> lock(conn_mu_, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    DbStmt stmt(db_.handle(),
+        "SELECT id, time_updated FROM session ORDER BY time_updated DESC LIMIT ?");
+    stmt.bind(1, limit);
+    std::vector<std::pair<std::string, int64_t>> rows;
+    while (stmt.expect_row())
+        rows.emplace_back(stmt.text(0), stmt.int64_col(1));
+    out = std::move(rows);
+    return true;
+}
+
 std::vector<std::string> SessionStore::sessions_matching(const SessionFilter& filter) {
     std::lock_guard<std::mutex> lock(conn_mu_);
 

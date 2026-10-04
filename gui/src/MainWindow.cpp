@@ -58,6 +58,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 #include <thread>
 #include <ctime>
@@ -130,14 +131,18 @@ public:
     // settings changes via MainWindow::SetEngine.
     void SetEngine(haicode::SessionEngine* engine) { engine_ = engine; }
 
-    // Called attached so the BMessageRunner can target this view.
     void AttachedToWindow() override
     {
         BListView::AttachedToWindow();
-        // 120ms per frame, the Claude Code animation rate; the window
-        // pulse (500ms) only refreshes running/timestamp state.
-        spinner_runner_ = std::make_unique<BMessageRunner>(
-            BMessenger(this), BMessage(kMsgSpinnerTick), 120000);
+        // The spinner runner targets this view, so it can only start once
+        // attached; rows built before that get their state here.
+        SyncRunning();
+    }
+
+    void DetachedFromWindow() override
+    {
+        spinner_runner_.reset();
+        BListView::DetachedFromWindow();
     }
 
     void MessageReceived(BMessage* msg) override
@@ -146,43 +151,64 @@ public:
         BListView::MessageReceived(msg);
     }
 
-    void _Spin()
+    // Swap in a rebuilt row set (MainWindow::_RefreshSessionList). Running
+    // flags carry over by session id so a rebuild — a rename lands right as
+    // a session's first turn starts — never blanks a spinner; a fresh poll
+    // then corrects them. The old rows are deleted (MakeEmpty alone leaks
+    // them).
+    void ReplaceItems(const std::vector<SessionListItem*>& items)
     {
-        bool any_running = false;
+        std::set<std::string> was_running;
+        std::vector<BListItem*> old;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            old.push_back(ItemAt(i));
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (item && item->IsRunning()) was_running.insert(item->SessionId());
+        }
+        MakeEmpty();
+        for (BListItem* item : old) delete item;
+        for (SessionListItem* item : items) {
+            if (was_running.count(item->SessionId()) > 0) {
+                item->SetRunning(true);
+                item->SetSpinnerFrame(spinner_frame_);
+            }
+            AddItem(item);
+        }
+        SyncRunning();
+    }
+
+    // Re-read which sessions are running: every window pulse (500 ms) and
+    // after each rebuild. Non-blocking — housekeeping holds the engine lock
+    // across a VACUUM, and waiting on it would freeze the window — so a busy
+    // engine just keeps the current state until the next pulse.
+    void SyncRunning()
+    {
+        std::vector<std::string> ids;
+        if (!engine_ || !engine_->try_running_sessions(ids)) return;
+        std::set<std::string> running(ids.begin(), ids.end());
+        bool any = false;
         for (int32 i = 0; i < CountItems(); ++i) {
             auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item || !item->IsRunning()) continue;
-            any_running = true;
-            item->SetSpinnerFrame(spinner_frame_);
-            InvalidateItem(i);
+            if (!item) continue;
+            bool now_running = running.count(item->SessionId()) > 0;
+            if (now_running && !item->IsRunning())
+                item->SetSpinnerFrame(spinner_frame_);
+            if (item->SetRunning(now_running)) {
+                _InvalidateGutter(i);
+                // A run that just ended last touched time_updated; show it now.
+                if (!now_running) times_due_ = true;
+            }
+            any = any || now_running;
         }
-        if (any_running)
-            spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrameCount;
+        _SetSpinning(any);
     }
 
     void Pulse() override
     {
+        SyncRunning();
         bigtime_t now = system_time();
-        bool poll_state = now - last_refresh_ >= 5000000;
-        std::set<std::string> running;
-        if (engine_ && poll_state)
-            for (const auto& id : engine_->running_sessions()) running.insert(id);
-        for (int32 i = 0; i < CountItems(); ++i) {
-            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item) continue;
-            bool invalidate = false;
-            if (poll_state) {
-                if (running.count(item->SessionId()) > 0)
-                    invalidate = item->SetRunning(true);
-                else
-                    invalidate = item->SetRunning(false);
-                auto session = store_.get(item->SessionId());
-                if (session && item->SetModifiedTime(session->time_updated))
-                    invalidate = true;
-            }
-            if (invalidate) InvalidateItem(i);
-        }
-        if (poll_state) last_refresh_ = now;
+        if (times_due_ || now - last_times_refresh_ >= 5000000)
+            _SyncModifiedTimes(now);
     }
 
     void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override
@@ -218,9 +244,76 @@ public:
     }
 
 private:
+    void _Spin()
+    {
+        bool any = false;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item || !item->IsRunning()) continue;
+            any = true;
+            item->SetSpinnerFrame(spinner_frame_);
+            _InvalidateGutter(i);
+        }
+        if (any)
+            spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrameCount;
+        else
+            _SetSpinning(false);
+    }
+
+    // 120 ms per frame, the Claude Code animation rate. Ticks only while a
+    // row is running — an idle window shouldn't wake 8 times a second.
+    void _SetSpinning(bool on)
+    {
+        if (!on) {
+            spinner_runner_.reset();
+        } else if (!spinner_runner_ && Window()) {
+            spinner_runner_ = std::make_unique<BMessageRunner>(
+                BMessenger(this), BMessage(kMsgSpinnerTick), 120000);
+            if (spinner_runner_->InitCheck() != B_OK)
+                spinner_runner_.reset();
+        }
+    }
+
+    // Repaint only the glyph gutter: a whole-row invalidate is erased to the
+    // list background before DrawItem refills it, which flickers the
+    // selected (usually the running) row on every frame.
+    void _InvalidateGutter(int32 index)
+    {
+        BRect frame = ItemFrame(index);
+        frame.right = std::min(frame.right, frame.left + kSpinnerGutter);
+        Invalidate(frame);
+    }
+
+    // One non-blocking query for every row's time_updated (rows are the
+    // store's newest sessions, so list()'s order and limit cover them). A
+    // busy connection or a failed read retries on the next pulse.
+    void _SyncModifiedTimes(bigtime_t now)
+    {
+        std::vector<std::pair<std::string, int64_t>> times;
+        try {
+            if (!store_.try_update_times(times, std::max<int32>(50, CountItems())))
+                return;
+        } catch (const std::exception& e) {
+            fprintf(stderr, "haicode: sidebar refresh: %s\n", e.what());
+            last_times_refresh_ = now;
+            return;
+        }
+        std::map<std::string, int64_t> by_id(times.begin(), times.end());
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item) continue;
+            auto it = by_id.find(item->SessionId());
+            if (it != by_id.end() && item->SetModifiedTime(it->second))
+                InvalidateItem(i);
+        }
+        last_times_refresh_ = now;
+        times_due_ = false;
+    }
+
     haicode::SessionStore& store_;
     haicode::SessionEngine* engine_ = nullptr;
-    bigtime_t last_refresh_ = 0;
+    bigtime_t last_times_refresh_ = 0;
+    bool times_due_ = false;
     int spinner_frame_ = 0;
     std::unique_ptr<BMessageRunner> spinner_runner_;
 };
@@ -1317,19 +1410,19 @@ MainWindow::MessageReceived(BMessage* msg)
 void
 MainWindow::_RefreshSessionList()
 {
-    // Remove old items
-    session_list_->MakeEmpty();
     session_ids_.clear();
     session_labels_.clear();
 
     auto sessions = store_.list(50);
+    std::vector<SessionListItem*> items;
     for (auto& si : sessions) {
         std::string title = session_display_title(si);
         session_labels_.push_back(title);
-        session_list_->AddItem(new SessionListItem(title, si.directory, si.id,
+        items.push_back(new SessionListItem(title, si.directory, si.id,
             si.time_updated));
         session_ids_.push_back(si.id);
     }
+    static_cast<SessionListView*>(session_list_)->ReplaceItems(items);
     _RefreshSessionBadges();
 }
 

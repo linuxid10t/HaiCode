@@ -148,6 +148,11 @@ public:
     // Ids of every session whose agentic loop is currently executing (under
     // mu_). Used by the quit path to warn before interrupting live runs.
     std::vector<std::string> running_sessions();
+    // Non-blocking running_sessions() for polling from a UI thread: false
+    // (out untouched) when mu_ is held — run_when_idle keeps it for the whole
+    // housekeeping pass, VACUUM included — so a poller skips a beat instead
+    // of freezing behind it.
+    bool try_running_sessions(std::vector<std::string>& out);
 
     // Holds the run-start lock while work executes. The callback may access
     // the store but must not re-enter the engine. False means retry when idle.

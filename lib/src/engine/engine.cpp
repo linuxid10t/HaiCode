@@ -1348,6 +1348,15 @@ std::vector<std::string> SessionEngine::running_sessions() {
     return ids;
 }
 
+bool SessionEngine::try_running_sessions(std::vector<std::string>& out) {
+    std::unique_lock<std::mutex> lock(mu_, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    out.clear();
+    for (const auto& [id, running] : session_running_)
+        if (running) out.push_back(id);
+    return true;
+}
+
 bool SessionEngine::run_when_idle(const std::function<void()>& work) {
     std::lock_guard<std::mutex> lock(mu_);
     if (shutting_down_) return false;

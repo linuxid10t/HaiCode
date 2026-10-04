@@ -424,8 +424,28 @@ static void test_idle_maintenance() {
     }), "idle maintenance may access the store");
     TEST_REQUIRE(called, "idle callback ran");
 
+    // try_running_sessions never waits behind maintenance (the sidebar polls
+    // it from the GUI looper while housekeeping may hold mu_ across a VACUUM).
+    std::vector<std::string> polled{"stale"};
+    TEST_REQUIRE(fx.engine->try_running_sessions(polled) && polled.empty(),
+        "idle poll succeeds with no running sessions");
+    bool poll_during_maintenance = true;
+    polled = {"stale"};
+    TEST_REQUIRE(fx.engine->run_when_idle([&] {
+        std::thread poller([&] {
+            poll_during_maintenance = fx.engine->try_running_sessions(polled);
+        });
+        poller.join();
+    }), "maintenance ran");
+    TEST_REQUIRE(!poll_during_maintenance, "poll refuses while maintenance holds the engine");
+    TEST_REQUIRE(polled.size() == 1 && polled[0] == "stale",
+        "refused poll leaves the output untouched");
+
     fx.engine->submit_prompt(fx.sid, "PARK foreground");
     fx.park->entered.wait();
+    TEST_REQUIRE(fx.engine->try_running_sessions(polled)
+        && polled.size() == 1 && polled[0] == fx.sid,
+        "poll reports the running session");
     called = false;
     TEST_REQUIRE(!fx.engine->run_when_idle([&] { called = true; }),
         "foreground work defers maintenance");
