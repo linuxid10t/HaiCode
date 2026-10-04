@@ -446,7 +446,7 @@ ChatView::AppendUserText(const std::string& text,
         if (i) names += ", ";
         names += attachment_names[i];
     }
-    _AppendEntry(_PushEntry({ChatEntry::UserText, text, names, true, false}));
+    _AppendEntry(_PushEntry({ChatEntry::UserText, text, names, true, false, {}}));
     ScrollToBottom();
 }
 
@@ -458,7 +458,7 @@ ChatView::AppendTextDelta(const std::string& delta)
             || model_.back().kind != ChatEntry::AssistantText) {
         // Header first (canonical rendering of the still-empty entry), then
         // each delta lands at the very end of the text.
-        _AppendEntry(_PushEntry({ChatEntry::AssistantText, "", "", true, false}));
+        _AppendEntry(_PushEntry({ChatEntry::AssistantText, "", "", true, false, {}}));
         streaming_ = true;
     }
     model_.back().text += delta;
@@ -480,7 +480,7 @@ ChatView::AppendReasoningDelta(const std::string& delta)
 {
     if (!reasoning_streaming_) {
         bool collapsed = thinking_display_ == ThinkingDisplay::AlwaysCollapsed;
-        _AppendEntry(_PushEntry({ChatEntry::Reasoning, "", "", true, collapsed}));
+        _AppendEntry(_PushEntry({ChatEntry::Reasoning, "", "", true, collapsed, {}}));
         reasoning_streaming_ = true;
     }
     ChatEntry& e = model_.back();
@@ -516,14 +516,15 @@ ChatView::AppendToolCalled(const std::string& tool_name, const std::string& inpu
     EndReasoningStreaming();
     streaming_ = false;
     // Shown expanded while the tool runs; collapsed when its result arrives.
-    int idx = _PushEntry({ChatEntry::ToolCalled, input_json, tool_name, true, false});
+    int idx = _PushEntry({ChatEntry::ToolCalled, input_json, tool_name, true, false, {}});
     pending_tools_.push_back(idx);
     _AppendEntry(idx);
     ScrollToBottom();
 }
 
 void
-ChatView::AppendToolResult(const std::string& output, bool success)
+ChatView::AppendToolResult(const std::string& output, bool success,
+                           const std::string& call_id)
 {
     EndReasoningStreaming();
     streaming_ = false;
@@ -537,8 +538,27 @@ ChatView::AppendToolResult(const std::string& output, bool success)
             _ReplaceEntry(idx);
         }
     }
-    _AppendEntry(_PushEntry({ChatEntry::ToolResult, output, "", success, false}));
+    _AppendEntry(_PushEntry({ChatEntry::ToolResult, output, "", success, false,
+                             call_id}));
     ScrollToBottom();
+}
+
+bool
+ChatView::UpdateToolResult(const std::string& call_id, const std::string& output,
+                           bool success)
+{
+    if (call_id.empty()) return false;
+    // Newest first: some OpenAI-compatible servers reuse call ids across
+    // turns, and the store rewrites the newest matching row as well.
+    for (int i = (int)model_.size() - 1; i >= 0; --i) {
+        ChatEntry& e = model_[i];
+        if (e.kind != ChatEntry::ToolResult || e.call_id != call_id) continue;
+        e.text = output;
+        e.success = success;
+        _ReplaceEntry(i);
+        return true;
+    }
+    return false;
 }
 
 void
@@ -546,7 +566,7 @@ ChatView::AppendSystem(const std::string& text)
 {
     EndReasoningStreaming();
     streaming_ = false;
-    _AppendEntry(_PushEntry({ChatEntry::System, text, "", true, false}));
+    _AppendEntry(_PushEntry({ChatEntry::System, text, "", true, false, {}}));
     ScrollToBottom();
 }
 
@@ -556,7 +576,7 @@ ChatView::AppendCompactionSummary(const std::string& header,
 {
     EndReasoningStreaming();
     streaming_ = false;
-    _AppendEntry(_PushEntry({ChatEntry::CompactionSummary, summary, header, true, true}));
+    _AppendEntry(_PushEntry({ChatEntry::CompactionSummary, summary, header, true, true, {}}));
     ScrollToBottom();
 }
 

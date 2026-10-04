@@ -6,6 +6,7 @@
 #include "PlanReviewWindow.h"
 #include "AskUserWindow.h"
 #include "SessionListItem.h"
+#include "GuiEventRelay.h"
 
 #include <Application.h>
 #include <cmath>
@@ -907,6 +908,9 @@ MainWindow::SetEngine(haicode::SessionEngine& engine)
 {
     engine_ = &engine;
     static_cast<SessionListView*>(session_list_)->SetEngine(engine_);
+    // Row generations and step ids are per engine; the new one starts over.
+    loaded_row_gen_ = 0;
+    stream_step_id_.clear();
     engine_running_ = !active_session_id_.empty()
         && engine_->is_running(active_session_id_);
     queued_prompts_ = active_session_id_.empty()
@@ -1070,7 +1074,7 @@ MainWindow::MessageReceived(BMessage* msg)
             _HandleToolResult(msg);
             break;
         case MSG_STEP_STARTED:
-            _HandleStepStarted();
+            _HandleStepStarted(msg);
             break;
         case MSG_PROMPT_STARTED:
             _HandlePromptStarted(msg);
@@ -1438,8 +1442,13 @@ MainWindow::_NewSession()
     std::string sid = engine_->create_session(project_dir_, "", model, provider);
     _SaveActiveDraft();
     active_session_id_ = sid;
+    if (relay_) relay_->set_active_session(sid);
+    stream_step_id_.clear();
+    loaded_row_gen_ = 0;
+    stream_text_floor_ = 0;
+    stream_reasoning_floor_ = 0;
 
-    // Notify relay of new active session
+    // Sync be_app's per-session permission flags to the new session
     BMessage notify(MSG_ACTIVE_SESSION);
     notify.AddString("session_id", sid.c_str());
     be_app->PostMessage(&notify);
@@ -1488,7 +1497,8 @@ MainWindow::_SelectSession(int idx)
     _SaveActiveDraft();
     active_session_id_ = session_ids_[idx];
 
-    // Notify relay of newly active session
+    // Sync be_app's per-session permission flags (the event relay itself is
+    // switched by _LoadHistory, right before the transcript load)
     BMessage notify(MSG_ACTIVE_SESSION);
     notify.AddString("session_id", active_session_id_.c_str());
     be_app->PostMessage(&notify);
@@ -1855,11 +1865,29 @@ MainWindow::_HandleRetryCommand()
 void
 MainWindow::_LoadHistory(const std::string& session_id)
 {
-    auto messages = store_.load_messages(session_id);
+    // Route this session's live events to the window BEFORE loading, so
+    // nothing published from here on is dropped; whatever overlaps the load
+    // is filtered by _AcceptStreamDelta.
+    if (relay_) relay_->set_active_session(session_id);
+
+    // The step streaming right now (if any) isn't persisted until it ends.
+    // load_with_in_flight reads the rows and the engine's in-flight copy of
+    // that step atomically, so the reply shows from its first byte — opening
+    // a session mid-reply used to start it mid-sentence.
+    decltype(store_.load_messages(session_id)) messages;
     // Replay [context compacted] entries at the point each compaction
     // occurred — derived from the checkpoint table, never stored as rows
     // (a stored row would ride every future request and double-count).
-    auto checkpoints = store_.list_complete_checkpoints(session_id);
+    decltype(store_.list_complete_checkpoints(session_id)) checkpoints;
+    auto load = [&] {
+        messages = store_.load_messages(session_id);
+        checkpoints = store_.list_complete_checkpoints(session_id);
+    };
+    haicode::InFlightStream in_flight;
+    if (engine_)
+        in_flight = engine_->load_with_in_flight(session_id, load);
+    else
+        load();
     size_t cp_idx = 0;
     // Tool name by call id, remembered from tool_calls rows so a screenshot
     // tool_result can be surfaced as a visible transcript line on replay.
@@ -1918,7 +1946,8 @@ MainWindow::_LoadHistory(const std::string& session_id)
             } else if (sm.type == "tool_result") {
                 std::string output  = data.value("output", "");
                 bool success = data.value("success", true);
-                chat_view_->AppendToolResult(output, success);
+                chat_view_->AppendToolResult(output, success,
+                                             data.value("call_id", ""));
                 // Same visibility line as the live path (_HandleToolResult):
                 // collapsed tool bubbles would otherwise hide a capture.
                 std::string cid = data.value("call_id", "");
@@ -1939,6 +1968,16 @@ MainWindow::_LoadHistory(const std::string& session_id)
             ++cp_idx;
         }
     }
+    // Render the in-flight step as if it had streamed live; the live deltas
+    // that follow continue it, skipping the bytes shown here.
+    if (!in_flight.reasoning.empty())
+        chat_view_->AppendReasoningDelta(in_flight.reasoning);
+    if (!in_flight.text.empty())
+        chat_view_->AppendTextDelta(in_flight.text);
+    stream_step_id_ = in_flight.step_id;
+    loaded_row_gen_ = static_cast<int64>(in_flight.row_gen);
+    stream_text_floor_ = static_cast<int64>(in_flight.text.size());
+    stream_reasoning_floor_ = static_cast<int64>(in_flight.reasoning.size());
     chat_view_->EndBatch();
 }
 
@@ -1978,6 +2017,7 @@ void
 MainWindow::_HandleTextDelta(BMessage* msg)
 {
     const char* delta = nullptr;
+    if (!_AcceptStreamDelta(msg, stream_text_floor_)) return;
     if (msg->FindString("delta", &delta) == B_OK && delta) {
         chat_view_->AppendTextDelta(delta);
         if (streaming_state_ != "streaming") {
@@ -1991,20 +2031,57 @@ void
 MainWindow::_HandleReasoningDelta(BMessage* msg)
 {
     const char* delta = nullptr;
+    if (!_AcceptStreamDelta(msg, stream_reasoning_floor_)) return;
     if (msg->FindString("delta", &delta) == B_OK && delta) {
         chat_view_->AppendReasoningDelta(delta);
     }
 }
 
+bool
+MainWindow::_FromOtherSession(BMessage* msg) const
+{
+    const char* sid = nullptr;
+    return msg->FindString("session_id", &sid) == B_OK && sid
+        && active_session_id_ != sid;
+}
+
+bool
+MainWindow::_RowAlreadyLoaded(BMessage* msg) const
+{
+    int64 gen = 0;
+    return msg->FindInt64("row_gen", &gen) == B_OK && gen > 0
+        && gen <= loaded_row_gen_;
+}
+
+bool
+MainWindow::_AcceptStreamDelta(BMessage* msg, int64 floor)
+{
+    if (_FromOtherSession(msg))
+        return false;
+    const char* step = nullptr;
+    if (msg->FindString("step_id", &step) != B_OK || !step || !*step)
+        return true;
+    // A different step is one the transcript load already found persisted
+    // (its deltas were forwarded after the relay switched, before the load).
+    if (stream_step_id_ != step)
+        return false;
+    // Below the floor: already rendered from the in-flight snapshot.
+    int64 offset = -1;
+    return !(msg->FindInt64("offset", &offset) == B_OK && offset >= 0
+             && offset < floor);
+}
+
 void
 MainWindow::_HandleToolCalled(BMessage* msg)
 {
+    if (_FromOtherSession(msg)) return;
     const char* tool_name  = nullptr;
     const char* input_json = nullptr;
     msg->FindString("tool_name",  &tool_name);
     msg->FindString("input_json", &input_json);
-    chat_view_->AppendToolCalled(tool_name  ? tool_name  : "",
-                                  input_json ? input_json : "");
+    if (!_RowAlreadyLoaded(msg))
+        chat_view_->AppendToolCalled(tool_name  ? tool_name  : "",
+                                      input_json ? input_json : "");
     current_tool_name_ = tool_name ? tool_name : "";
     streaming_state_ = "tool";
     _UpdateStatusStrip();
@@ -2013,14 +2090,27 @@ MainWindow::_HandleToolCalled(BMessage* msg)
 void
 MainWindow::_HandleToolResult(BMessage* msg)
 {
+    if (_FromOtherSession(msg)) return;
     const char* output = nullptr;
     bool success = true;
     msg->FindString("output",  &output);
     msg->FindBool("success",   &success);
-    chat_view_->AppendToolResult(output ? output : "", success);
+    const char* call_id = nullptr;
+    msg->FindString("call_id", &call_id);
+    bool replaces = false;
+    msg->FindBool("replaces_result", &replaces);
+    bool loaded = _RowAlreadyLoaded(msg);
+    if (!loaded) {
+        // ask_user's answer replaces its placeholder line (as the stored row
+        // does); anything else is a new result.
+        if (!(replaces && call_id
+              && chat_view_->UpdateToolResult(call_id, output ? output : "", success)))
+            chat_view_->AppendToolResult(output ? output : "", success,
+                                         call_id ? call_id : "");
+    }
     // Tool bubbles collapse; a captured screenshot is easy to miss entirely,
     // so surface it as a permanent transcript line too.
-    if (success && current_tool_name_ == "screenshot")
+    if (!loaded && success && current_tool_name_ == "screenshot")
         chat_view_->AppendSystem("Screenshot captured \xe2\x80\x94 image sent to the provider.");
     build_call_id_.clear();
     // After a tool finishes, the engine may keep going (another tool or more
@@ -2033,8 +2123,19 @@ MainWindow::_HandleToolResult(BMessage* msg)
 }
 
 void
-MainWindow::_HandleStepStarted()
+MainWindow::_HandleStepStarted(BMessage* msg)
 {
+    if (_FromOtherSession(msg))
+        return;
+    // A new step streams from offset 0; a retried attempt reuses its id and
+    // keeps whatever floor the last transcript load set.
+    const char* step = nullptr;
+    if (msg->FindString("step_id", &step) == B_OK && step && *step
+            && stream_step_id_ != step) {
+        stream_step_id_ = step;
+        stream_text_floor_ = 0;
+        stream_reasoning_floor_ = 0;
+    }
     engine_running_ = true;
     streaming_state_ = "thinking";
     current_tool_name_.clear();
@@ -2053,7 +2154,8 @@ MainWindow::_HandlePromptStarted(BMessage* msg)
     const char* name = nullptr;
     for (int32 i = 0; msg->FindString("attachment", i, &name) == B_OK; ++i)
         names.emplace_back(name);
-    chat_view_->AppendUserText(text, names);
+    if (!_RowAlreadyLoaded(msg))
+        chat_view_->AppendUserText(text, names);
     last_prompt_input_ = 0;
     last_prompt_output_ = 0;
     last_prompt_cache_read_ = 0;
@@ -3406,10 +3508,10 @@ MainWindow::_ApplyThinkingDisplay()
     // unrecognized values fall back to "off" (the default).
     const std::string& td = engine_->config().thinking_display;
     ThinkingDisplay d = ThinkingDisplay::AlwaysCollapsed;
-    if (td == "off")
-        d = ThinkingDisplay::AlwaysCollapsed;
-    else if (td == "on")
+    if (td == "on")
         d = ThinkingDisplay::AlwaysExpanded;
+    else if (td == "on_while_thinking")
+        d = ThinkingDisplay::ExpandedWhileStreaming;
     chat_view_->SetThinkingDisplay(d);
 }
 

@@ -283,6 +283,7 @@ HaiCodeApp::ReadyToRun()
         *bus_,
         main_window_->active_session_id());
     relay_->attach();
+    main_window_->SetEventRelay(relay_.get());
 
     // --- 13. Show the window ---
     main_window_->Show();
@@ -482,9 +483,12 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             break;
         }
         case MSG_ACTIVE_SESSION: {
+            // The window already switched the event relay synchronously
+            // (MainWindow::SetEventRelay); re-setting it here, from a queue
+            // that lags the window, could flip it back to a session the
+            // user has since left.
             const char* sid = nullptr;
-            if (msg->FindString("session_id", &sid) == B_OK && sid && relay_)
-                relay_->set_active_session(sid);
+            msg->FindString("session_id", &sid);
             // Session switch: pull that session's persisted flags into the
             // gate (the old toolbar-checkbox restore path, minus the widgets).
             if (sid && *sid) {

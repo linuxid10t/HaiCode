@@ -49,6 +49,12 @@ public:
 
     Gate title_entered;
     std::shared_ptr<Gate> title_gate = std::make_shared<Gate>();
+    // "STREAM": reasoning "think" + text "hello ", park; then "world", park
+    // again with everything streamed but the turn not yet finished.
+    Gate stream_parked;
+    std::shared_ptr<Gate> stream_gate = std::make_shared<Gate>();
+    Gate stream_parked_final;
+    std::shared_ptr<Gate> finish_gate = std::make_shared<Gate>();
     std::atomic<int> calls{0};
     std::atomic<int> title_calls{0};
 
@@ -73,6 +79,17 @@ public:
             tc.name = "parktool";
             tc.input = json::object();
             cb.on_finish(FinishReason::ToolUse, {}, {tc});
+            return;
+        }
+        if (is_user && text.find("STREAM") != std::string::npos) {
+            cb.on_reasoning_delta("think");
+            cb.on_text_delta("t", "hello ");
+            stream_parked.open_gate();
+            stream_gate->wait();
+            cb.on_text_delta("t", "world");
+            stream_parked_final.open_gate();
+            finish_gate->wait();
+            cb.on_finish(FinishReason::EndTurn, {}, {});
             return;
         }
         if (is_user && text.find("ASK") != std::string::npos) {
@@ -475,7 +492,73 @@ static void test_idle_maintenance() {
     titled.engine->shutdown();
 }
 
+// A frontend joining mid-stream: load_with_in_flight hands back exactly what
+// streamed but isn't persisted, deltas carry (step id, offset) so the joiner
+// can skip what its snapshot covers, and the persist cannot land while a
+// load is in progress (no gap, no duplicate).
+static void test_load_with_in_flight() {
+    Fixture fx;
+    std::mutex ev_mu;
+    std::vector<json> text_events;
+    fx.bus.subscribe(events::EventType::TextDelta, [&](const json& ev) {
+        std::lock_guard<std::mutex> lk(ev_mu);
+        text_events.push_back(ev);
+    });
+
+    auto idle = fx.engine->load_with_in_flight(fx.sid, [] {});
+    TEST_REQUIRE(idle.step_id.empty() && idle.text.empty(), "idle session: nothing in flight");
+
+    fx.engine->submit_prompt(fx.sid, "STREAM please");
+    fx.provider->stream_parked.wait();
+
+    std::vector<SessionMessage> rows;
+    auto snap = fx.engine->load_with_in_flight(fx.sid, [&] { rows = fx.store.load_messages(fx.sid); });
+    TEST_REQUIRE(!snap.step_id.empty(), "streaming step reported");
+    TEST_REQUIRE(snap.reasoning == "think" && snap.text == "hello ",
+        "snapshot holds exactly what streamed so far");
+    TEST_REQUIRE(std::none_of(rows.begin(), rows.end(),
+        [](const SessionMessage& m) { return m.type == "assistant_text"; }),
+        "streamed step not yet persisted");
+
+    fx.provider->stream_gate->open_gate();
+    fx.provider->stream_parked_final.wait();
+    auto full = fx.engine->load_with_in_flight(fx.sid, [] {});
+    TEST_REQUIRE(full.step_id == snap.step_id && full.text == "hello world",
+        "snapshot grows with the stream, same step");
+
+    // Hold a load open while the stream finishes: the persist (and the
+    // in-flight drop that goes with it) must wait, so the load never sees the
+    // row AND the snapshot, or neither.
+    size_t assistant_rows_during_load = 0;
+    auto held = fx.engine->load_with_in_flight(fx.sid, [&] {
+        fx.provider->finish_gate->open_gate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        for (const auto& m : fx.store.load_messages(fx.sid))
+            if (m.type == "assistant_text") ++assistant_rows_during_load;
+    });
+    TEST_REQUIRE(assistant_rows_during_load == 0, "persist waits for an in-progress load");
+    TEST_REQUIRE(held.text == "hello world", "held snapshot still carries the stream");
+
+    wait_idle(*fx.engine, fx.sid);
+    auto after = fx.engine->load_with_in_flight(fx.sid, [&] { rows = fx.store.load_messages(fx.sid); });
+    TEST_REQUIRE(after.step_id.empty() && after.text.empty(), "finished step leaves nothing in flight");
+    std::string persisted;
+    for (const auto& m : rows)
+        if (m.type == "assistant_text")
+            persisted = json::parse(m.data_json).value("text", "");
+    TEST_REQUIRE(persisted == "hello world", "persisted row holds the whole stream");
+
+    std::lock_guard<std::mutex> lk(ev_mu);
+    TEST_REQUIRE(text_events.size() == 2, "two text deltas published");
+    TEST_REQUIRE(text_events[0].value("offset", -1) == 0
+        && text_events[1].value("offset", -1) == 6, "deltas carry their start offsets");
+    TEST_REQUIRE(text_events[1].value("assistant_message_id", "") == snap.step_id,
+        "deltas carry the step id the snapshot reported");
+    fx.engine->shutdown();
+}
+
 int main() {
+    test_load_with_in_flight();
     test_idle_maintenance();
     test_delete_idle();
     test_delete_running_parked_tool();

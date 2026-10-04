@@ -37,6 +37,17 @@ GuiEventRelay::is_active_session(const std::string& sid)
     return sid == active_session_id_;
 }
 
+// Where a delta sits in its step's stream: MainWindow uses (session, step,
+// offset) to drop deltas that a mid-stream transcript load already covers.
+void
+GuiEventRelay::_AddStreamPosition(BMessage& msg, const std::string& sid,
+                                  const json& data)
+{
+    msg.AddString("session_id", sid.c_str());
+    msg.AddString("step_id", data.value("assistant_message_id", "").c_str());
+    msg.AddInt64("offset", data.value("offset", int64_t(-1)));
+}
+
 void
 GuiEventRelay::attach()
 {
@@ -45,6 +56,7 @@ GuiEventRelay::attach()
         if (!is_active_session(sid)) return;
         BMessage msg(MSG_PROMPT_STARTED);
         msg.AddString("session_id", sid.c_str());
+        msg.AddInt64("row_gen", data.value("row_gen", int64_t(0)));
         msg.AddString("text", data.value("text", "").c_str());
         if (data.contains("attachments"))
             for (const auto& name : data["attachments"])
@@ -60,6 +72,7 @@ GuiEventRelay::attach()
         std::string delta = data.value("delta", "");
         BMessage msg(MSG_TEXT_DELTA);
         msg.AddString("delta", delta.c_str());
+        _AddStreamPosition(msg, sid, data);
         main_window_.SendMessage(&msg);
     });
 
@@ -71,6 +84,7 @@ GuiEventRelay::attach()
         std::string delta = data.value("delta", "");
         BMessage msg(MSG_REASONING_DELTA);
         msg.AddString("delta", delta.c_str());
+        _AddStreamPosition(msg, sid, data);
         main_window_.SendMessage(&msg);
     });
 
@@ -89,6 +103,8 @@ GuiEventRelay::attach()
         }
 
         BMessage msg(MSG_TOOL_CALLED);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddInt64("row_gen", data.value("row_gen", int64_t(0)));
         msg.AddString("tool_name",  tool_name.c_str());
         msg.AddString("input_json", input_json.c_str());
         main_window_.SendMessage(&msg);
@@ -101,8 +117,12 @@ GuiEventRelay::attach()
 
         std::string output = data.value("output", "");
         BMessage msg(MSG_TOOL_RESULT);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddInt64("row_gen", data.value("row_gen", int64_t(0)));
         msg.AddString("output",  output.c_str());
         msg.AddBool("success",   true);
+        msg.AddString("call_id", data.value("call_id", "").c_str());
+        msg.AddBool("replaces_result", data.value("replaces_result", false));
         main_window_.SendMessage(&msg);
     });
 
@@ -113,8 +133,11 @@ GuiEventRelay::attach()
 
         std::string error = data.value("error", "");
         BMessage msg(MSG_TOOL_RESULT);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddInt64("row_gen", data.value("row_gen", int64_t(0)));
         msg.AddString("output",  error.c_str());
         msg.AddBool("success",   false);
+        msg.AddString("call_id", data.value("call_id", "").c_str());
         main_window_.SendMessage(&msg);
     });
 
@@ -186,6 +209,8 @@ GuiEventRelay::attach()
         if (!is_active_session(sid)) return;
 
         BMessage msg(MSG_STEP_STARTED);
+        msg.AddString("session_id", sid.c_str());
+        msg.AddString("step_id", data.value("assistant_message_id", "").c_str());
         main_window_.SendMessage(&msg);
     });
 

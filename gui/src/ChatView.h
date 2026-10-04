@@ -34,6 +34,7 @@ struct ChatEntry {
     std::string name;       // tool name for ToolCalled, header for CompactionSummary
     bool        success   = true;
     bool        collapsed = false;  // meaningful for ToolCalled and Reasoning
+    std::string call_id;            // ToolResult: the call it answers
 };
 
 // How [Thinking] blocks display by default; the user's manual
@@ -72,7 +73,13 @@ public:
     // (initially and after each settings save).
     void SetThinkingDisplay(ThinkingDisplay d) { thinking_display_ = d; }
     void AppendToolCalled(const std::string& tool_name, const std::string& input_json);
-    void AppendToolResult(const std::string& output, bool success);
+    void AppendToolResult(const std::string& output, bool success,
+                          const std::string& call_id = "");
+    // Rewrite the newest result line for `call_id` in place (ask_user swaps
+    // its placeholder for the picked answer; the stored row is rewritten the
+    // same way, so a reload shows one line too). False when no line matches.
+    bool UpdateToolResult(const std::string& call_id, const std::string& output,
+                          bool success);
     void AppendSystem(const std::string& text);
     // Collapsible [context compacted] transcript entry: header line plus the
     // checkpoint summary body (collapsed by default, click to expand).

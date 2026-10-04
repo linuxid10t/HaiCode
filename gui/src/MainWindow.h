@@ -34,6 +34,7 @@
 
 // Forward declaration
 class InputTextView;
+class GuiEventRelay;
 
 class MainWindow : public BWindow {
 public:
@@ -60,6 +61,12 @@ public:
     // Called by HaiCodeApp while holding the window lock.
     void SetEngine(haicode::SessionEngine& engine);
 
+    // Called by HaiCodeApp once, before Show(). The window switches the
+    // relay's active session itself, synchronously, right before loading a
+    // transcript — a relay switch that lagged behind the load (it used to
+    // ride MSG_ACTIVE_SESSION through be_app) dropped the deltas in between.
+    void SetEventRelay(GuiEventRelay* relay) { relay_ = relay; }
+
     // Mark the provider dropdown to match the given provider id.
     void SelectProvider(const std::string& provider_id);
 
@@ -83,7 +90,16 @@ private:
     void _HandleReasoningDelta(BMessage* msg);
     void _HandleToolCalled(BMessage* msg);
     void _HandleToolResult(BMessage* msg);
-    void _HandleStepStarted();
+    void _HandleStepStarted(BMessage* msg);
+    // True when a streamed delta should be appended: it belongs to the
+    // active session's current step and lies past what the transcript load
+    // already showed (see _LoadHistory).
+    bool _AcceptStreamDelta(BMessage* msg, int64 floor);
+    // Event queued before a session switch, for the session we left.
+    bool _FromOtherSession(BMessage* msg) const;
+    // Row-backed event (prompt, tool call, tool result) whose row the last
+    // transcript load already rendered: handle it, but don't append it again.
+    bool _RowAlreadyLoaded(BMessage* msg) const;
     void _HandlePromptStarted(BMessage* msg);
     void _HandlePromptQueued(BMessage* msg);
     void _HandleTurnEnded();
@@ -188,6 +204,18 @@ private:
     std::string             default_provider_ = "anthropic";
     std::string             active_session_id_;
     std::string             pending_plan_path_;
+
+    GuiEventRelay*          relay_ = nullptr;
+    // The step currently streaming into the transcript, and how many bytes of
+    // its text/reasoning the last transcript load already rendered from the
+    // engine's in-flight snapshot (live deltas below these offsets are
+    // duplicates). Reset by MSG_STEP_STARTED for each new step.
+    std::string             stream_step_id_;
+    int64                   stream_text_floor_ = 0;
+    int64                   stream_reasoning_floor_ = 0;
+    // Engine row generation the last transcript load covered (see
+    // haicode::InFlightStream::row_gen); 0 = nothing loaded from this engine.
+    int64                   loaded_row_gen_ = 0;
 
     // Session list (parallel to UI list)
     std::vector<std::string> session_ids_;  // indexed to match BListView

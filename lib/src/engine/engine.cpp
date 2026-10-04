@@ -1158,11 +1158,13 @@ void SessionEngine::inject_message(const std::string& session_id,
         }
     }
     try {
-        store_.append_message(session_id, "user_prompted", data.dump());
+        uint64_t gen = append_transcript_row(session_id, "user_prompted",
+                                             data.dump());
 
         nlohmann::json ev;
         ev["session_id"] = session_id;
         ev["text"] = text;
+        ev["row_gen"] = gen;
         bus_.publish(events::EventType::Prompted, ev);
     } catch (const DbError& e) {
         // GUI-thread persist; surface instead of escaping into the looper.
@@ -1357,6 +1359,27 @@ bool SessionEngine::try_running_sessions(std::vector<std::string>& out) {
     return true;
 }
 
+InFlightStream SessionEngine::load_with_in_flight(
+        const std::string& session_id, const std::function<void()>& load) {
+    std::lock_guard<std::mutex> lock(in_flight_mu_);
+    load();
+    auto it = in_flight_.find(session_id);
+    InFlightStream snapshot = it == in_flight_.end() ? InFlightStream{} : it->second;
+    auto gen = row_gen_.find(session_id);
+    snapshot.row_gen = gen == row_gen_.end() ? 0 : gen->second;
+    return snapshot;
+}
+
+uint64_t SessionEngine::append_transcript_row(const std::string& session_id,
+                                              const std::string& type,
+                                              const std::string& data_json,
+                                              bool end_stream) {
+    std::lock_guard<std::mutex> lock(in_flight_mu_);
+    store_.append_message(session_id, type, data_json);
+    if (end_stream) in_flight_.erase(session_id);
+    return ++row_gen_[session_id];
+}
+
 bool SessionEngine::run_when_idle(const std::function<void()>& work) {
     std::lock_guard<std::mutex> lock(mu_);
     if (shutting_down_) return false;
@@ -1494,6 +1517,11 @@ bool SessionEngine::delete_session(const std::string& session_id,
         for (auto it = pending_ask_.begin(); it != pending_ask_.end();)
             if (it->second.session_id == session_id) it = pending_ask_.erase(it);
             else ++it;
+    }
+    {
+        std::lock_guard<std::mutex> lock(in_flight_mu_);
+        in_flight_.erase(session_id);
+        row_gen_.erase(session_id);
     }
     permissions_.erase_session_state(session_id);
     delete flag;
@@ -1715,8 +1743,9 @@ void SessionEngine::drain_queue_and_finish(const std::string& session_id) {
 
 bool SessionEngine::store_prompt_row(const std::string& session_id,
                                      const nlohmann::json& data) {
+    uint64_t gen = 0;
     try {
-        store_.append_message(session_id, "user_prompted", data.dump());
+        gen = append_transcript_row(session_id, "user_prompted", data.dump());
     } catch (const DbError& e) {
         // The persisted row is the source of truth for the turn: without it
         // there is nothing to run, so surface the failure and skip the turn.
@@ -1764,6 +1793,7 @@ bool SessionEngine::store_prompt_row(const std::string& session_id,
     nlohmann::json ev;
     ev["session_id"] = session_id;
     ev["text"] = data.value("text", "");
+    ev["row_gen"] = gen;
     if (data.contains("attachments")) {
         nlohmann::json names = nlohmann::json::array();
         for (const auto& a : data["attachments"]) {
@@ -2214,6 +2244,25 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         std::string assistant_msg_id = haicode::util::make_id("amsg");
 
+        // Register the step's in-flight stream BEFORE announcing it: a
+        // frontend snapshot taken in between then already knows the step id,
+        // so the deltas that follow are recognised as this step's. The guard
+        // drops the entry on every exit from this iteration (failure,
+        // interruption, exceptions); the success path drops it atomically
+        // with the persist below.
+        {
+            std::lock_guard<std::mutex> lock(in_flight_mu_);
+            in_flight_[session_id] = InFlightStream{assistant_msg_id, {}, {}};
+        }
+        struct InFlightGuard {
+            SessionEngine& engine;
+            const std::string& sid;
+            ~InFlightGuard() {
+                std::lock_guard<std::mutex> lock(engine.in_flight_mu_);
+                engine.in_flight_.erase(sid);
+            }
+        } in_flight_guard{*this, session_id};
+
         // Publish step started
         {
             nlohmann::json ev;
@@ -2278,13 +2327,25 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         };
 
         StreamCallbacks cbs;
+        // Each delta lands in in_flight_ (under its lock) before it is
+        // published (outside it), tagged with the byte offset it starts at.
+        auto record_in_flight = [&](bool reasoning, const std::string& delta) {
+            std::lock_guard<std::mutex> lock(in_flight_mu_);
+            InFlightStream& f = in_flight_[session_id];
+            std::string& buf = reasoning ? f.reasoning : f.text;
+            size_t offset = buf.size();
+            buf += delta;
+            return offset;
+        };
         cbs.on_text_delta = [&](const std::string& /*tid*/, const std::string& delta) {
             full_text += delta;
+            size_t offset = record_in_flight(false, delta);
             nlohmann::json ev;
             ev["session_id"] = session_id;
             ev["assistant_message_id"] = assistant_msg_id;
             ev["text_id"] = text_id;
             ev["delta"] = delta;
+            ev["offset"] = offset;
             bus_.publish(events::EventType::TextDelta, ev);
             streamed_chars += delta.size();
             publish_progress();
@@ -2297,10 +2358,12 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 bus_.publish(events::EventType::ReasoningStarted, ev);
             }
             full_reasoning += delta;
+            size_t offset = record_in_flight(true, delta);
             nlohmann::json ev;
             ev["session_id"] = session_id;
             ev["assistant_message_id"] = assistant_msg_id;
             ev["delta"] = delta;
+            ev["offset"] = offset;
             bus_.publish(events::EventType::ReasoningDelta, ev);
             streamed_chars += delta.size();
             publish_progress();
@@ -2485,6 +2548,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
         // Persist the complete batch even when interrupted; every recorded call
         // receives either its real result or an explicit skipped result below.
+        uint64_t assistant_row_gen = 0;
         if (!full_text.empty() || !tool_calls.empty()) {
             nlohmann::json data;
             data["role"] = "assistant";
@@ -2508,7 +2572,14 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     calls_arr.push_back({{"id",tc.id},{"name",tc.name},{"input",tc.input}});
                 data["tool_calls"] = calls_arr;
             }
-            store_.append_message(session_id, "assistant_text", data.dump());
+            // Persist and retire the in-flight copy as one step against
+            // load_with_in_flight: a concurrent transcript load sees the
+            // streamed text either as this row or as the snapshot.
+            assistant_row_gen = append_transcript_row(
+                session_id, "assistant_text", data.dump(), /*end_stream=*/true);
+        } else {
+            std::lock_guard<std::mutex> lock(in_flight_mu_);
+            in_flight_.erase(session_id);
         }
 
         // Compute per-turn cost from token usage and resolved pricing
@@ -2582,6 +2653,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["call_id"] = call.id;
                 ev["tool_name"] = call.name;
                 ev["input"] = call.input;
+                // The call is shown from the assistant row on reload.
+                ev["row_gen"] = assistant_row_gen;
                 bus_.publish(events::EventType::ToolCalled, ev);
             }
 
@@ -2660,7 +2733,8 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     ? result.error
                     : result.error + "\n" + result.output;
             }
-            store_.append_message(session_id, "tool_result", data.dump());
+            uint64_t result_row_gen =
+                append_transcript_row(session_id, "tool_result", data.dump());
 
             {
                 nlohmann::json ev;
@@ -2668,6 +2742,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 ev["call_id"] = call.id;
                 ev["output"] = data["output"];
                 ev["success"] = result.success;
+                ev["row_gen"] = result_row_gen;
                 if (!result.success) ev["error"] = data["output"];
                 bus_.publish(result.success ? events::EventType::ToolSuccess
                                             : events::EventType::ToolFailed, ev);
@@ -2739,8 +2814,15 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
                 // Overwrite the placeholder tool_result row with the real answer.
                 nlohmann::json reply_out = {{"answer", answer}};
-                store_.update_tool_result_by_call_id(session_id, call.id,
-                                                     reply_out.dump(2));
+                uint64_t answer_row_gen = 0;
+                {
+                    // A rewrite moves the generation too: a load from before
+                    // it showed the placeholder and still needs this event.
+                    std::lock_guard<std::mutex> lock(in_flight_mu_);
+                    store_.update_tool_result_by_call_id(session_id, call.id,
+                                                         reply_out.dump(2));
+                    answer_row_gen = ++row_gen_[session_id];
+                }
 
                 // Re-publish ToolSuccess so the UI swaps the placeholder bubble
                 // for the user's picked answer.
@@ -2750,6 +2832,9 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     rev["call_id"]    = call.id;
                     rev["output"]     = reply_out.dump(2);
                     rev["success"]    = true;
+                    rev["row_gen"]    = answer_row_gen;
+                    // An update of the placeholder result, not a new one.
+                    rev["replaces_result"] = true;
                     bus_.publish(events::EventType::ToolSuccess, rev);
                 }
                 continue;
