@@ -10,7 +10,10 @@
 #include <TextView.h>
 #include <Window.h>
 
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
 // Color palette
 static const rgb_color kColorUser           = {  30, 100, 220, 255 };
@@ -122,6 +125,79 @@ ClickableTextView::MessageReceived(BMessage* message)
 }
 
 // ---------------------------------------------------------------------------
+// RenderBuf: text + style runs for one or more entries, committed to the
+// text view with a single Insert/SetText (one layout + one redraw instead of
+// an Insert and a SetFontAndColor per styled fragment).
+// ---------------------------------------------------------------------------
+
+struct RenderBuf {
+    struct Run {
+        int32     offset;
+        bool      bold;
+        rgb_color color;
+    };
+    std::string                   text;
+    std::vector<Run>              runs;
+    std::vector<ToolHeaderRange>  headers;  // offsets relative to text
+    std::vector<CopyControlRange> copies;   // offsets relative to text
+
+    int32 Length() const { return (int32)text.size(); }
+
+    void Add(const std::string& s, rgb_color color, bool bold = false)
+    {
+        if (s.empty()) return;
+        const Run* last = runs.empty() ? nullptr : &runs.back();
+        if (!last || last->bold != bold || last->color.red != color.red
+            || last->color.green != color.green || last->color.blue != color.blue
+            || last->color.alpha != color.alpha)
+            runs.push_back({Length(), bold, color});
+        text += s;
+    }
+
+    void AddHeader(const std::string& s, rgb_color color, int model_idx)
+    {
+        int32 start = Length();
+        Add(s, color, true);
+        headers.push_back({start, Length(), model_idx});
+    }
+
+    void AddCopyControl(int model_idx)
+    {
+        Add("  ", kColorCopyControl);
+        int32 start = Length();
+        Add("[Copy]", kColorCopyControl, true);
+        int32 end = Length();
+        Add(" ", kColorCopyControl);
+        int32 feedback_start = Length();
+        Add("   ", kColorCopyFeedback);
+        copies.push_back({start, end, feedback_start, model_idx});
+    }
+};
+
+namespace {
+
+struct RunArrayDeleter {
+    void operator()(text_run_array* a) const { BTextView::FreeRunArray(a); }
+};
+using RunArrayPtr = std::unique_ptr<text_run_array, RunArrayDeleter>;
+
+RunArrayPtr
+MakeRunArray(const RenderBuf& buf)
+{
+    if (buf.runs.empty()) return nullptr;
+    RunArrayPtr arr(BTextView::AllocRunArray((int32)buf.runs.size()));
+    if (!arr) return nullptr;
+    for (size_t i = 0; i < buf.runs.size(); ++i) {
+        arr->runs[i].offset = buf.runs[i].offset;
+        arr->runs[i].font   = buf.runs[i].bold ? *be_bold_font : *be_plain_font;
+        arr->runs[i].color  = buf.runs[i].color;
+    }
+    return arr;
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
 // ChatView
 // ---------------------------------------------------------------------------
 
@@ -149,149 +225,198 @@ ChatView::ChatView(const char* /*name*/)
 }
 
 void
-ChatView::AppendStyled(const std::string& text, rgb_color color, bool bold)
-{
-    BFont font;
-    if (bold) {
-        font = *be_bold_font;
-    } else {
-        font = *be_plain_font;
-    }
-
-    // Insert at end via the explicit-offset overload to avoid selection drift.
-    int32 start = text_view_->TextLength();
-    text_view_->Insert(start, text.c_str(), text.size());
-    int32 end = text_view_->TextLength();
-    text_view_->SetFontAndColor(start, end, &font, B_FONT_ALL, &color);
-    ScrollToBottom();
-}
-
-void
-ChatView::AppendCopyControl(int model_idx)
-{
-    AppendStyled("  ", kColorCopyControl);
-    int32 start = text_view_->TextLength();
-    AppendStyled("[Copy]", kColorCopyControl, true);
-    int32 end = text_view_->TextLength();
-    AppendStyled(" ", kColorCopyControl);
-    int32 feedback_start = text_view_->TextLength();
-    AppendStyled("   ", kColorCopyFeedback);
-    copy_ranges_.push_back({start, end, feedback_start, model_idx});
-}
-
-void
 ChatView::ScrollToBottom()
 {
-    if (inhibit_scroll_) return;
-
-    int32 len = text_view_->TextLength();
-    if (len <= 0) return;
-
-    int32 lines = text_view_->CountLines();
-    if (lines > 0 && text_view_->ByteAt(len - 1) == '\n') {
-        --lines;
-    }
-    if (lines > 0) {
-        BRect tr = text_view_->TextRect();
-        tr.bottom = tr.top + text_view_->TextHeight(0, lines);
-        text_view_->SetTextRect(tr);
-    }
-
+    if (defer_rebuild_) return;
+    // BTextView keeps the scroll range current on every Insert/Delete, so
+    // jumping to its end is all that's needed. (This used to also shrink the
+    // text rect via SetTextRect, which re-wraps the whole text and
+    // invalidates the entire view on every call.)
     if (BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL)) {
         float lo, hi;
         vsb->GetRange(&lo, &hi);
-        vsb->SetValue(hi);
+        if (vsb->Value() != hi)
+            vsb->SetValue(hi);
     }
 }
 
-// Rebuild the entire text view from the stored model.
+// The canonical rendering of one entry. Live streaming paths append the same
+// bytes piecewise, so a later _ReplaceEntry lands on identical layout.
+void
+ChatView::_RenderEntry(int i, RenderBuf& out) const
+{
+    const auto& e = model_[i];
+    switch (e.kind) {
+    case ChatEntry::UserText:
+        out.Add("\nYou:", kColorUser, true);
+        out.AddCopyControl(i);
+        out.Add("\n" + e.text + "\n", kColorUser);
+        if (!e.name.empty())
+            out.Add("[image: " + e.name + "]\n", kColorUser);
+        break;
+
+    case ChatEntry::AssistantText:
+        out.Add("\nAssistant:", kColorAssistant, true);
+        out.AddCopyControl(i);
+        out.Add("\n" + e.text + "\n", kColorAssistant);
+        break;
+
+    case ChatEntry::ToolCalled: {
+        std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
+        out.AddHeader("\n[Tool: " + e.name + "]" + indicator + "\n",
+                      kColorToolHeader, i);
+        if (!e.collapsed && !e.text.empty() && e.text != "{}")
+            out.Add(e.text + "\n", kColorToolBody);
+        break;
+    }
+
+    case ChatEntry::ToolResult: {
+        std::string summary = e.text;
+        auto nl = summary.find('\n');
+        if (nl != std::string::npos) summary = summary.substr(0, nl) + " \xe2\x80\xa6";
+        if (e.success)
+            out.Add("[OK] " + summary + "\n", kColorToolOk);
+        else
+            out.Add("[ERR] " + summary + "\n", kColorToolErr);
+        break;
+    }
+
+    case ChatEntry::Reasoning: {
+        std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
+        out.AddHeader("\n[Thinking]" + indicator, kColorThinkingHeader, i);
+        out.AddCopyControl(i);
+        out.Add("\n", kColorThinkingHeader);
+        if (!e.collapsed && !e.text.empty())
+            out.Add(e.text + "\n", kColorThinkingBody);
+        break;
+    }
+
+    case ChatEntry::CompactionSummary: {
+        std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
+        out.AddHeader("\n" + e.name + indicator + "\n", kColorThinkingHeader, i);
+        if (!e.collapsed && !e.text.empty())
+            out.Add(e.text + "\n", kColorThinkingBody);
+        break;
+    }
+
+    case ChatEntry::System:
+        out.Add("\n[System] " + e.text + "\n", kColorSystem);
+        break;
+    }
+}
+
+// Insert a rendered buffer at `offset` and register its click ranges.
+// Callers shift any ranges/entry starts that sit after `offset`.
+void
+ChatView::_InsertRendered(int32 offset, const RenderBuf& buf)
+{
+    if (buf.text.empty()) return;
+    RunArrayPtr runs = MakeRunArray(buf);
+    text_view_->Insert(offset, buf.text.data(), buf.Length(), runs.get());
+    for (auto h : buf.headers) {
+        h.start += offset;
+        h.end   += offset;
+        header_ranges_.push_back(h);
+    }
+    for (auto c : buf.copies) {
+        c.start          += offset;
+        c.end            += offset;
+        c.feedback_start += offset;
+        copy_ranges_.push_back(c);
+    }
+}
+
+void
+ChatView::_AppendRendered(const RenderBuf& buf)
+{
+    if (defer_rebuild_) return;
+    _InsertRendered(text_view_->TextLength(), buf);
+}
+
+int
+ChatView::_PushEntry(ChatEntry entry)
+{
+    model_.push_back(std::move(entry));
+    entry_starts_.push_back(defer_rebuild_ ? 0 : text_view_->TextLength());
+    return (int)model_.size() - 1;
+}
+
+void
+ChatView::_AppendEntry(int model_idx)
+{
+    if (defer_rebuild_) return;
+    RenderBuf buf;
+    _RenderEntry(model_idx, buf);
+    _AppendRendered(buf);
+}
+
+// Re-render one entry in place (collapse/expand). Only the text from that
+// entry down is re-laid out and redrawn; the rest of the view is untouched.
+void
+ChatView::_ReplaceEntry(int i)
+{
+    if (defer_rebuild_ || i < 0 || i >= (int)model_.size()) return;
+
+    if (feedback_idx_ == i)
+        ClearCopyFeedback();
+
+    int32 start = entry_starts_[i];
+    int32 end = i + 1 < (int)model_.size() ? entry_starts_[i + 1]
+                                           : text_view_->TextLength();
+    RenderBuf buf;
+    _RenderEntry(i, buf);
+    int32 delta = buf.Length() - (end - start);
+
+    // Drop the entry's old click ranges and shift everything after it.
+    std::vector<ToolHeaderRange> headers;
+    headers.reserve(header_ranges_.size());
+    for (auto h : header_ranges_) {
+        if (h.model_idx == i) continue;
+        if (h.start >= end) { h.start += delta; h.end += delta; }
+        headers.push_back(h);
+    }
+    header_ranges_.swap(headers);
+    std::vector<CopyControlRange> copies;
+    copies.reserve(copy_ranges_.size());
+    for (auto c : copy_ranges_) {
+        if (c.model_idx == i) continue;
+        if (c.start >= end) {
+            c.start += delta; c.end += delta; c.feedback_start += delta;
+        }
+        copies.push_back(c);
+    }
+    copy_ranges_.swap(copies);
+    for (size_t j = i + 1; j < entry_starts_.size(); ++j)
+        entry_starts_[j] += delta;
+
+    // Insert the new rendering before removing the old one: the content
+    // never transiently shrinks, so the scroll range isn't clamped (and the
+    // view scrolled) mid-update.
+    int32 old_len = end - start;
+    _InsertRendered(start, buf);
+    if (old_len > 0)
+        text_view_->Delete(start + buf.Length(), start + buf.Length() + old_len);
+}
+
+// Full re-render from the model in ONE SetText — used only at EndBatch
+// (history replay), never per live event.
 void
 ChatView::_Rebuild()
 {
     ClearCopyFeedback();
-    inhibit_scroll_ = true;
     text_view_->MakeFocus(false);
-    text_view_->SetText("");
     header_ranges_.clear();
     copy_ranges_.clear();
 
+    RenderBuf buf;
     for (int i = 0; i < (int)model_.size(); i++) {
-        const auto& e = model_[i];
-        switch (e.kind) {
-        case ChatEntry::UserText:
-            AppendStyled("\nYou:", kColorUser, true);
-            AppendCopyControl(i);
-            AppendStyled("\n" + e.text + "\n", kColorUser, false);
-            if (!e.name.empty())
-                AppendStyled("[image: " + e.name + "]\n", kColorUser, false);
-            break;
-
-        case ChatEntry::AssistantText:
-            AppendStyled("\nAssistant:", kColorAssistant, true);
-            AppendCopyControl(i);
-            AppendStyled("\n" + e.text + "\n", kColorAssistant, false);
-            break;
-
-        case ChatEntry::ToolCalled: {
-            std::string indicator = e.collapsed ? " ▶" : " ▼";
-            std::string header = "\n[Tool: " + e.name + "]" + indicator + "\n";
-            int32 hstart = text_view_->TextLength();
-            AppendStyled(header, kColorToolHeader, true);
-            int32 hend = text_view_->TextLength();
-            header_ranges_.push_back({hstart, hend, i});
-            if (!e.collapsed && !e.text.empty() && e.text != "{}") {
-                AppendStyled(e.text + "\n", kColorToolBody, false);
-            }
-            break;
-        }
-
-        case ChatEntry::ToolResult: {
-            std::string summary = e.text;
-            auto nl = summary.find('\n');
-            if (nl != std::string::npos) summary = summary.substr(0, nl) + " \xe2\x80\xa6";
-            if (e.success) {
-                AppendStyled("[OK] " + summary + "\n", kColorToolOk, false);
-            } else {
-                AppendStyled("[ERR] " + summary + "\n", kColorToolErr, false);
-            }
-            break;
-        }
-
-        case ChatEntry::Reasoning: {
-            std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
-            std::string header = "\n[Thinking]" + indicator;
-            int32 hstart = text_view_->TextLength();
-            AppendStyled(header, kColorThinkingHeader, true);
-            int32 hend = text_view_->TextLength();
-            header_ranges_.push_back({hstart, hend, i});
-            AppendCopyControl(i);
-            AppendStyled("\n", kColorThinkingHeader);
-            if (!e.collapsed && !e.text.empty()) {
-                AppendStyled(e.text + "\n", kColorThinkingBody, false);
-            }
-            break;
-        }
-
-        case ChatEntry::CompactionSummary: {
-            std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
-            std::string header = "\n" + e.name + indicator + "\n";
-            int32 hstart = text_view_->TextLength();
-            AppendStyled(header, kColorThinkingHeader, true);
-            int32 hend = text_view_->TextLength();
-            header_ranges_.push_back({hstart, hend, i});
-            if (!e.collapsed && !e.text.empty()) {
-                AppendStyled(e.text + "\n", kColorThinkingBody, false);
-            }
-            break;
-        }
-
-        case ChatEntry::System:
-            AppendStyled("\n[System] " + e.text + "\n", kColorSystem, false);
-            break;
-        }
+        entry_starts_[i] = buf.Length();
+        _RenderEntry(i, buf);
     }
-
-    inhibit_scroll_ = false;
+    RunArrayPtr runs = MakeRunArray(buf);
+    text_view_->SetText(buf.text.data(), buf.Length(), runs.get());
+    header_ranges_ = std::move(buf.headers);
+    copy_ranges_   = std::move(buf.copies);
     ScrollToBottom();
 }
 
@@ -306,27 +431,27 @@ ChatView::AppendUserText(const std::string& text,
         if (i) names += ", ";
         names += attachment_names[i];
     }
-    model_.push_back({ChatEntry::UserText, text, names, true, false});
-    AppendStyled("\nYou:", kColorUser, true);
-    AppendCopyControl((int)model_.size() - 1);
-    AppendStyled("\n" + text + "\n", kColorUser, false);
-    if (!names.empty())
-        AppendStyled("[image: " + names + "]\n", kColorUser, false);
+    _AppendEntry(_PushEntry({ChatEntry::UserText, text, names, true, false}));
+    ScrollToBottom();
 }
 
 void
 ChatView::AppendTextDelta(const std::string& delta)
 {
     EndReasoningStreaming();
-    if (!streaming_) {
-        model_.push_back({ChatEntry::AssistantText, "", "", true, false});
-        AppendStyled("\nAssistant:", kColorAssistant, true);
-        AppendCopyControl((int)model_.size() - 1);
-        AppendStyled("\n", kColorAssistant);
+    RenderBuf buf;
+    if (!streaming_ || model_.empty()
+            || model_.back().kind != ChatEntry::AssistantText) {
+        int idx = _PushEntry({ChatEntry::AssistantText, "", "", true, false});
+        buf.Add("\nAssistant:", kColorAssistant, true);
+        buf.AddCopyControl(idx);
+        buf.Add("\n", kColorAssistant);
         streaming_ = true;
     }
     model_.back().text += delta;
-    AppendStyled(delta, kColorAssistant, false);
+    buf.Add(delta, kColorAssistant);
+    _AppendRendered(buf);
+    ScrollToBottom();
 }
 
 void
@@ -334,7 +459,9 @@ ChatView::EndStreaming()
 {
     EndReasoningStreaming();
     if (streaming_) {
-        AppendStyled("\n", kColorAssistant, false);
+        RenderBuf buf;
+        buf.Add("\n", kColorAssistant);
+        _AppendRendered(buf);
         streaming_ = false;
     }
 }
@@ -342,22 +469,21 @@ ChatView::EndStreaming()
 void
 ChatView::AppendReasoningDelta(const std::string& delta)
 {
+    RenderBuf buf;
     if (!reasoning_streaming_) {
-        model_.push_back({ChatEntry::Reasoning, "", "", true, false});
-        reasoning_streaming_ = true;
-        int idx = (int)model_.size() - 1;
         bool collapsed = thinking_display_ == ThinkingDisplay::AlwaysCollapsed;
-        model_.back().collapsed = collapsed;
-        int32 hstart = text_view_->TextLength();
-        AppendStyled(collapsed ? "\n[Thinking] \xe2\x96\xb6" : "\n[Thinking] \xe2\x96\xbc",
-                     kColorThinkingHeader, true);
-        header_ranges_.push_back({hstart, text_view_->TextLength(), idx});
-        AppendCopyControl(idx);
-        AppendStyled("\n", kColorThinkingHeader);
+        int idx = _PushEntry({ChatEntry::Reasoning, "", "", true, collapsed});
+        reasoning_streaming_ = true;
+        buf.AddHeader(collapsed ? "\n[Thinking] \xe2\x96\xb6" : "\n[Thinking] \xe2\x96\xbc",
+                      kColorThinkingHeader, idx);
+        buf.AddCopyControl(idx);
+        buf.Add("\n", kColorThinkingHeader);
     }
     model_.back().text += delta;
     if (!model_.back().collapsed)
-        AppendStyled(delta, kColorThinkingBody, false);
+        buf.Add(delta, kColorThinkingBody);
+    _AppendRendered(buf);
+    ScrollToBottom();
 }
 
 void
@@ -366,12 +492,16 @@ ChatView::EndReasoningStreaming()
     if (!reasoning_streaming_) return;
     reasoning_streaming_ = false;
     if (model_.empty() || model_.back().kind != ChatEntry::Reasoning) return;
-    // ExpandedWhileStreaming: collapse now and re-render. AlwaysExpanded and
-    // AlwaysCollapsed leave the view as-is (body already shown / hidden).
+    ChatEntry& e = model_.back();
+    // ExpandedWhileStreaming: collapse now and re-render just this entry.
+    // Otherwise close the expanded body the way _RenderEntry does.
     if (thinking_display_ == ThinkingDisplay::ExpandedWhileStreaming) {
-        model_.back().collapsed = true;
-        if (!defer_rebuild_)
-            _Rebuild();
+        e.collapsed = true;
+        _ReplaceEntry((int)model_.size() - 1);
+    } else if (!e.collapsed && !e.text.empty()) {
+        RenderBuf buf;
+        buf.Add("\n", kColorThinkingBody);
+        _AppendRendered(buf);
     }
 }
 
@@ -380,34 +510,30 @@ ChatView::AppendToolCalled(const std::string& tool_name, const std::string& inpu
 {
     EndReasoningStreaming();
     streaming_ = false;
-    pending_tool_idx_ = (int)model_.size();
-    model_.push_back({ChatEntry::ToolCalled, input_json, tool_name, true, false});
-
-    // Show expanded while the tool is running; will collapse when result arrives.
-    std::string header = "\n[Tool: " + tool_name + "] ▼\n";
-    int32 hstart = text_view_->TextLength();
-    AppendStyled(header, kColorToolHeader, true);
-    int32 hend = text_view_->TextLength();
-    header_ranges_.push_back({hstart, hend, pending_tool_idx_});
-
-    if (!input_json.empty() && input_json != "{}") {
-        AppendStyled(input_json + "\n", kColorToolBody, false);
-    }
+    // Shown expanded while the tool runs; collapsed when its result arrives.
+    int idx = _PushEntry({ChatEntry::ToolCalled, input_json, tool_name, true, false});
+    pending_tools_.push_back(idx);
+    _AppendEntry(idx);
+    ScrollToBottom();
 }
 
 void
 ChatView::AppendToolResult(const std::string& output, bool success)
 {
     EndReasoningStreaming();
-    // Collapse the tool call that just finished.
-    if (pending_tool_idx_ >= 0 && pending_tool_idx_ < (int)model_.size()) {
-        model_[pending_tool_idx_].collapsed = true;
-        pending_tool_idx_ = -1;
+    streaming_ = false;
+    // Collapse the oldest tool call still waiting for its result — in place,
+    // without touching the rest of the transcript.
+    if (!pending_tools_.empty()) {
+        int idx = pending_tools_.front();
+        pending_tools_.pop_front();
+        if (idx >= 0 && idx < (int)model_.size() && !model_[idx].collapsed) {
+            model_[idx].collapsed = true;
+            _ReplaceEntry(idx);
+        }
     }
-
-    model_.push_back({ChatEntry::ToolResult, output, "", success, false});
-    if (!defer_rebuild_)
-        _Rebuild();
+    _AppendEntry(_PushEntry({ChatEntry::ToolResult, output, "", success, false}));
+    ScrollToBottom();
 }
 
 void
@@ -415,8 +541,8 @@ ChatView::AppendSystem(const std::string& text)
 {
     EndReasoningStreaming();
     streaming_ = false;
-    model_.push_back({ChatEntry::System, text, "", true, false});
-    AppendStyled("\n[System] " + text + "\n", kColorSystem, false);
+    _AppendEntry(_PushEntry({ChatEntry::System, text, "", true, false}));
+    ScrollToBottom();
 }
 
 void
@@ -425,9 +551,8 @@ ChatView::AppendCompactionSummary(const std::string& header,
 {
     EndReasoningStreaming();
     streaming_ = false;
-    model_.push_back({ChatEntry::CompactionSummary, summary, header, true, true});
-    if (!defer_rebuild_)
-        _Rebuild();
+    _AppendEntry(_PushEntry({ChatEntry::CompactionSummary, summary, header, true, true}));
+    ScrollToBottom();
 }
 
 void
@@ -436,8 +561,9 @@ ChatView::Clear()
     ClearCopyFeedback();
     streaming_            = false;
     reasoning_streaming_  = false;
-    pending_tool_idx_     = -1;
+    pending_tools_.clear();
     model_.clear();
+    entry_starts_.clear();
     header_ranges_.clear();
     copy_ranges_.clear();
     text_view_->MakeFocus(false);
@@ -447,8 +573,8 @@ ChatView::Clear()
 void
 ChatView::BeginBatch()
 {
-    defer_rebuild_  = true;
-    inhibit_scroll_ = true;
+    // While batching only the model is updated; EndBatch renders it once.
+    defer_rebuild_ = true;
 }
 
 void
@@ -456,7 +582,6 @@ ChatView::EndBatch()
 {
     if (!defer_rebuild_) return;
     defer_rebuild_ = false;
-    // _Rebuild() resets inhibit_scroll_ and ends with a single ScrollToBottom.
     _Rebuild();
 }
 
@@ -583,5 +708,10 @@ ChatView::ToggleBlock(int model_idx)
         && model_[model_idx].kind != ChatEntry::Reasoning
         && model_[model_idx].kind != ChatEntry::CompactionSummary) return;
     model_[model_idx].collapsed = !model_[model_idx].collapsed;
-    _Rebuild();
+    // Keep the user's scroll position: they clicked a header in view.
+    BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL);
+    float scroll_value = vsb ? vsb->Value() : 0;
+    _ReplaceEntry(model_idx);
+    if (vsb)
+        vsb->SetValue(scroll_value);
 }
