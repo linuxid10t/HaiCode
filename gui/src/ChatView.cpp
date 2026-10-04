@@ -242,31 +242,43 @@ ChatView::ScrollToBottom()
 
 // The canonical rendering of one entry. Live streaming paths append the same
 // bytes piecewise, so a later _ReplaceEntry lands on identical layout.
+//
+// Line breaks LEAD rather than trail: every entry after the first opens with
+// the "\n" that ends the previous one, and no entry ends with one. So the
+// transcript never ends in "\n" — a trailing newline is an empty last line
+// that shows as a blank line under the newest entry when scrolled to the
+// bottom — and streamed text appends at the very end with nothing to step
+// around.
 void
 ChatView::_RenderEntry(int i, RenderBuf& out) const
 {
     const auto& e = model_[i];
+    auto separator = [&](rgb_color color) {
+        if (i > 0) out.Add("\n", color);
+    };
     switch (e.kind) {
     case ChatEntry::UserText:
+        separator(kColorUser);
         out.Add("\nYou:", kColorUser, true);
         out.AddCopyControl(i);
-        out.Add("\n" + e.text + "\n", kColorUser);
+        out.Add("\n" + e.text, kColorUser);
         if (!e.name.empty())
-            out.Add("[image: " + e.name + "]\n", kColorUser);
+            out.Add("\n[image: " + e.name + "]", kColorUser);
         break;
 
     case ChatEntry::AssistantText:
+        separator(kColorAssistant);
         out.Add("\nAssistant:", kColorAssistant, true);
         out.AddCopyControl(i);
-        out.Add("\n" + e.text + "\n", kColorAssistant);
+        out.Add("\n" + e.text, kColorAssistant);
         break;
 
     case ChatEntry::ToolCalled: {
+        separator(kColorToolHeader);
         std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
-        out.AddHeader("\n[Tool: " + e.name + "]" + indicator + "\n",
-                      kColorToolHeader, i);
+        out.AddHeader("\n[Tool: " + e.name + "]" + indicator, kColorToolHeader, i);
         if (!e.collapsed && !e.text.empty() && e.text != "{}")
-            out.Add(e.text + "\n", kColorToolBody);
+            out.Add("\n" + e.text, kColorToolBody);
         break;
     }
 
@@ -274,33 +286,36 @@ ChatView::_RenderEntry(int i, RenderBuf& out) const
         std::string summary = e.text;
         auto nl = summary.find('\n');
         if (nl != std::string::npos) summary = summary.substr(0, nl) + " \xe2\x80\xa6";
-        if (e.success)
-            out.Add("[OK] " + summary + "\n", kColorToolOk);
-        else
-            out.Add("[ERR] " + summary + "\n", kColorToolErr);
+        rgb_color color = e.success ? kColorToolOk : kColorToolErr;
+        separator(color);
+        out.Add((e.success ? "[OK] " : "[ERR] ") + summary, color);
         break;
     }
 
     case ChatEntry::Reasoning: {
+        separator(kColorThinkingHeader);
         std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
         out.AddHeader("\n[Thinking]" + indicator, kColorThinkingHeader, i);
         out.AddCopyControl(i);
-        out.Add("\n", kColorThinkingHeader);
-        if (!e.collapsed && !e.text.empty())
-            out.Add(e.text + "\n", kColorThinkingBody);
+        if (!e.collapsed && !e.text.empty()) {
+            out.Add("\n", kColorThinkingHeader);
+            out.Add(e.text, kColorThinkingBody);
+        }
         break;
     }
 
     case ChatEntry::CompactionSummary: {
+        separator(kColorThinkingHeader);
         std::string indicator = e.collapsed ? " \xe2\x96\xb6" : " \xe2\x96\xbc";
-        out.AddHeader("\n" + e.name + indicator + "\n", kColorThinkingHeader, i);
+        out.AddHeader("\n" + e.name + indicator, kColorThinkingHeader, i);
         if (!e.collapsed && !e.text.empty())
-            out.Add(e.text + "\n", kColorThinkingBody);
+            out.Add("\n" + e.text, kColorThinkingBody);
         break;
     }
 
     case ChatEntry::System:
-        out.Add("\n[System] " + e.text + "\n", kColorSystem);
+        separator(kColorSystem);
+        out.Add("\n[System] " + e.text, kColorSystem);
         break;
     }
 }
@@ -439,16 +454,15 @@ void
 ChatView::AppendTextDelta(const std::string& delta)
 {
     EndReasoningStreaming();
-    RenderBuf buf;
     if (!streaming_ || model_.empty()
             || model_.back().kind != ChatEntry::AssistantText) {
-        int idx = _PushEntry({ChatEntry::AssistantText, "", "", true, false});
-        buf.Add("\nAssistant:", kColorAssistant, true);
-        buf.AddCopyControl(idx);
-        buf.Add("\n", kColorAssistant);
+        // Header first (canonical rendering of the still-empty entry), then
+        // each delta lands at the very end of the text.
+        _AppendEntry(_PushEntry({ChatEntry::AssistantText, "", "", true, false}));
         streaming_ = true;
     }
     model_.back().text += delta;
+    RenderBuf buf;
     buf.Add(delta, kColorAssistant);
     _AppendRendered(buf);
     ScrollToBottom();
@@ -458,30 +472,26 @@ void
 ChatView::EndStreaming()
 {
     EndReasoningStreaming();
-    if (streaming_) {
-        RenderBuf buf;
-        buf.Add("\n", kColorAssistant);
-        _AppendRendered(buf);
-        streaming_ = false;
-    }
+    streaming_ = false;
 }
 
 void
 ChatView::AppendReasoningDelta(const std::string& delta)
 {
-    RenderBuf buf;
     if (!reasoning_streaming_) {
         bool collapsed = thinking_display_ == ThinkingDisplay::AlwaysCollapsed;
-        int idx = _PushEntry({ChatEntry::Reasoning, "", "", true, collapsed});
+        _AppendEntry(_PushEntry({ChatEntry::Reasoning, "", "", true, collapsed}));
         reasoning_streaming_ = true;
-        buf.AddHeader(collapsed ? "\n[Thinking] \xe2\x96\xb6" : "\n[Thinking] \xe2\x96\xbc",
-                      kColorThinkingHeader, idx);
-        buf.AddCopyControl(idx);
-        buf.Add("\n", kColorThinkingHeader);
     }
-    model_.back().text += delta;
-    if (!model_.back().collapsed)
+    ChatEntry& e = model_.back();
+    RenderBuf buf;
+    if (!e.collapsed && !delta.empty()) {
+        // The body's line break comes with its first text, as in _RenderEntry.
+        if (e.text.empty())
+            buf.Add("\n", kColorThinkingHeader);
         buf.Add(delta, kColorThinkingBody);
+    }
+    e.text += delta;
     _AppendRendered(buf);
     ScrollToBottom();
 }
@@ -492,16 +502,11 @@ ChatView::EndReasoningStreaming()
     if (!reasoning_streaming_) return;
     reasoning_streaming_ = false;
     if (model_.empty() || model_.back().kind != ChatEntry::Reasoning) return;
-    ChatEntry& e = model_.back();
     // ExpandedWhileStreaming: collapse now and re-render just this entry.
-    // Otherwise close the expanded body the way _RenderEntry does.
+    // AlwaysExpanded and AlwaysCollapsed leave the view as-is.
     if (thinking_display_ == ThinkingDisplay::ExpandedWhileStreaming) {
-        e.collapsed = true;
+        model_.back().collapsed = true;
         _ReplaceEntry((int)model_.size() - 1);
-    } else if (!e.collapsed && !e.text.empty()) {
-        RenderBuf buf;
-        buf.Add("\n", kColorThinkingBody);
-        _AppendRendered(buf);
     }
 }
 
@@ -668,7 +673,11 @@ int
 ChatView::FindBlockAt(int32 offset) const
 {
     for (const auto& h : header_ranges_) {
-        if (offset >= h.start && offset < h.end)
+        // A click right of a header line lands on its line break, which the
+        // range doesn't include (the "\n" belongs to what follows).
+        if (offset >= h.start && (offset < h.end
+                || (offset == h.end && offset < text_view_->TextLength()
+                    && text_view_->ByteAt(offset) == '\n')))
             return h.model_idx;
     }
     return -1;
