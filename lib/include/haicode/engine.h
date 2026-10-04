@@ -91,6 +91,24 @@ struct StepRequestShape {
     std::string cache_key;
 };
 
+// What a session's current step has streamed so far but not yet persisted
+// (the assistant row is written when the stream ends). `step_id` is the
+// step's assistant_message_id; TextDelta/ReasoningDelta events carry it plus
+// the byte `offset` where their delta starts, so a frontend that joins
+// mid-stream can tell which live deltas its snapshot already covers.
+//
+// `row_gen` is the session's transcript-row generation at load time: every
+// transcript row the engine appends or rewrites bumps it, and the event
+// announcing that row (Prompted, ToolCalled — for the assistant row carrying
+// the call — ToolSuccess/ToolFailed) carries the new value as "row_gen". An
+// event whose row_gen is <= the load's was already in the rows it read.
+struct InFlightStream {
+    std::string step_id;    // empty: no step streaming right now
+    std::string reasoning;
+    std::string text;
+    uint64_t row_gen = 0;
+};
+
 class SessionEngine {
 public:
     SessionEngine(SessionStore& store,
@@ -148,6 +166,20 @@ public:
     // Ids of every session whose agentic loop is currently executing (under
     // mu_). Used by the quit path to warn before interrupting live runs.
     std::vector<std::string> running_sessions();
+    // Non-blocking running_sessions() for polling from a UI thread: false
+    // (out untouched) when mu_ is held — run_when_idle keeps it for the whole
+    // housekeeping pass, VACUUM included — so a poller skips a beat instead
+    // of freezing behind it.
+    bool try_running_sessions(std::vector<std::string>& out);
+
+    // Load a session's transcript without losing or duplicating the step
+    // that is streaming right now. `load` (which reads the persisted rows)
+    // runs under the lock the loop holds while it persists a finished step's
+    // assistant row and drops its in-flight copy, so every streamed byte is
+    // in exactly one of: the rows `load` read, or the returned snapshot.
+    // `load` must only read the store — never call back into the engine.
+    InFlightStream load_with_in_flight(const std::string& session_id,
+                                       const std::function<void()>& load);
 
     // Holds the run-start lock while work executes. The callback may access
     // the store but must not re-enter the engine. False means retry when idle.
@@ -440,6 +472,22 @@ private:
     std::map<std::string, int> interrupts_in_progress_;
     std::condition_variable run_cv_;
     std::mutex mu_;
+    // Guards in_flight_. Lock order: in_flight_mu_ before the store's
+    // connection mutex (the persist path and load_with_in_flight both take
+    // them in that order); never taken while holding mu_, and nothing is
+    // published to the bus while holding it.
+    std::mutex in_flight_mu_;
+    std::map<std::string, InFlightStream> in_flight_;
+    std::map<std::string, uint64_t> row_gen_;  // under in_flight_mu_
+
+    // Append a transcript row and bump the session's row generation in one
+    // step against load_with_in_flight; returns the row's generation. With
+    // end_stream, the session's in-flight copy is dropped in the same step
+    // (the row now holds what streamed).
+    uint64_t append_transcript_row(const std::string& session_id,
+                                   const std::string& type,
+                                   const std::string& data_json,
+                                   bool end_stream = false);
 
     // Track pending ask_user questions per session. The agentic_loop blocks on
     // asking_cv_ after publishing AskUserRequested; reply_to_ask() sets the

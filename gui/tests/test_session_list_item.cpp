@@ -78,10 +78,22 @@ main()
         "\xE2\x9C\xBD", "\xE2\x9C\xBD", "\xE2\x9C\xBB", "\xE2\x9C\xB6",
         "*", "\xE2\x9C\xA2", "\xC2\xB7",
     };
-    for (int frame = 0; frame < 12; ++frame)
-        CHECK(std::strcmp(item.SpinnerGlyph(frame, probe), kExpected[frame]) == 0);
-    CHECK(std::strcmp(item.SpinnerGlyph(12, probe), kExpected[0]) == 0);
-    CHECK(std::strcmp(item.SpinnerGlyph(13, probe), kExpected[1]) == 0);
+    // Coverage as DrawString sees it: UTF-8 in, fallback fonts included. A
+    // covered frame shows itself; an uncovered one falls through to a glyph
+    // that IS covered (never a replacement box).
+    auto covered = [&](const char* glyph) {
+        bool has = false;
+        probe.GetHasGlyphs(glyph, 1, &has, true);
+        return has;
+    };
+    for (int frame = 0; frame < 24; ++frame) {
+        const char* glyph = item.SpinnerGlyph(frame, probe);
+        if (covered(kExpected[frame % 12]))
+            CHECK(std::strcmp(glyph, kExpected[frame % 12]) == 0);
+        else
+            CHECK(covered(glyph) || std::strcmp(glyph, "*") == 0);
+    }
+    CHECK(std::strcmp(item.SpinnerGlyph(-1, probe), item.SpinnerGlyph(11, probe)) == 0);
     CHECK(item.SetRunning(false));
     CHECK(!item.SetRunning(false));
     CHECK(!item.IsRunning());

@@ -6,6 +6,7 @@
 #include "PlanReviewWindow.h"
 #include "AskUserWindow.h"
 #include "SessionListItem.h"
+#include "GuiEventRelay.h"
 
 #include <Application.h>
 #include <cmath>
@@ -58,6 +59,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 #include <thread>
 #include <ctime>
@@ -130,14 +132,18 @@ public:
     // settings changes via MainWindow::SetEngine.
     void SetEngine(haicode::SessionEngine* engine) { engine_ = engine; }
 
-    // Called attached so the BMessageRunner can target this view.
     void AttachedToWindow() override
     {
         BListView::AttachedToWindow();
-        // 120ms per frame, the Claude Code animation rate; the window
-        // pulse (500ms) only refreshes running/timestamp state.
-        spinner_runner_ = std::make_unique<BMessageRunner>(
-            BMessenger(this), BMessage(kMsgSpinnerTick), 120000);
+        // The spinner runner targets this view, so it can only start once
+        // attached; rows built before that get their state here.
+        SyncRunning();
+    }
+
+    void DetachedFromWindow() override
+    {
+        spinner_runner_.reset();
+        BListView::DetachedFromWindow();
     }
 
     void MessageReceived(BMessage* msg) override
@@ -146,43 +152,64 @@ public:
         BListView::MessageReceived(msg);
     }
 
-    void _Spin()
+    // Swap in a rebuilt row set (MainWindow::_RefreshSessionList). Running
+    // flags carry over by session id so a rebuild — a rename lands right as
+    // a session's first turn starts — never blanks a spinner; a fresh poll
+    // then corrects them. The old rows are deleted (MakeEmpty alone leaks
+    // them).
+    void ReplaceItems(const std::vector<SessionListItem*>& items)
     {
-        bool any_running = false;
+        std::set<std::string> was_running;
+        std::vector<BListItem*> old;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            old.push_back(ItemAt(i));
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (item && item->IsRunning()) was_running.insert(item->SessionId());
+        }
+        MakeEmpty();
+        for (BListItem* item : old) delete item;
+        for (SessionListItem* item : items) {
+            if (was_running.count(item->SessionId()) > 0) {
+                item->SetRunning(true);
+                item->SetSpinnerFrame(spinner_frame_);
+            }
+            AddItem(item);
+        }
+        SyncRunning();
+    }
+
+    // Re-read which sessions are running: every window pulse (500 ms) and
+    // after each rebuild. Non-blocking — housekeeping holds the engine lock
+    // across a VACUUM, and waiting on it would freeze the window — so a busy
+    // engine just keeps the current state until the next pulse.
+    void SyncRunning()
+    {
+        std::vector<std::string> ids;
+        if (!engine_ || !engine_->try_running_sessions(ids)) return;
+        std::set<std::string> running(ids.begin(), ids.end());
+        bool any = false;
         for (int32 i = 0; i < CountItems(); ++i) {
             auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item || !item->IsRunning()) continue;
-            any_running = true;
-            item->SetSpinnerFrame(spinner_frame_);
-            InvalidateItem(i);
+            if (!item) continue;
+            bool now_running = running.count(item->SessionId()) > 0;
+            if (now_running && !item->IsRunning())
+                item->SetSpinnerFrame(spinner_frame_);
+            if (item->SetRunning(now_running)) {
+                _InvalidateGutter(i);
+                // A run that just ended last touched time_updated; show it now.
+                if (!now_running) times_due_ = true;
+            }
+            any = any || now_running;
         }
-        if (any_running)
-            spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrameCount;
+        _SetSpinning(any);
     }
 
     void Pulse() override
     {
+        SyncRunning();
         bigtime_t now = system_time();
-        bool poll_state = now - last_refresh_ >= 5000000;
-        std::set<std::string> running;
-        if (engine_ && poll_state)
-            for (const auto& id : engine_->running_sessions()) running.insert(id);
-        for (int32 i = 0; i < CountItems(); ++i) {
-            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item) continue;
-            bool invalidate = false;
-            if (poll_state) {
-                if (running.count(item->SessionId()) > 0)
-                    invalidate = item->SetRunning(true);
-                else
-                    invalidate = item->SetRunning(false);
-                auto session = store_.get(item->SessionId());
-                if (session && item->SetModifiedTime(session->time_updated))
-                    invalidate = true;
-            }
-            if (invalidate) InvalidateItem(i);
-        }
-        if (poll_state) last_refresh_ = now;
+        if (times_due_ || now - last_times_refresh_ >= 5000000)
+            _SyncModifiedTimes(now);
     }
 
     void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override
@@ -218,9 +245,76 @@ public:
     }
 
 private:
+    void _Spin()
+    {
+        bool any = false;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item || !item->IsRunning()) continue;
+            any = true;
+            item->SetSpinnerFrame(spinner_frame_);
+            _InvalidateGutter(i);
+        }
+        if (any)
+            spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrameCount;
+        else
+            _SetSpinning(false);
+    }
+
+    // 120 ms per frame, the Claude Code animation rate. Ticks only while a
+    // row is running — an idle window shouldn't wake 8 times a second.
+    void _SetSpinning(bool on)
+    {
+        if (!on) {
+            spinner_runner_.reset();
+        } else if (!spinner_runner_ && Window()) {
+            spinner_runner_ = std::make_unique<BMessageRunner>(
+                BMessenger(this), BMessage(kMsgSpinnerTick), 120000);
+            if (spinner_runner_->InitCheck() != B_OK)
+                spinner_runner_.reset();
+        }
+    }
+
+    // Repaint only the glyph gutter: a whole-row invalidate is erased to the
+    // list background before DrawItem refills it, which flickers the
+    // selected (usually the running) row on every frame.
+    void _InvalidateGutter(int32 index)
+    {
+        BRect frame = ItemFrame(index);
+        frame.right = std::min(frame.right, frame.left + kSpinnerGutter);
+        Invalidate(frame);
+    }
+
+    // One non-blocking query for every row's time_updated (rows are the
+    // store's newest sessions, so list()'s order and limit cover them). A
+    // busy connection or a failed read retries on the next pulse.
+    void _SyncModifiedTimes(bigtime_t now)
+    {
+        std::vector<std::pair<std::string, int64_t>> times;
+        try {
+            if (!store_.try_update_times(times, std::max<int32>(50, CountItems())))
+                return;
+        } catch (const std::exception& e) {
+            fprintf(stderr, "haicode: sidebar refresh: %s\n", e.what());
+            last_times_refresh_ = now;
+            return;
+        }
+        std::map<std::string, int64_t> by_id(times.begin(), times.end());
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item) continue;
+            auto it = by_id.find(item->SessionId());
+            if (it != by_id.end() && item->SetModifiedTime(it->second))
+                InvalidateItem(i);
+        }
+        last_times_refresh_ = now;
+        times_due_ = false;
+    }
+
     haicode::SessionStore& store_;
     haicode::SessionEngine* engine_ = nullptr;
-    bigtime_t last_refresh_ = 0;
+    bigtime_t last_times_refresh_ = 0;
+    bool times_due_ = false;
     int spinner_frame_ = 0;
     std::unique_ptr<BMessageRunner> spinner_runner_;
 };
@@ -814,6 +908,9 @@ MainWindow::SetEngine(haicode::SessionEngine& engine)
 {
     engine_ = &engine;
     static_cast<SessionListView*>(session_list_)->SetEngine(engine_);
+    // Row generations and step ids are per engine; the new one starts over.
+    loaded_row_gen_ = 0;
+    stream_step_id_.clear();
     engine_running_ = !active_session_id_.empty()
         && engine_->is_running(active_session_id_);
     queued_prompts_ = active_session_id_.empty()
@@ -977,7 +1074,7 @@ MainWindow::MessageReceived(BMessage* msg)
             _HandleToolResult(msg);
             break;
         case MSG_STEP_STARTED:
-            _HandleStepStarted();
+            _HandleStepStarted(msg);
             break;
         case MSG_PROMPT_STARTED:
             _HandlePromptStarted(msg);
@@ -1317,19 +1414,19 @@ MainWindow::MessageReceived(BMessage* msg)
 void
 MainWindow::_RefreshSessionList()
 {
-    // Remove old items
-    session_list_->MakeEmpty();
     session_ids_.clear();
     session_labels_.clear();
 
     auto sessions = store_.list(50);
+    std::vector<SessionListItem*> items;
     for (auto& si : sessions) {
         std::string title = session_display_title(si);
         session_labels_.push_back(title);
-        session_list_->AddItem(new SessionListItem(title, si.directory, si.id,
+        items.push_back(new SessionListItem(title, si.directory, si.id,
             si.time_updated));
         session_ids_.push_back(si.id);
     }
+    static_cast<SessionListView*>(session_list_)->ReplaceItems(items);
     _RefreshSessionBadges();
 }
 
@@ -1345,8 +1442,13 @@ MainWindow::_NewSession()
     std::string sid = engine_->create_session(project_dir_, "", model, provider);
     _SaveActiveDraft();
     active_session_id_ = sid;
+    if (relay_) relay_->set_active_session(sid);
+    stream_step_id_.clear();
+    loaded_row_gen_ = 0;
+    stream_text_floor_ = 0;
+    stream_reasoning_floor_ = 0;
 
-    // Notify relay of new active session
+    // Sync be_app's per-session permission flags to the new session
     BMessage notify(MSG_ACTIVE_SESSION);
     notify.AddString("session_id", sid.c_str());
     be_app->PostMessage(&notify);
@@ -1395,7 +1497,8 @@ MainWindow::_SelectSession(int idx)
     _SaveActiveDraft();
     active_session_id_ = session_ids_[idx];
 
-    // Notify relay of newly active session
+    // Sync be_app's per-session permission flags (the event relay itself is
+    // switched by _LoadHistory, right before the transcript load)
     BMessage notify(MSG_ACTIVE_SESSION);
     notify.AddString("session_id", active_session_id_.c_str());
     be_app->PostMessage(&notify);
@@ -1762,11 +1865,29 @@ MainWindow::_HandleRetryCommand()
 void
 MainWindow::_LoadHistory(const std::string& session_id)
 {
-    auto messages = store_.load_messages(session_id);
+    // Route this session's live events to the window BEFORE loading, so
+    // nothing published from here on is dropped; whatever overlaps the load
+    // is filtered by _AcceptStreamDelta.
+    if (relay_) relay_->set_active_session(session_id);
+
+    // The step streaming right now (if any) isn't persisted until it ends.
+    // load_with_in_flight reads the rows and the engine's in-flight copy of
+    // that step atomically, so the reply shows from its first byte — opening
+    // a session mid-reply used to start it mid-sentence.
+    decltype(store_.load_messages(session_id)) messages;
     // Replay [context compacted] entries at the point each compaction
     // occurred — derived from the checkpoint table, never stored as rows
     // (a stored row would ride every future request and double-count).
-    auto checkpoints = store_.list_complete_checkpoints(session_id);
+    decltype(store_.list_complete_checkpoints(session_id)) checkpoints;
+    auto load = [&] {
+        messages = store_.load_messages(session_id);
+        checkpoints = store_.list_complete_checkpoints(session_id);
+    };
+    haicode::InFlightStream in_flight;
+    if (engine_)
+        in_flight = engine_->load_with_in_flight(session_id, load);
+    else
+        load();
     size_t cp_idx = 0;
     // Tool name by call id, remembered from tool_calls rows so a screenshot
     // tool_result can be surfaced as a visible transcript line on replay.
@@ -1825,7 +1946,8 @@ MainWindow::_LoadHistory(const std::string& session_id)
             } else if (sm.type == "tool_result") {
                 std::string output  = data.value("output", "");
                 bool success = data.value("success", true);
-                chat_view_->AppendToolResult(output, success);
+                chat_view_->AppendToolResult(output, success,
+                                             data.value("call_id", ""));
                 // Same visibility line as the live path (_HandleToolResult):
                 // collapsed tool bubbles would otherwise hide a capture.
                 std::string cid = data.value("call_id", "");
@@ -1846,6 +1968,16 @@ MainWindow::_LoadHistory(const std::string& session_id)
             ++cp_idx;
         }
     }
+    // Render the in-flight step as if it had streamed live; the live deltas
+    // that follow continue it, skipping the bytes shown here.
+    if (!in_flight.reasoning.empty())
+        chat_view_->AppendReasoningDelta(in_flight.reasoning);
+    if (!in_flight.text.empty())
+        chat_view_->AppendTextDelta(in_flight.text);
+    stream_step_id_ = in_flight.step_id;
+    loaded_row_gen_ = static_cast<int64>(in_flight.row_gen);
+    stream_text_floor_ = static_cast<int64>(in_flight.text.size());
+    stream_reasoning_floor_ = static_cast<int64>(in_flight.reasoning.size());
     chat_view_->EndBatch();
 }
 
@@ -1885,6 +2017,7 @@ void
 MainWindow::_HandleTextDelta(BMessage* msg)
 {
     const char* delta = nullptr;
+    if (!_AcceptStreamDelta(msg, stream_text_floor_)) return;
     if (msg->FindString("delta", &delta) == B_OK && delta) {
         chat_view_->AppendTextDelta(delta);
         if (streaming_state_ != "streaming") {
@@ -1898,20 +2031,57 @@ void
 MainWindow::_HandleReasoningDelta(BMessage* msg)
 {
     const char* delta = nullptr;
+    if (!_AcceptStreamDelta(msg, stream_reasoning_floor_)) return;
     if (msg->FindString("delta", &delta) == B_OK && delta) {
         chat_view_->AppendReasoningDelta(delta);
     }
 }
 
+bool
+MainWindow::_FromOtherSession(BMessage* msg) const
+{
+    const char* sid = nullptr;
+    return msg->FindString("session_id", &sid) == B_OK && sid
+        && active_session_id_ != sid;
+}
+
+bool
+MainWindow::_RowAlreadyLoaded(BMessage* msg) const
+{
+    int64 gen = 0;
+    return msg->FindInt64("row_gen", &gen) == B_OK && gen > 0
+        && gen <= loaded_row_gen_;
+}
+
+bool
+MainWindow::_AcceptStreamDelta(BMessage* msg, int64 floor)
+{
+    if (_FromOtherSession(msg))
+        return false;
+    const char* step = nullptr;
+    if (msg->FindString("step_id", &step) != B_OK || !step || !*step)
+        return true;
+    // A different step is one the transcript load already found persisted
+    // (its deltas were forwarded after the relay switched, before the load).
+    if (stream_step_id_ != step)
+        return false;
+    // Below the floor: already rendered from the in-flight snapshot.
+    int64 offset = -1;
+    return !(msg->FindInt64("offset", &offset) == B_OK && offset >= 0
+             && offset < floor);
+}
+
 void
 MainWindow::_HandleToolCalled(BMessage* msg)
 {
+    if (_FromOtherSession(msg)) return;
     const char* tool_name  = nullptr;
     const char* input_json = nullptr;
     msg->FindString("tool_name",  &tool_name);
     msg->FindString("input_json", &input_json);
-    chat_view_->AppendToolCalled(tool_name  ? tool_name  : "",
-                                  input_json ? input_json : "");
+    if (!_RowAlreadyLoaded(msg))
+        chat_view_->AppendToolCalled(tool_name  ? tool_name  : "",
+                                      input_json ? input_json : "");
     current_tool_name_ = tool_name ? tool_name : "";
     streaming_state_ = "tool";
     _UpdateStatusStrip();
@@ -1920,14 +2090,27 @@ MainWindow::_HandleToolCalled(BMessage* msg)
 void
 MainWindow::_HandleToolResult(BMessage* msg)
 {
+    if (_FromOtherSession(msg)) return;
     const char* output = nullptr;
     bool success = true;
     msg->FindString("output",  &output);
     msg->FindBool("success",   &success);
-    chat_view_->AppendToolResult(output ? output : "", success);
+    const char* call_id = nullptr;
+    msg->FindString("call_id", &call_id);
+    bool replaces = false;
+    msg->FindBool("replaces_result", &replaces);
+    bool loaded = _RowAlreadyLoaded(msg);
+    if (!loaded) {
+        // ask_user's answer replaces its placeholder line (as the stored row
+        // does); anything else is a new result.
+        if (!(replaces && call_id
+              && chat_view_->UpdateToolResult(call_id, output ? output : "", success)))
+            chat_view_->AppendToolResult(output ? output : "", success,
+                                         call_id ? call_id : "");
+    }
     // Tool bubbles collapse; a captured screenshot is easy to miss entirely,
     // so surface it as a permanent transcript line too.
-    if (success && current_tool_name_ == "screenshot")
+    if (!loaded && success && current_tool_name_ == "screenshot")
         chat_view_->AppendSystem("Screenshot captured \xe2\x80\x94 image sent to the provider.");
     build_call_id_.clear();
     // After a tool finishes, the engine may keep going (another tool or more
@@ -1940,8 +2123,19 @@ MainWindow::_HandleToolResult(BMessage* msg)
 }
 
 void
-MainWindow::_HandleStepStarted()
+MainWindow::_HandleStepStarted(BMessage* msg)
 {
+    if (_FromOtherSession(msg))
+        return;
+    // A new step streams from offset 0; a retried attempt reuses its id and
+    // keeps whatever floor the last transcript load set.
+    const char* step = nullptr;
+    if (msg->FindString("step_id", &step) == B_OK && step && *step
+            && stream_step_id_ != step) {
+        stream_step_id_ = step;
+        stream_text_floor_ = 0;
+        stream_reasoning_floor_ = 0;
+    }
     engine_running_ = true;
     streaming_state_ = "thinking";
     current_tool_name_.clear();
@@ -1960,7 +2154,8 @@ MainWindow::_HandlePromptStarted(BMessage* msg)
     const char* name = nullptr;
     for (int32 i = 0; msg->FindString("attachment", i, &name) == B_OK; ++i)
         names.emplace_back(name);
-    chat_view_->AppendUserText(text, names);
+    if (!_RowAlreadyLoaded(msg))
+        chat_view_->AppendUserText(text, names);
     last_prompt_input_ = 0;
     last_prompt_output_ = 0;
     last_prompt_cache_read_ = 0;
@@ -3313,10 +3508,10 @@ MainWindow::_ApplyThinkingDisplay()
     // unrecognized values fall back to "off" (the default).
     const std::string& td = engine_->config().thinking_display;
     ThinkingDisplay d = ThinkingDisplay::AlwaysCollapsed;
-    if (td == "off")
-        d = ThinkingDisplay::AlwaysCollapsed;
-    else if (td == "on")
+    if (td == "on")
         d = ThinkingDisplay::AlwaysExpanded;
+    else if (td == "on_while_thinking")
+        d = ThinkingDisplay::ExpandedWhileStreaming;
     chat_view_->SetThinkingDisplay(d);
 }
 

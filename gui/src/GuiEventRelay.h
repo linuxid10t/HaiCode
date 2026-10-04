@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Message.h>
 #include <Messenger.h>
 
 #include <haicode/events.h>
@@ -18,6 +19,8 @@ public:
 
 private:
     bool is_active_session(const std::string& sid);
+    static void _AddStreamPosition(BMessage& msg, const std::string& sid,
+                                   const nlohmann::json& data);
 
     BMessenger               main_window_;
     haicode::SessionEventBus& bus_;

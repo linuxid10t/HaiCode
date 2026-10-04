@@ -56,24 +56,19 @@ SessionListItem::SetModifiedTime(int64_t time_updated)
 const char*
 SessionListItem::SpinnerGlyph(int frame, const BFont& font)
 {
-    // GetHasGlyphs takes UTF-32 code points; decode each frame's UTF-8
-    // first. Frames the font lacks are skipped so rows never render
+    // GetHasGlyphs reads UTF-8 and counts characters, so each frame goes in
+    // as-is with a count of one (a UTF-32 buffer here was read as UTF-8 and
+    // probed the wrong characters: U+2722 became '"', U+2736 '6', ...).
+    // Fallback fonts count as coverage because DrawString renders through
+    // them — the Dingbats frames usually come from a fallback font, not the
+    // UI font itself. Frames nothing covers are skipped so rows never render
     // replacement boxes.
     frame %= kSpinnerFrameCount;
+    if (frame < 0) frame += kSpinnerFrameCount;
     for (int step = 0; step < kSpinnerFrameCount; ++step) {
         int i = (frame + step) % kSpinnerFrameCount;
-        const unsigned char* p =
-            reinterpret_cast<const unsigned char*>(kSpinnerFrames[i]);
-        uint32_t cp = 0;
-        if (p[0] < 0x80) cp = p[0];
-        else if ((p[0] & 0xE0) == 0xC0) cp = p[0] & 0x1F, cp = (cp << 6) | (p[1] & 0x3F);
-        else if ((p[0] & 0xF0) == 0xE0)
-            cp = p[0] & 0x0F, cp = (cp << 6) | (p[1] & 0x3F),
-            cp = (cp << 6) | (p[2] & 0x3F);
-        else continue;
-        char utf32[4] = {(char)(cp & 0xFF), (char)((cp >> 8) & 0xFF), 0, 0};
-        bool has = true;
-        font.GetHasGlyphs(utf32, 1, &has, false);
+        bool has = false;
+        font.GetHasGlyphs(kSpinnerFrames[i], 1, &has, true);
         if (has) return kSpinnerFrames[i];
     }
     return "*";

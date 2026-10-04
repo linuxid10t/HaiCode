@@ -4,11 +4,13 @@
 #include <ScrollView.h>
 #include <MessageRunner.h>
 
+#include <deque>
 #include <memory>
 #include <string>
 #include <vector>
 
 class ChatView;
+struct RenderBuf;
 
 // BTextView subclass that routes clicks on tool headers to ChatView::ToggleBlock.
 class ClickableTextView : public BTextView {
@@ -32,6 +34,7 @@ struct ChatEntry {
     std::string name;       // tool name for ToolCalled, header for CompactionSummary
     bool        success   = true;
     bool        collapsed = false;  // meaningful for ToolCalled and Reasoning
+    std::string call_id;            // ToolResult: the call it answers
 };
 
 // How [Thinking] blocks display by default; the user's manual
@@ -70,7 +73,13 @@ public:
     // (initially and after each settings save).
     void SetThinkingDisplay(ThinkingDisplay d) { thinking_display_ = d; }
     void AppendToolCalled(const std::string& tool_name, const std::string& input_json);
-    void AppendToolResult(const std::string& output, bool success);
+    void AppendToolResult(const std::string& output, bool success,
+                          const std::string& call_id = "");
+    // Rewrite the newest result line for `call_id` in place (ask_user swaps
+    // its placeholder for the picked answer; the stored row is rewritten the
+    // same way, so a reload shows one line too). False when no line matches.
+    bool UpdateToolResult(const std::string& call_id, const std::string& output,
+                          bool success);
     void AppendSystem(const std::string& text);
     // Collapsible [context compacted] transcript entry: header line plus the
     // checkpoint summary body (collapsed by default, click to expand).
@@ -94,8 +103,19 @@ public:
     void ToggleBlock(int model_idx);
 
 private:
-    void AppendStyled(const std::string& text, rgb_color color, bool bold = false);
-    void AppendCopyControl(int model_idx);
+    // Rendering is incremental: each model entry owns the byte range
+    // [entry_starts_[i], entry_starts_[i + 1]) of the text view. Appends
+    // insert at the end, and a collapse/expand re-renders only the one
+    // entry in place. A full SetText-based rebuild happens only at EndBatch;
+    // rebuilding the whole view per tool result left it blank (app_server
+    // erases invalidated regions to the view color at once, while Draw waits
+    // for the looper to finish the rebuild) — the white flash on tool calls.
+    int  _PushEntry(ChatEntry entry);
+    void _RenderEntry(int model_idx, RenderBuf& out) const;
+    void _InsertRendered(int32 offset, const RenderBuf& buf);
+    void _AppendRendered(const RenderBuf& buf);
+    void _AppendEntry(int model_idx);
+    void _ReplaceEntry(int model_idx);
     void SetCopyFeedback(int model_idx, bool visible);
     void ClearCopyFeedback();
     void ScrollToBottom();
@@ -105,15 +125,17 @@ private:
     BScrollView*       scroll_          = nullptr;
     bool               streaming_       = false;
     bool               reasoning_streaming_ = false;
-    bool               inhibit_scroll_  = false;
     bool               defer_rebuild_   = false;
     ThinkingDisplay    thinking_display_ = ThinkingDisplay::AlwaysCollapsed;
 
     std::vector<ChatEntry>        model_;
+    std::vector<int32>            entry_starts_;  // parallel to model_
     std::vector<ToolHeaderRange>  header_ranges_;
     std::vector<CopyControlRange> copy_ranges_;
     int                          feedback_idx_ = -1;
     int32                        feedback_generation_ = 0;
     std::unique_ptr<BMessageRunner> feedback_timer_;
-    int                          pending_tool_idx_ = -1;
+    // Tool calls still waiting for their result, oldest first; each result
+    // collapses the oldest (parallel calls in one batch resolve in order).
+    std::deque<int>              pending_tools_;
 };
