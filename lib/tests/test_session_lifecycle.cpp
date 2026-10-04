@@ -414,7 +414,49 @@ static void test_bulk_delete_loop() {
     fx.engine->shutdown();
 }
 
+static void test_idle_maintenance() {
+    Fixture fx;
+    fx.gate.set_rules({{"*", "*", PermissionEffect::Allow}});
+    bool called = false;
+    TEST_REQUIRE(fx.engine->run_when_idle([&] {
+        called = true;
+        TEST_REQUIRE(fx.store.get(fx.sid).has_value(), "maintenance may read the store");
+    }), "idle maintenance may access the store");
+    TEST_REQUIRE(called, "idle callback ran");
+
+    fx.engine->submit_prompt(fx.sid, "PARK foreground");
+    fx.park->entered.wait();
+    called = false;
+    TEST_REQUIRE(!fx.engine->run_when_idle([&] { called = true; }),
+        "foreground work defers maintenance");
+    TEST_REQUIRE(!called, "busy callback never ran");
+    fx.park->gate->open_gate();
+    wait_idle(*fx.engine, fx.sid);
+    TEST_REQUIRE(fx.engine->run_when_idle([&] { called = true; }),
+        "maintenance retries after foreground completion");
+    TEST_REQUIRE(called, "retry ran");
+    fx.engine->shutdown();
+    TEST_REQUIRE(!fx.engine->run_when_idle([] {}), "shutdown refuses maintenance");
+
+    Fixture titled(true);
+    titled.gate.set_rules({{"*", "*", PermissionEffect::Allow}});
+    titled.engine->submit_prompt(titled.sid, "finish and name this session");
+    titled.provider->title_entered.wait();
+    wait_idle(*titled.engine, titled.sid);
+    TEST_REQUIRE(!titled.engine->run_when_idle([] {}),
+        "title maintenance also defers database maintenance");
+    titled.provider->title_gate->open_gate();
+    bool ran = false;
+    for (int i = 0; i < 500 && !ran; ++i) {
+        ran = titled.engine->run_when_idle([] {});
+        if (!ran) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    TEST_REQUIRE(ran, "maintenance retries after title completion");
+    titled.engine->shutdown();
+}
+
 int main() {
+    test_idle_maintenance();
     test_delete_idle();
     test_delete_running_parked_tool();
     test_delete_parked_approval();

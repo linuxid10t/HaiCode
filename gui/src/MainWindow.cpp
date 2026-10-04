@@ -5,6 +5,7 @@
 #include "PermissionWindow.h"
 #include "PlanReviewWindow.h"
 #include "AskUserWindow.h"
+#include "SessionListItem.h"
 
 #include <Application.h>
 #include <cmath>
@@ -31,6 +32,7 @@
 #include <String.h>
 #include <SupportDefs.h>
 #include <GraphicsDefs.h>
+#include <MessageRunner.h>
 #include <FilePanel.h>
 #include <Entry.h>
 #include <Path.h>
@@ -68,6 +70,9 @@
 #include <sstream>
 
 using json = nlohmann::json;
+
+// 120ms activity-glyph tick, posted to SessionListView by BMessageRunner.
+constexpr uint32 kMsgSpinnerTick = 'spnt';
 
 // ---------------------------------------------------------------------------
 // PermissionMenu — prompt-row permission popup anchored to the field border
@@ -114,10 +119,78 @@ protected:
 
 class SessionListView : public BListView {
 public:
-    SessionListView()
-        : BListView("session_list", B_SINGLE_SELECTION_LIST)
+    explicit SessionListView(haicode::SessionStore& store)
+        : BListView("session_list", B_SINGLE_SELECTION_LIST), store_(store)
     {
         SetSelectionMessage(new BMessage(MSG_SELECT_SESSION));
+        SetFlags(Flags() | B_PULSE_NEEDED);
+    }
+
+    // Engine pointer rather than reference: HaiCodeApp swaps engines on
+    // settings changes via MainWindow::SetEngine.
+    void SetEngine(haicode::SessionEngine* engine) { engine_ = engine; }
+
+    // Called attached so the BMessageRunner can target this view.
+    void AttachedToWindow() override
+    {
+        BListView::AttachedToWindow();
+        // 120ms per frame, the Claude Code animation rate; the window
+        // pulse (500ms) only refreshes running/timestamp state.
+        spinner_runner_ = std::make_unique<BMessageRunner>(
+            BMessenger(this), BMessage(kMsgSpinnerTick), 120000);
+    }
+
+    void MessageReceived(BMessage* msg) override
+    {
+        if (msg->what == kMsgSpinnerTick) { _Spin(); return; }
+        BListView::MessageReceived(msg);
+    }
+
+    void _Spin()
+    {
+        bool any_running = false;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item || !item->IsRunning()) continue;
+            any_running = true;
+            item->SetSpinnerFrame(spinner_frame_);
+            InvalidateItem(i);
+        }
+        if (any_running)
+            spinner_frame_ = (spinner_frame_ + 1) % kSpinnerFrameCount;
+    }
+
+    void Pulse() override
+    {
+        bigtime_t now = system_time();
+        bool poll_state = now - last_refresh_ >= 5000000;
+        std::set<std::string> running;
+        if (engine_ && poll_state)
+            for (const auto& id : engine_->running_sessions()) running.insert(id);
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item) continue;
+            bool invalidate = false;
+            if (poll_state) {
+                if (running.count(item->SessionId()) > 0)
+                    invalidate = item->SetRunning(true);
+                else
+                    invalidate = item->SetRunning(false);
+                auto session = store_.get(item->SessionId());
+                if (session && item->SetModifiedTime(session->time_updated))
+                    invalidate = true;
+            }
+            if (invalidate) InvalidateItem(i);
+        }
+        if (poll_state) last_refresh_ = now;
+    }
+
+    void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override
+    {
+        BListView::MouseMoved(where, transit, dragMessage);
+        auto* item = transit == B_EXITED_VIEW ? nullptr
+            : dynamic_cast<SessionListItem*>(ItemAt(IndexOf(where)));
+        SetToolTip(item ? item->Directory().c_str() : nullptr);
     }
 
     void MouseDown(BPoint where) override
@@ -143,6 +216,13 @@ public:
             BListView::MouseDown(where);
         }
     }
+
+private:
+    haicode::SessionStore& store_;
+    haicode::SessionEngine* engine_ = nullptr;
+    bigtime_t last_refresh_ = 0;
+    int spinner_frame_ = 0;
+    std::unique_ptr<BMessageRunner> spinner_runner_;
 };
 
 // ---------------------------------------------------------------------------
@@ -342,19 +422,17 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
             m->AddString("criteria", criteria);
             cleanup_menu->AddItem(new BMenuItem(label, m));
         };
-        add_item("Delete Untitled Sessions", "untitled");
-        add_item("Delete Empty Sessions", "empty");
-        BMenu* older_menu = new BMenu("Delete Sessions Older Than");
+        add_item("Delete Empty Sessions" B_UTF8_ELLIPSIS, "empty");
+        BMenu* older_menu = new BMenu("Delete Inactive Sessions");
         for (int days : {7, 30, 90}) {
             BMessage* m = new BMessage(MSG_CLEANUP_REQUEST);
             std::string criteria = "older:" + std::to_string(days);
             m->AddString("criteria", criteria.c_str());
-            older_menu->AddItem(new BMenuItem((std::to_string(days) + " days").c_str(), m));
+            older_menu->AddItem(new BMenuItem(
+                (std::to_string(days) + " days" B_UTF8_ELLIPSIS).c_str(), m));
         }
         cleanup_menu->AddItem(older_menu);
-        add_item("Delete This Project's Sessions", "project");
-        cleanup_menu->AddSeparatorItem();
-        add_item("Reclaim Disk Space" B_UTF8_ELLIPSIS, "reclaim");
+        add_item("Delete All Sessions in This Project" B_UTF8_ELLIPSIS, "project");
         // The parent menu's SetTargetForItems does not reach into submenus, so
         // the age submenu needs its own target.
         older_menu->SetTargetForItems(this);
@@ -459,7 +537,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     perm_field_->SetExplicitMaxSize(BSize(perm_width, B_SIZE_UNSET));
 
     // ---- Session list (left sidebar) ----
-    session_list_ = new SessionListView();
+    session_list_ = new SessionListView(store_);
+    static_cast<SessionListView*>(session_list_)->SetEngine(engine_);
     session_scroll_ = new BScrollView("session_scroll", session_list_,
                                       0, false, true, B_FANCY_BORDER);
     session_scroll_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
@@ -734,6 +813,7 @@ void
 MainWindow::SetEngine(haicode::SessionEngine& engine)
 {
     engine_ = &engine;
+    static_cast<SessionListView*>(session_list_)->SetEngine(engine_);
     engine_running_ = !active_session_id_.empty()
         && engine_->is_running(active_session_id_);
     queued_prompts_ = active_session_id_.empty()
@@ -866,6 +946,7 @@ MainWindow::MessageReceived(BMessage* msg)
             BAlert* alert = new BAlert("Delete session", text.String(),
                                        "Cancel", "Delete", nullptr,
                                        B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+            alert->SetDefaultButton(alert->ButtonAt(0));
             alert->SetShortcut(0, B_ESCAPE);
             if (alert->Go() != 1)
                 break;
@@ -1245,7 +1326,8 @@ MainWindow::_RefreshSessionList()
     for (auto& si : sessions) {
         std::string title = session_display_title(si);
         session_labels_.push_back(title);
-        session_list_->AddItem(new BStringItem(title.c_str()));
+        session_list_->AddItem(new SessionListItem(title, si.directory, si.id,
+            si.time_updated));
         session_ids_.push_back(si.id);
     }
     _RefreshSessionBadges();
@@ -1615,8 +1697,16 @@ MainWindow::_ApplyDirectory(const std::string& path)
     project_dir_ = path;
     dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
     _RefreshSkills();  // project skill dir is relative
-    if (!active_session_id_.empty())
+    if (!active_session_id_.empty()) {
         store_.update_directory(active_session_id_, project_dir_);
+        _RefreshSessionList();
+        for (int32 i = 0; i < (int32)session_ids_.size(); ++i) {
+            if (session_ids_[i] == active_session_id_) {
+                session_list_->Select(i);
+                break;
+            }
+        }
+    }
     BMessage notify(MSG_DIR_CHANGED);
     notify.AddString("path", project_dir_.c_str());
     be_app->PostMessage(&notify);
@@ -2183,21 +2273,11 @@ MainWindow::_HandleCleanupRequest(BMessage* msg)
     if (msg->FindString("criteria", &criteria_c) != B_OK || !criteria_c) return;
     std::string criteria = criteria_c;
 
-    if (criteria == "reclaim") {
-        BMessage go(MSG_CLEANUP_CONFIRMED);
-        go.AddBool("reclaim", true);
-        be_app->PostMessage(&go);
-        return;
-    }
-
     haicode::SessionFilter filter;
     std::string what;
-    if (criteria == "untitled") {
-        filter.untitled_only = true;
-        what = "untitled";
-    } else if (criteria == "empty") {
+    if (criteria == "empty") {
         filter.empty_only = true;
-        what = "empty (no prompt ever sent)";
+        what = "empty (no submitted prompts)";
     } else if (criteria == "project") {
         filter.directory = project_dir_;
         what = "in this project (" + project_dir_ + ")";
@@ -2207,7 +2287,7 @@ MainWindow::_HandleCleanupRequest(BMessage* msg)
         if (days <= 0) return;
         const int64_t kDayMs = 24LL * 60 * 60 * 1000;
         filter.updated_before_ms = haicode::util::now_ms() - days * kDayMs;
-        what = "older than " + std::to_string(days) + " days";
+        what = "inactive for more than " + std::to_string(days) + " days";
     } else {
         return;
     }
@@ -2233,7 +2313,10 @@ MainWindow::_HandleCleanupRequest(BMessage* msg)
         auto si = store_.get(sid);
         std::string title = si ? session_display_title(*si)
             : (sid.size() > 8 ? sid.substr(sid.size() - 8) : sid);
-        text << "• " << title.c_str() << "\n";
+        text << "• " << title.c_str();
+        if (si) text << "\n  " << (si->directory.empty()
+            ? "No project directory" : si->directory.c_str());
+        text << "\n";
         ++shown;
     }
     int running = 0;
@@ -2250,12 +2333,12 @@ MainWindow::_HandleCleanupRequest(BMessage* msg)
     BAlert* alert = new BAlert("Cleanup", text.String(),
                                "Cancel", "Delete", nullptr,
                                B_WIDTH_AS_USUAL, B_WARNING_ALERT);
+    alert->SetDefaultButton(alert->ButtonAt(0));
     alert->SetShortcut(0, B_ESCAPE);
     if (alert->Go() != 1) return;
 
     // Stable ids, never indices: session_ids_ shifts under asynchronous work.
     BMessage go(MSG_CLEANUP_CONFIRMED);
-    go.AddBool("reclaim", false);
     for (const std::string& sid : ids)
         go.AddString("session_id", sid.c_str());
     be_app->PostMessage(&go);
@@ -2269,8 +2352,6 @@ MainWindow::_HandleSessionsDeleted(BMessage* msg)
     msg->FindInt32("failed", &failed);
     const char* error = nullptr;
     msg->FindString("error", &error);
-    const char* housekeeping = nullptr;
-    msg->FindString("housekeeping", &housekeeping);
 
     // Window-side teardown for every id the worker reports. A session whose
     // delete failed stays in the list and keeps its drafts.
@@ -2288,9 +2369,6 @@ MainWindow::_HandleSessionsDeleted(BMessage* msg)
              << (error ? error : "unknown error")
              << "\n\n" << deleted << " session(s) were deleted.";
         BAlert* alert = new BAlert("Cleanup", text.String(), "OK");
-        alert->Go();
-    } else if (housekeeping && *housekeeping) {
-        BAlert* alert = new BAlert("Cleanup", housekeeping, "OK");
         alert->Go();
     }
 

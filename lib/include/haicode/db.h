@@ -156,14 +156,13 @@ public:
     // ones. Returns the number of rows removed; `error` is set when a delete
     // failed or violations remain afterwards.
     int prune_orphans(std::string& error);
-    // Truncate the WAL and VACUUM so the file actually shrinks after deletions.
-    // Never call from inside a transaction or while another thread is
-    // streaming on this connection. When supplied, `bytes_before`/`bytes_after`
-    // receive the database size (page_count * page_size) either side of the
-    // VACUUM so the caller can report what was reclaimed.
+    // Serialized with SessionStore operations. A nonzero minimum_free_bytes
+    // skips VACUUM when too little space can be recovered. Checkpoints before
+    // and after VACUUM ensure the compacted file is applied immediately.
     bool reclaim_space(std::string& error,
                        int64_t* bytes_before = nullptr,
-                       int64_t* bytes_after = nullptr);
+                       int64_t* bytes_after = nullptr,
+                       int64_t minimum_free_bytes = 0);
 
     // PRAGMA user_version — the schema version cursor for numbered migrations.
     int  user_version();
@@ -173,9 +172,11 @@ public:
     void set_busy_timeout(int ms);
 
     sqlite3* handle() { return db_; }
+    std::mutex& connection_mutex() { return conn_mu_; }
 
 private:
     sqlite3* db_ = nullptr;
+    std::mutex conn_mu_;
 };
 
 // ---- Session types ----
@@ -358,7 +359,7 @@ private:
     // transaction from absorbing another thread's writes and stops reads
     // from observing mid-transaction state. No public method may call
     // another public method (would self-deadlock on this mutex).
-    std::mutex conn_mu_;
+    std::mutex& conn_mu_;
 };
 
 } // namespace haicode

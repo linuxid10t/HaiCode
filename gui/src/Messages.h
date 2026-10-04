@@ -134,6 +134,7 @@ static const uint32 MSG_DELETE_SESSION_CONFIRMED = 'DLcf';  // MainWindow → be
 static const uint32 MSG_SESSION_DELETED = 'DLok';  // lifecycle worker → be_app → MainWindow; "session_id" + "ok" bool + "error" string
 
 // Bulk session cleanup (File → Cleanup…)
-static const uint32 MSG_CLEANUP_REQUEST  = 'CLrq';  // menu item → MainWindow; "criteria" string (untitled / empty / project / reclaim / older:N)
-static const uint32 MSG_CLEANUP_CONFIRMED = 'CLcf';  // MainWindow → be_app; repeated "session_id" strings (may be none) + "reclaim" bool
-static const uint32 MSG_SESSIONS_DELETED = 'CLok';  // cleanup worker → be_app → MainWindow; "deleted"/"failed" int32, optional "error", optional "housekeeping" string
+static const uint32 MSG_CLEANUP_REQUEST  = 'CLrq';  // menu → window; "criteria" (empty / project / older:N)
+static const uint32 MSG_CLEANUP_CONFIRMED = 'CLcf';  // window → app; repeated stable "session_id" strings
+static const uint32 MSG_SESSIONS_DELETED = 'CLok';  // worker → app → window; counts, deleted ids, optional error
+static const uint32 MSG_HOUSEKEEPING_DONE = 'HKdn';  // worker → app; "ok" bool, retry on busy/failure

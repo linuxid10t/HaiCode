@@ -149,6 +149,10 @@ public:
     // mu_). Used by the quit path to warn before interrupting live runs.
     std::vector<std::string> running_sessions();
 
+    // Holds the run-start lock while work executes. The callback may access
+    // the store but must not re-enter the engine. False means retry when idle.
+    bool run_when_idle(const std::function<void()>& work);
+
     // Delete a session: mark it retiring (new runs/submissions refused,
     // queued prompts discarded), interrupt it (asks, approvals, scoped
     // provider streams), join its foreground and title workers OUTSIDE

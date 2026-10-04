@@ -344,32 +344,40 @@ todos, and history. If the database delete fails, the session stays usable
 and the error is shown. Other sessions, including their permission grants,
 are untouched.
 
-**File → Cleanup** covers the accumulated bulk:
+**File → Cleanup** offers three deletion choices:
 
 | Item | What it removes |
 |---|---|
-| Delete Untitled Sessions | Sessions never given a title |
-| Delete Empty Sessions | Sessions no prompt was ever sent to |
-| Delete Sessions Older Than… | 7 / 30 / 90 days by last activity |
-| Delete This Project's Sessions | Every session of the open project directory |
-| Reclaim Disk Space… | WAL checkpoint + `VACUUM`, so the database file shrinks |
+| Delete Empty Sessions… | Sessions with no submitted prompts, regardless of title |
+| Delete Inactive Sessions → 7 / 30 / 90 days… | Sessions whose last activity is older than the selected interval |
+| Delete All Sessions in This Project… | Every session of the currently selected project directory, including conversations with history |
 
-Each item names what it targets, counts how many are running and will be
-interrupted, and confirms with *Cancel* as the default — Escape cancels and
-changes nothing. Bulk deletion runs through the same retirement path as a
-single delete, so a session the filter did not match keeps running with its
-grants intact. Selection is uncapped, unlike the 50-row sidebar, so a session
-that never appeared in the list is still deletable. Reclaim defers the
-`VACUUM` while any session is still streaming and reports that it deferred.
+An untitled session can still contain a conversation, so title alone is not a
+cleanup criterion. The sidebar shows each session's directory below its title
+and the last-modified time on a third line, refreshed every few seconds while
+sessions run. While a session is actively working, an animated spinner shows
+to the left of its title — including background sessions. Hover over a row to
+see the full path. Cleanup confirmations also show directories.
 
-HaiCode also does housekeeping silently at startup, before any session is
-running: orphaned message/todo/checkpoint rows, compaction checkpoints left
-`pending` or `failed` by a crashed run, the retained-context payloads of
-superseded checkpoints (only the newest one per session is ever read again),
-and scratch files older than a day left in the system temp directory
-(`haicode_shot_*`, `haicode_diff_*`). Summaries and the compaction chain are
-never touched, so a reloaded session still shows its `[context compacted]`
-entries.
+Each deletion names what it targets, counts how many sessions are running and
+will be interrupted, and confirms with *Cancel* as the default — Enter or Escape
+cancels. Bulk deletion runs through the same retirement path as a single delete,
+so unmatched sessions keep running with their grants intact. Selection is
+uncapped, unlike the 50-row sidebar, so sessions outside that list are still
+included in cleanup.
+
+Storage maintenance is automatic, not a menu action. It runs silently at startup
+and is scheduled after single or bulk deletion. While the app is running, a
+tracked worker checks every 30 seconds until foreground sessions and title jobs
+are idle. Failed maintenance is logged and retried later. Database operations
+share one connection mutex so maintenance cannot overlap a session transaction.
+
+Housekeeping removes orphaned message/todo/checkpoint rows, stale `pending` or
+`failed` compaction attempts, superseded checkpoint context payloads, and scratch
+files older than a day (`haicode_shot_*`, `haicode_diff_*`). Summaries, conversation
+history, and the complete compaction chain survive. Database compaction runs only
+when at least 1 MiB of free pages can be reclaimed; WAL checkpoints before and
+after `VACUUM` return that space to the filesystem without deleting conversations.
 
 ### Session autonaming
 

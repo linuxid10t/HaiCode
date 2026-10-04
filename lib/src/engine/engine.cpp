@@ -1348,6 +1348,17 @@ std::vector<std::string> SessionEngine::running_sessions() {
     return ids;
 }
 
+bool SessionEngine::run_when_idle(const std::function<void()>& work) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (shutting_down_) return false;
+    for (const auto& [id, running] : session_running_)
+        if (running) return false;
+    for (const auto& job : title_jobs_)
+        if (!job->done->load()) return false;
+    work();
+    return true;
+}
+
 bool SessionEngine::delete_session(const std::string& session_id,
                                    std::string& error) {
     error.clear();

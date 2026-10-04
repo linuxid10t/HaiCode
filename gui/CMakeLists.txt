@@ -42,3 +42,8 @@ add_executable(test_snapshot_menu tests/test_snapshot_menu.cpp src/SnapshotMenu.
 target_include_directories(test_snapshot_menu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(test_snapshot_menu PRIVATE ${BE_LIB} ${ROOT_LIB})
 add_test(NAME snapshot_menu COMMAND test_snapshot_menu)
+
+add_executable(test_session_list_item tests/test_session_list_item.cpp src/SessionListItem.cpp)
+target_include_directories(test_session_list_item PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_session_list_item PRIVATE ${BE_LIB} ${ROOT_LIB})
+add_test(NAME session_list_item COMMAND test_session_list_item)

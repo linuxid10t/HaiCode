@@ -164,6 +164,7 @@ void Database::migrate() {
 }
 
 int Database::prune_orphans(std::string& error) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     error.clear();
     int removed = 0;
     try {
@@ -178,43 +179,48 @@ int Database::prune_orphans(std::string& error) {
             removed += sqlite3_changes(db_);
         }
         txn.commit();
+        DbStmt check(db_, "PRAGMA foreign_key_check;");
+        int violations = 0;
+        while (check.expect_row()) ++violations;
+        if (violations > 0)
+            error = std::to_string(violations) + " foreign key violation(s) remain";
     } catch (const std::exception& e) {
         error = e.what();
         return 0;
     }
-
-    // Confirm the cascade invariant holds after the sweep.
-    DbStmt check(db_, "PRAGMA foreign_key_check;");
-    int violations = 0;
-    while (check.expect_row()) ++violations;
-    if (violations > 0)
-        error = std::to_string(violations) + " foreign key violation(s) remain";
     return removed;
 }
 
 bool Database::reclaim_space(std::string& error,
-                             int64_t* bytes_before, int64_t* bytes_after) {
+                             int64_t* bytes_before, int64_t* bytes_after,
+                             int64_t minimum_free_bytes) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
     error.clear();
-    auto page_bytes = [&]() -> int64_t {
-        int64_t pages = 0, size = 0;
-        DbStmt pc(db_, "PRAGMA page_count;");
-        if (pc.expect_row()) pages = pc.int64_col(0);
-        DbStmt ps(db_, "PRAGMA page_size;");
-        if (ps.expect_row()) size = ps.int64_col(0);
-        return pages * size;
+    if (bytes_before) *bytes_before = 0;
+    if (bytes_after) *bytes_after = 0;
+    auto pragma = [&](const char* sql) -> int64_t {
+        DbStmt stmt(db_, sql);
+        if (!stmt.expect_row()) throw DbError("PRAGMA returned no row");
+        return stmt.int64_col(0);
+    };
+    auto checkpoint = [&]() {
+        DbStmt stmt(db_, "PRAGMA wal_checkpoint(TRUNCATE);");
+        if (!stmt.expect_row()) throw DbError("wal_checkpoint returned no row");
+        if (stmt.int_col(0) != 0) throw DbError("WAL checkpoint is busy");
     };
     try {
-        // The WAL must be folded back into the main file before VACUUM can
-        // shrink it. Scoped so the statement is finalized first: VACUUM refuses
-        // to run while any statement on the connection is mid-step.
-        {
-            DbStmt ckpt(db_, "PRAGMA wal_checkpoint(TRUNCATE);");
-            if (!ckpt.expect_row())
-                throw DbError("wal_checkpoint returned no row");
-        }
-        if (bytes_before) *bytes_before = page_bytes();
+        int64_t page_size = pragma("PRAGMA page_size;");
+        int64_t before = pragma("PRAGMA page_count;") * page_size;
+        if (bytes_before) *bytes_before = before;
+        if (bytes_after) *bytes_after = before;
+        if (minimum_free_bytes > 0
+                && pragma("PRAGMA freelist_count;") * page_size < minimum_free_bytes)
+            return true;
+        // Each helper finalizes its statement before VACUUM starts.
+        checkpoint();
         exec("VACUUM;");
-        if (bytes_after) *bytes_after = page_bytes();
+        checkpoint();
+        if (bytes_after) *bytes_after = pragma("PRAGMA page_count;") * page_size;
     } catch (const std::exception& e) {
         error = e.what();
         return false;
@@ -224,7 +230,7 @@ bool Database::reclaim_space(std::string& error,
 
 // ---- SessionStore ----
 
-SessionStore::SessionStore(Database& db) : db_(db) {}
+SessionStore::SessionStore(Database& db) : db_(db), conn_mu_(db.connection_mutex()) {}
 
 SessionInfo SessionStore::create(const std::string& project_dir,
                                   const std::string& agent,

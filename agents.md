@@ -72,21 +72,20 @@ Rules:
   layers (`erase_session_state`). DB failure rolls retirement back and keeps
   the session usable. The GUI runs retirement on tracked workers and ignores
   late events for deleted sessions.
-- **Bulk cleanup reuses that retirement path.** File → Cleanup resolves a
-  `SessionFilter` (`SessionStore::sessions_matching`, uncapped on purpose —
-  the sidebar's `list(50)` is not a deletion limit), confirms with Cancel
-  default + `B_ESCAPE`, then posts stable session ids (never list indices) to
-  a tracked lifecycle worker that loops `delete_session` and finally runs
-  housekeeping: `Database::prune_orphans`, `SessionStore::prune_stale_checkpoints`
-  (non-`complete` rows only), `SessionStore::clear_stale_checkpoint_contexts`
-  (every complete row except each session's highest-`through_seq` one —
-  summaries and `previous_checkpoint_id` always survive), and
-  `Database::reclaim_space` (WAL checkpoint then `VACUUM`; never inside a
-  `DbTxn`, never while a statement is mid-step, and deferred while any session
-  streams). `util::sweep_scratch_files` ages out `haicode_shot_*` /
-  `haicode_diff_*` in the system temp directory with an mtime floor, since a
-  just-taken screenshot or a live diff scratch is still in flight. The GUI
-  never calls `SessionStore::delete_session` directly. Prune
+- **Bulk cleanup reuses that retirement path.** File → Cleanup offers Empty,
+  Inactive (7/30/90 days), and All Sessions in This Project. Untitled is not
+  empty. Resolve uncapped `SessionStore::sessions_matching` filters, explicitly
+  set Cancel as the BAlert default with Escape, and post stable session ids
+  to tracked deletion workers. Sidebar rows and previews show directories.
+  Storage housekeeping is automatic at startup and scheduled after deletion:
+  a tracked worker retries every 30 seconds via `SessionEngine::run_when_idle`
+  (callback must not re-enter the engine; foreground and title jobs must be
+  idle). `Database::prune_orphans` and `reclaim_space` share the database-owned
+  connection mutex with every SessionStore. Catch/log each housekeeping failure
+  independently and retry later. Preserve complete checkpoint summaries/chains,
+  clear only superseded context payloads, and sweep aged screenshot/diff scratch.
+  VACUUM only for at least 1 MiB of free pages, with checked WAL checkpoints
+  before AND after it. The GUI never deletes through the store directly; prune
   `HaiCodeApp::session_flags_` whenever a session id dies.
 
 - **Image retention is wire-only.** Keep raw user/screenshot images for the

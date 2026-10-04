@@ -30,6 +30,7 @@ public:
 
     void ReadyToRun() override;
     void MessageReceived(BMessage* msg) override;
+    void Pulse() override;
     bool QuitRequested() override;
     // B_SINGLE_LAUNCH routes a second launch's argv/refs to the running
     // instance instead of starting a new process. Forward a directory
@@ -132,16 +133,11 @@ private:
     // are joined before any engine shutdown/replacement.
     void _JoinLifecycleWorkers();
 
-    // Store housekeeping: orphaned rows, dead checkpoint rows and payloads,
-    // aged scratch files, and (optionally) the WAL checkpoint + VACUUM. Safe at
-    // startup (no engine yet); from a worker it runs only while no session is
-    // streaming. Returns a human-readable summary; failures are logged to
-    // stderr and never abort anything.
-    std::string _RunHousekeeping(bool include_reclaim);
-    // Bulk cleanup worker: delete each session through the engine's retirement
-    // path (never SessionStore::delete_session directly — running sessions must
-    // be interrupted and joined first), then housekeeping, then report.
-    void _RunCleanup(const std::vector<std::string>& session_ids, bool reclaim);
+    bool housekeeping_pending_ = false;
+    bool housekeeping_running_ = false;
+    std::thread housekeeping_worker_;
+    bool _RunHousekeeping();
+    void _RunCleanup(const std::vector<std::string>& session_ids);
 
     // Replace the engine after handing the window its new pointer. When supplied,
     // keep the old provider registry alive until the retiring engine is destroyed.

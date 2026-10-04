@@ -15,6 +15,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <thread>
 
 using haicode::Database;
 using haicode::DbStmt;
@@ -344,12 +346,23 @@ static bool test_reclaim_space() {
 
     std::string err;
     int64_t before = 0, after = 0;
+    int free_pages = f.count("PRAGMA freelist_count;");
+    CHECK(free_pages > 0, "deletions left reclaimable pages");
+    CHECK(f.db->reclaim_space(err, &before, &after, 1024LL * 1024),
+          "automatic reclaim threshold check succeeds");
+    CHECK(before == after && f.count("PRAGMA freelist_count;") == free_pages,
+          "less than 1 MiB of free pages skips VACUUM");
     bool ok = f.db->reclaim_space(err, &before, &after);
     CHECK(ok, "reclaim_space succeeded: " + err);
     CHECK(err.empty(), "no error text on success");
     CHECK(before > 0 && after > 0, "sizes reported on both sides of VACUUM");
     CHECK(after < before, "the file shrank: " + std::to_string(before)
                           + " -> " + std::to_string(after));
+    struct stat main_stat{}, wal_stat{};
+    CHECK(stat(kDbPath, &main_stat) == 0 && main_stat.st_size == after,
+          "the main file shrinks while the connection remains open");
+    CHECK(stat("/tmp/test_haicode_cleanup.db-wal", &wal_stat) == 0
+          && wal_stat.st_size == 0, "VACUUM's WAL is checkpointed and truncated");
 
     // Still a readable WAL database afterwards.
     {
@@ -368,6 +381,85 @@ static bool test_reclaim_space() {
     CHECK(err2.empty(), "no spurious error on the repeat reclaim");
 
     std::cout << "[OK] reclaim_space (WAL checkpoint + VACUUM)\n";
+    return true;
+}
+
+static bool test_housekeeping_concurrency() {
+    Fixture f;
+    f.open();
+    SessionStore second(*f.db);
+    std::string sid = make_session(*f.store, "/proj", "keep");
+    std::atomic<bool> start{false};
+    std::atomic<int> failures{0};
+    std::thread writer([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (int i = 0; i < 200; ++i) {
+            try {
+                f.store->append_message(sid, "user_prompted", "{}");
+                second.replace_todos(sid, {{"keep", "keeping", "pending"}});
+            } catch (...) { ++failures; }
+        }
+    });
+    std::thread cleaner([&] {
+        while (!start.load()) std::this_thread::yield();
+        for (int i = 0; i < 200; ++i) {
+            try {
+                std::string error;
+                f.db->prune_orphans(error);
+                if (!error.empty()) ++failures;
+                if (i % 20 == 0 && !f.db->reclaim_space(error)) ++failures;
+            } catch (...) { ++failures; }
+        }
+    });
+    start = true;
+    writer.join();
+    cleaner.join();
+    CHECK(failures == 0, "housekeeping and both stores share connection serialization");
+    CHECK(f.store->load_messages(sid).size() == 200, "all concurrent messages survive");
+    CHECK(second.load_todos(sid).size() == 1, "concurrent todo list survives");
+    return true;
+}
+
+static bool test_housekeeping_lock_failures() {
+    Fixture f;
+    f.open();
+    f.db->set_busy_timeout(30);
+    std::string sid = make_session(*f.store, "/proj", "keep");
+    sqlite3* other = nullptr;
+    TEST_REQUIRE(sqlite3_open(kDbPath, &other) == SQLITE_OK, "open competing connection");
+    TEST_REQUIRE(sqlite3_exec(other, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr)
+        == SQLITE_OK, "hold competing write lock");
+    std::string error;
+    CHECK(f.db->prune_orphans(error) == 0 && !error.empty(),
+          "orphan failures are returned without throwing");
+    CHECK(!f.db->reclaim_space(error) && !error.empty(), "reclaim failure is reported");
+    TEST_REQUIRE(sqlite3_exec(other, "ROLLBACK; BEGIN; SELECT count(*) FROM session;",
+        nullptr, nullptr, nullptr) == SQLITE_OK, "hold a reader snapshot");
+    f.store->append_message(sid, "user_prompted", "{}");
+    CHECK(!f.db->reclaim_space(error) && error.find("busy") != std::string::npos,
+          "a busy WAL checkpoint is not reported as success");
+    TEST_REQUIRE(sqlite3_exec(other, "ROLLBACK", nullptr, nullptr, nullptr) == SQLITE_OK,
+        "release reader snapshot");
+    sqlite3_close(other);
+    CHECK(f.db->reclaim_space(error) && error.empty(), "reclaim retries after lock release");
+    CHECK(f.store->load_messages(sid).size() == 1, "failed housekeeping preserves history");
+    return true;
+}
+
+static bool test_automatic_reclaim_threshold() {
+    Fixture f;
+    f.open();
+    std::string keep = make_session(*f.store, "/proj", "keep");
+    std::string filler = make_session(*f.store, "/proj", "filler");
+    for (int i = 0; i < 16; ++i)
+        f.store->append_message(filler, "assistant_text", std::string(128 * 1024, 'x'));
+    f.store->delete_session(filler);
+    int64_t before = 0, after = 0;
+    std::string error;
+    CHECK(f.db->reclaim_space(error, &before, &after, 1024LL * 1024),
+          "large automatic reclaim succeeds: " + error);
+    CHECK(before - after >= 1024LL * 1024, "large free space triggers automatic VACUUM");
+    CHECK(f.store->get(keep).has_value(), "automatic reclaim preserves remaining sessions");
     return true;
 }
 
@@ -461,6 +553,9 @@ int main() {
     run("clear_stale_checkpoint_contexts", test_clear_stale_checkpoint_contexts);
     run("prune_orphans", test_prune_orphans);
     run("reclaim_space", test_reclaim_space);
+    run("automatic_reclaim_threshold", test_automatic_reclaim_threshold);
+    run("housekeeping_concurrency", test_housekeeping_concurrency);
+    run("housekeeping_lock_failures", test_housekeeping_lock_failures);
     run("sweep_scratch_files", test_sweep_scratch_files);
 
     std::remove(kDbPath);
