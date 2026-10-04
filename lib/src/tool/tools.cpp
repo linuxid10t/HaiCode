@@ -1587,10 +1587,7 @@ bool is_class_def(const std::string& code, const std::string& name) {
 // Does a CODE-only line define `name` as a method on `cls`?
 bool is_method_def(const std::string& code, const std::string& name, const std::string& cls) {
     if (cls == "<global>") return false;
-    std::string esc = std::regex_replace(name + "::" + name, std::regex(R"(::)"), "::");
-    (void)esc;
     // Match  ClassName::name(  possibly with whitespace.
-    static const std::regex id_re(R"([\w:&*<>,\s]+)");
     std::string pat = R"(^\w[\w:&*<>,\s]*\s+)" + cls + "::" + name + R"(\s*\()" ;
     try {
         auto re = cached_regex(pat);

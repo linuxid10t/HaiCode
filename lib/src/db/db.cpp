@@ -839,30 +839,36 @@ std::vector<Todo> SessionStore::load_todos(const std::string& session_id) {
     return out;
 }
 
-void SessionStore::update_tool_result_by_call_id(const std::string& call_id,
+void SessionStore::update_tool_result_by_call_id(const std::string& session_id,
+                                                  const std::string& call_id,
                                                   const std::string& new_output) {
-    // Find the tool_result message whose data_json contains this call_id,
-    // then update its data_json with the new output. The data_json is a JSON
-    // object with at least {call_id, output}. We replace the 'output' field.
+    // Find this session's newest tool_result row whose call_id matches, then
+    // replace its 'output' field. The call_id is compared on the parsed JSON
+    // below; the LIKE only narrows candidates, so its '_'/'%' wildcards (and
+    // '_' is common: "toolu_...", "call_0") can't select the wrong row.
     std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt sel(db_.handle(),
         "SELECT id, data_json FROM session_message"
-        " WHERE type='tool_result' AND data_json LIKE ?");
-    sel.bind(1, "%\"call_id\":\"" + call_id + "\"%");
+        " WHERE session_id=? AND type='tool_result' AND data_json LIKE ?"
+        " ORDER BY seq DESC");
+    sel.bind(1, session_id)
+       .bind(2, "%\"call_id\":\"" + call_id + "\"%");
 
     std::string msg_id;
-    std::string data_json;
-    if (sel.expect_row()) {
-        msg_id    = sel.text(0);
-        data_json = sel.text(1);
+    nlohmann::json j;
+    while (sel.expect_row()) {
+        // An unparseable row is skipped, never rewritten.
+        auto candidate = nlohmann::json::parse(sel.text(1), nullptr, false);
+        if (candidate.is_object() && candidate.value("call_id", "") == call_id) {
+            msg_id = sel.text(0);
+            j = std::move(candidate);
+            break;
+        }
     }
 
     if (msg_id.empty()) return;
 
-    // Parse the JSON, update 'output', serialize back. A parse failure
-    // leaves the row untouched.
     try {
-        auto j = nlohmann::json::parse(data_json);
         j["output"] = new_output;
         std::string updated = j.dump();
         DbStmt upd(db_.handle(),
@@ -872,7 +878,7 @@ void SessionStore::update_tool_result_by_call_id(const std::string& call_id,
            .bind(3, msg_id)
            .expect_done();
     } catch (const nlohmann::json::exception&) {
-        // Parse error — no-op, don't touch the row.
+        // Serialization error (e.g. invalid UTF-8) — don't touch the row.
     }
 }
 

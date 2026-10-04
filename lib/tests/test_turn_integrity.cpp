@@ -674,6 +674,88 @@ static void test_stop(const std::string& reason) {
     TEST_REQUIRE(provider->count == 2, "next request succeeds");
 }
 
+// ask_user with a call id the server reuses (local OpenAI-compatible servers
+// may send `call_0` every turn). The reply must land on the asking session's
+// newest placeholder row: the next request carries the user's answer, and no
+// earlier row — same session or another — is rewritten.
+class AskProvider : public Provider {
+public:
+    std::string id() const override { return "ask"; }
+    void cancel(const std::string& = "") override {}
+    std::vector<std::string> list_models(std::string&) override { return {}; }
+    void stream(const LLMRequest& req, StreamCallbacks cb, const std::string& = "") override {
+        check_exchange(req.messages);
+        // A tool_result in the last user turn means the ask was answered (a
+        // status block may trail it in the same turn).
+        const json& last = req.messages.back();
+        if (last.value("role", "") == "user" && last["content"].is_array()) {
+            for (const auto& block : last["content"]) {
+                if (block.value("type", "") != "tool_result") continue;
+                seen.push_back(block["content"].get<std::string>());
+                cb.on_text_delta("text", "ok");
+                cb.on_finish(FinishReason::EndTurn, {}, {});
+                return;
+            }
+        }
+        cb.on_finish(FinishReason::ToolUse, {}, {{"call_0", "ask_user",
+            {{"question", "Which?"}, {"options", {"a", "b"}}}, false, {}}});
+    }
+    std::vector<std::string> seen;
+};
+
+static void test_ask_user_reused_call_id() {
+    Database db(":memory:");
+    db.migrate();
+    SessionStore store(db);
+    ProviderRegistry providers;
+    auto provider = std::make_shared<AskProvider>();
+    providers.register_provider(provider);
+    ToolRegistry tools;
+    register_builtin_tools(tools);
+    PermissionGate gate;
+    SessionEventBus bus;
+    AppConfig config;
+    config.default_mode = "build";
+    config.autoname_sessions = false;
+    SessionEngine engine(store, providers, tools, gate, bus, config);
+    std::string answer;
+    bus.subscribe(events::EventType::AskUserRequested, [&](const json& ev) {
+        engine.reply_to_ask(ev["session_id"].get<std::string>(),
+                            ev["call_id"].get<std::string>(), answer);
+    });
+    auto a = engine.create_session("/tmp", "build", "test", "ask");
+    auto b = engine.create_session("/tmp", "build", "test", "ask");
+    auto turn = [&](const std::string& sid, const std::string& reply) {
+        answer = reply;
+        engine.submit_prompt(sid, "ask me");
+        wait_idle(engine, sid);
+    };
+    turn(a, "alpha-1");
+    turn(a, "alpha-2");
+    turn(b, "beta");
+
+    TEST_REQUIRE(provider->seen.size() == 3, "each ask_user reply resumed the loop");
+    const char* expected[] = {"alpha-1", "alpha-2", "beta"};
+    for (size_t i = 0; i < 3; ++i)
+        TEST_REQUIRE(json::parse(provider->seen[i], nullptr, false)
+                .value("answer", "") == expected[i],
+            "the answer, not the placeholder, reaches the model");
+    auto outputs = [&](const std::string& sid) {
+        std::vector<std::string> out;
+        for (const auto& m : store.load_messages(sid)) if (m.type == "tool_result")
+            out.push_back(json::parse(json::parse(m.data_json).value("output", ""),
+                nullptr, false).value("answer", "(placeholder)"));
+        return out;
+    };
+    TEST_REQUIRE((outputs(a) == std::vector<std::string>{"alpha-1", "alpha-2"}),
+        "each turn's row holds its own answer");
+    TEST_REQUIRE((outputs(b) == std::vector<std::string>{"beta"}),
+        "another session's reused call id stays in its own session");
+    bus.unsubscribe_all();
+    engine.shutdown();
+    std::cout << "[OK] ask_user reply with a reused call id\n";
+}
+
 int main() {
     test_repair();
     test_stop("permission denied");
@@ -692,5 +774,6 @@ int main() {
     test_queue_during_approval();
     test_prepared_queue();
     test_title_cancel_and_stale();
+    test_ask_user_reused_call_id();
     std::cout << "turn integrity tests passed\n";
 }

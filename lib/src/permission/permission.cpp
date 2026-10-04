@@ -561,6 +561,23 @@ ToolResult ToolRegistry::execute(const std::string& name,
     return r;
 }
 
+// The directory a glob pattern reads from: its literal prefix before the
+// first wildcard, joined onto `working_dir` when relative, lexically
+// normalized. Shared by the system-root and project-dir glob exemptions.
+static std::string glob_base_dir(const nlohmann::json& input,
+                                 const std::string& working_dir) {
+    std::string pattern = input.value("pattern", "");
+    size_t wild = pattern.find_first_of("*?[");
+    std::string prefix = wild == std::string::npos ? pattern : pattern.substr(0, wild);
+    if (!prefix.empty() && prefix[0] != '/') {
+        std::string base = working_dir;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        prefix = base + "/" + prefix;
+    }
+    if (prefix.empty()) prefix = working_dir;
+    return normalize_path(prefix);
+}
+
 AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
                                   const nlohmann::json& input,
                                   const ToolContext& ctx,
@@ -592,16 +609,7 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
                 return builtin("Read within trusted system root");
         }
         if (name == "glob") {
-            std::string pattern = input.value("pattern", "");
-            size_t wild = pattern.find_first_of("*?[");
-            std::string prefix = wild == std::string::npos ? pattern : pattern.substr(0, wild);
-            if (!prefix.empty() && prefix[0] != '/') {
-                std::string base = ctx.working_dir;
-                while (!base.empty() && base.back() == '/') base.pop_back();
-                prefix = base + "/" + prefix;
-            }
-            if (prefix.empty()) prefix = ctx.working_dir;
-            std::string base = normalize_path(prefix);
+            std::string base = glob_base_dir(input, ctx.working_dir);
             if (is_within_always_readable_root(base))
                 return builtin("Glob within trusted system root");
         }
@@ -621,16 +629,7 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
             }
         }
         if (name == "glob") {
-            std::string pattern = input.value("pattern", "");
-            size_t wild = pattern.find_first_of("*?[");
-            std::string prefix = wild == std::string::npos ? pattern : pattern.substr(0, wild);
-            if (!prefix.empty() && prefix[0] != '/') {
-                std::string base = ctx.working_dir;
-                while (!base.empty() && base.back() == '/') base.pop_back();
-                prefix = base + "/" + prefix;
-            }
-            if (prefix.empty()) prefix = ctx.working_dir;
-            std::string base = normalize_path(prefix);
+            std::string base = glob_base_dir(input, ctx.working_dir);
             if (path_resolves_within(base, ctx.working_dir)) {
                 exemption = builtin("Glob within project directory");
                 has_exemption = true;

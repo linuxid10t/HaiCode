@@ -2706,7 +2706,7 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                     pa.question   = question;
                     pa.options    = options;
                     pa.replied    = false;
-                    pending_ask_[call.id] = pa;
+                    pending_ask_[ask_key(session_id, call.id)] = pa;
                 }
 
                 nlohmann::json ev;
@@ -2719,18 +2719,19 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                 std::string answer;
                 {
                     std::unique_lock<std::mutex> lock(ask_mu_);
-                    const std::string& cid = call.id;
-                    asking_cv_.wait(lock, [this, cid]() {
-                        auto it = pending_ask_.find(cid);
+                    const std::string key = ask_key(session_id, call.id);
+                    asking_cv_.wait(lock, [this, &key]() {
+                        auto it = pending_ask_.find(key);
                         return it != pending_ask_.end() && it->second.replied;
                     });
-                    answer = pending_ask_[call.id].answer;
-                    pending_ask_.erase(call.id);
+                    answer = pending_ask_[key].answer;
+                    pending_ask_.erase(key);
                 }
 
                 // Overwrite the placeholder tool_result row with the real answer.
                 nlohmann::json reply_out = {{"answer", answer}};
-                store_.update_tool_result_by_call_id(call.id, reply_out.dump(2));
+                store_.update_tool_result_by_call_id(session_id, call.id,
+                                                     reply_out.dump(2));
 
                 // Re-publish ToolSuccess so the UI swaps the placeholder bubble
                 // for the user's picked answer.
@@ -2915,8 +2916,8 @@ void SessionEngine::reply_to_ask(const std::string& session_id,
                                   const std::string& call_id,
                                   const std::string& answer) {
     std::lock_guard<std::mutex> lock(ask_mu_);
-    auto it = pending_ask_.find(call_id);
-    if (it != pending_ask_.end() && it->second.session_id == session_id) {
+    auto it = pending_ask_.find(ask_key(session_id, call_id));
+    if (it != pending_ask_.end()) {
         it->second.answer = answer;
         it->second.replied = true;
         asking_cv_.notify_all();
