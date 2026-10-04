@@ -345,11 +345,14 @@ public:
                        const std::vector<Todo>& todos);
     std::vector<Todo> load_todos(const std::string& session_id);
 
-    // Update the 'output' field of the tool_result row matching `call_id`.
-    // Used by the engine to replace the placeholder output echoed by ask_user
-    // with the user's real answer after they reply in the UI. No-op if no
-    // row matches.
-    void update_tool_result_by_call_id(const std::string& call_id,
+    // Update the 'output' field of `session_id`'s newest tool_result row
+    // matching `call_id`. Used by the engine to replace the placeholder output
+    // echoed by ask_user with the user's real answer after they reply in the
+    // UI. Scoped to the session and newest-first because OpenAI-compatible
+    // servers pass their own call ids through, and some reuse short ids
+    // (`call_0`) across turns and sessions. No-op if no row matches.
+    void update_tool_result_by_call_id(const std::string& session_id,
+                                       const std::string& call_id,
                                        const std::string& new_output);
 
 private:

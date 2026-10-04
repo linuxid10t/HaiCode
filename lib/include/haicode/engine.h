@@ -452,8 +452,14 @@ private:
         std::string answer;
         bool replied = false;
     };
+    // Keyed by ask_key(session_id, call_id), not the call id alone: providers
+    // pass server-chosen call ids through, and some reuse them across sessions.
     std::map<std::string, PendingAsk> pending_ask_;
     std::mutex ask_mu_;
+    static std::string ask_key(const std::string& session_id,
+                               const std::string& call_id) {
+        return session_id + '\n' + call_id;
+    }
     std::condition_variable asking_cv_;
 
     // Shutdown state, guarded by mu_. Set by ~SessionEngine() before it
