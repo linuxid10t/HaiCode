@@ -69,8 +69,8 @@ R"HPCODE(
 - grep: Recursive regex search; use `include` to filter by filename glob.
 - find: Recursive file search with name/type/depth/mtime/size filters; use when `glob` is insufficient.
 - symbols: Find C/C++ symbol definitions, references, and callers. Faster than grep for tracing fields and functions.
-- diff: Unified diff of a file against proposed new content; use to preview edits before applying.
-- git: Run a git subcommand in the project directory, passing extra flags via `args`.
+- diff: Unified diff of a file against proposed new content; use to preview edits before applying. It does not compare revisions — use `git diff` for that.
+- git: Run a git subcommand in the project directory, passing extra flags via `args`. Read-only invocations (status, diff, log, show, blame, grep, ...) run without approval; output over 100 KB is truncated, so bound `log` with `-n` and diff large changes per file.
 - process: Inspect and manage running processes (list, kill, check_port).
 - external_terminal: Open a command in a new Haiku Terminal window; for interactive programs (editors, ncurses apps, REPLs) that `bash` cannot host.
 - web_search: Search the web. Use FIRST for research — it's cheap; read the snippets before fetching anything.
@@ -200,15 +200,18 @@ constexpr const char* kAgentsMdStarterTemplate = R"MD(<!-- This file is appended
 
 // Appended to the system prompt only when the session is in Plan mode.
 // The engine filters out state-modifying tools (bash/write/edit/external_terminal)
-// when this block is active, so the model literally cannot attempt them.
+// when this block is active, so the model literally cannot attempt them, and
+// refuses any git invocation git_invocation_is_readonly() does not accept.
 constexpr const char* kPlanModeInstructions = R"HPCODE(
 
 # Plan mode active
 
-You are in PLAN MODE. The user wants a researched implementation strategy before any code changes.
+You are in PLAN MODE. The session is read-only. The user wants either a researched implementation strategy before any code changes, or — when they ask for a review, analysis, or explanation — a researched answer.
 
-- Available tools this turn: read, glob, grep, ls, find, diff, todo_write, ask_user, web_search, web_extract, propose_plan, discard_plan.
-- bash, write, edit, external_terminal are NOT available.
+- Available tools this turn: read, glob, grep, ls, find, symbols, git (read-only), diff, todo_write, ask_user, web_search, web_extract, screenshot (vision models only), propose_plan, discard_plan.
+- bash, write, edit, external_terminal are NOT available. `git` only runs read-only invocations — status, diff, log, show, blame, grep, ls-files, ls-tree, cat-file, rev-parse, rev-list, merge-base, for-each-ref, describe, shortlog, and the listing forms of branch/tag/stash; anything that could modify the repository is refused.
+- **Reviews and questions are answered directly.** If the user asks you to review changes, a branch, a commit, or a diff, or to explain or analyze code, do NOT call `propose_plan` — it is only for implementation strategies. Research, then reply with your findings: most severe first, each with the file path, the function or symbol, what is wrong, and why it matters. If the user then wants the findings fixed, propose a plan for that.
+- **Reviewing with git:** find the base (`git merge-base HEAD main`, or `git branch -a` / `git log --oneline -n 20` to identify it); list the commits (`git log --oneline <base>..HEAD`); get the shape (`git diff --stat <base>...HEAD`); then read the diff one file at a time (`git diff <base>...HEAD -- <path>`) — a whole-branch diff is truncated at 100 KB. For uncommitted work use `git status`, `git diff` (unstaged), and `git diff --cached` (staged). `git show <rev>:<path>` prints a file as it was before the change; `git show <rev>` shows one commit; `git blame -L <start>,<end> <path>` narrows blame to lines. Always bound `git log` with `-n`. Read the surrounding code with `read`/`symbols`, not just the diff hunks.
 - **Before researching or proposing:** if the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — call `ask_user` with a focused question and 2-5 concrete options, then stop and wait for the reply. Do not ask about things you can determine by reading the codebase, and do not ask more than one question before proposing.
 - Research thoroughly with read-only tools before proposing. For C/C++ projects, use `symbols` to locate definitions, call sites, and cross-references — it is faster and more reliable than grepping for line numbers. Use `web_search` when your training data may be stale.
 - In the plan, reference functions and symbol names rather than line numbers. Line numbers drift the moment any other edit lands; symbol names do not. Do not mark line numbers as "verified" — the implementing agent will use `symbols`/`grep` to find current locations.
@@ -247,7 +250,7 @@ The plan has been approved. You are now in Build mode. Begin implementing the pl
 // system-prompt change and often keeps acting like it's still in Build mode
 // because prior conversation history is full of Build-mode tool calls.
 constexpr const char* kSwitchedToPlanMessage = R"HPCODE(
-Switching to Plan mode. Stop any in-progress edits. From here on, research and propose a plan instead of modifying files — bash, write, edit, and external_terminal are no longer available. When ready, call propose_plan.
+Switching to Plan mode. Stop any in-progress edits. From here on, research and propose a plan instead of modifying files — bash, write, edit, and external_terminal are no longer available, and git is read-only. When ready, call propose_plan. If the user asks for a review or an explanation rather than a change, answer directly instead.
 )HPCODE";
 
 // Injected when the user manually toggles back into Build mode (not via

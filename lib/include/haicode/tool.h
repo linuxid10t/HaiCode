@@ -155,6 +155,8 @@ private:
 // everything; Plan and Chat use fail-closed allowlists. Used both to filter
 // the wire request (engine) and to validate each returned tool call before
 // execution (ToolRegistry::execute_impl) — so the two can never diverge.
+// Plan mode lists `git`, but ToolRegistry::evaluate additionally refuses
+// any git invocation git_invocation_is_readonly() does not accept.
 bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode);
 
 void set_offline_mode(bool offline);
@@ -162,12 +164,17 @@ bool offline_mode();
 bool tool_available(const std::string& tool_name, SessionMode mode);
 
 // Classify a complete git invocation (subcommand + args) as read-only or not.
-// Fail-closed: anything that could mutate the repo or write a file (branch
-// with a positional arg, `stash pop/clear`, `git tag v1`, `--output=...`)
-// returns false and must go through the permission gate. Used by the
-// read-only always-allow path in ToolRegistry::execute_impl.
+// Fail-closed: anything that could mutate the repo, write a file, run a
+// program, or read a file outside `working_dir` (branch with a positional
+// arg, `stash pop/clear`, `git tag v1`, `--output=...`, `--ext-diff`,
+// `--textconv`, `--no-index`, `blame --contents`, `grep -O`, a `diff` path
+// outside the project) returns false and must go through the permission
+// gate. Used by the read-only always-allow path in ToolRegistry::evaluate
+// and by Plan mode's read-only git restriction. With an empty `working_dir`
+// the outside-path check is lexical (absolute or `..`-escaping paths fail).
 bool git_invocation_is_readonly(const std::string& subcommand,
-                                const std::vector<std::string>& args);
+                                const std::vector<std::string>& args,
+                                const std::string& working_dir = std::string());
 
 // True when a bash Allow pattern carrying glob metacharacters authorizes the
 // whole `command`: the command is split quote-aware at `;`, `&&`/`||`, `|`,

@@ -4,6 +4,7 @@
 #include <climits>
 #include <fnmatch.h>
 #include <cstdlib>
+#include <cstring>
 #include <set>
 #include <string>
 #include <vector>
@@ -324,12 +325,14 @@ bool path_is_always_readable(const std::string& path,
 //
 // Plan and Chat use fail-closed allowlists: anything not explicitly safe for
 // the mode is refused. Build mode has no restriction. The engine reuses this
-// for the wire-request filter so the two checks can never diverge.
+// for the wire-request filter so the two checks can never diverge. `git` is
+// listed for Plan because reviews need history and diffs; ToolRegistry::
+// evaluate narrows it to read-only invocations there.
 bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode) {
     switch (mode) {
     case SessionMode::Plan: {
         static const std::set<std::string> plan_allowed = {
-            "read", "glob", "grep", "ls", "find",
+            "read", "glob", "grep", "ls", "find", "symbols", "git",
             "web_search", "web_extract",
             "diff", "todo_write", "ask_user",
             "propose_plan", "discard_plan",
@@ -366,24 +369,111 @@ bool tool_available(const std::string& tool_name, SessionMode mode) {
         && !(offline_mode() && (tool_name == "web_search" || tool_name == "web_extract"));
 }
 
+// Long options that turn an otherwise read-only invocation into a file
+// write, a program run, or a read of an arbitrary file.
+static const char* const kGitUnsafeLongOptions[] = {
+    "--output",               // diff/log family: writes the output to a file
+    "--ext-diff",             // runs diff.external / diff.<driver>.command
+    "--textconv",             // runs diff.<driver>.textconv
+    "--filters",              // cat-file: runs smudge/clean filter drivers
+    "--no-index",             // diff/grep: arbitrary filesystem paths
+    "--contents",             // blame: annotates an arbitrary file's contents
+    "--ignore-revs-file",     // blame: reads an arbitrary file
+    "--open-files-in-pager",  // grep -O: runs a program
+    "--file",                 // grep -f: reads patterns from an arbitrary file
+};
+
+// True when `arg` names one of kGitUnsafeLongOptions, exactly or as an
+// abbreviation: parse-options subcommands (blame, grep, cat-file) accept
+// any unambiguous prefix, so `--content=/etc/passwd` means `--contents`
+// and `cat-file --text` means `--textconv`. An exact real option wins over
+// the abbreviation, so a subcommand's own options that happen to prefix an
+// unsafe one stay allowed — but only for the subcommands that have them.
+static bool git_arg_is_unsafe_long_option(const std::string& subcommand,
+                                          const std::string& arg) {
+    if (arg.size() <= 2 || arg.compare(0, 2, "--") != 0) return false;
+    std::string name = arg.substr(0, arg.find('='));
+    if (name == "--text" && subcommand != "cat-file") return false;
+    if (name == "--ignore-rev" && subcommand == "blame") return false;
+    if (name == "--filter" && subcommand == "rev-list") return false;
+    for (const char* opt : kGitUnsafeLongOptions) {
+        std::string o(opt);
+        if (name.size() <= o.size() && o.compare(0, name.size(), name) == 0)
+            return true;
+    }
+    return false;
+}
+
+// Short-option clusters that run a program or read an arbitrary file:
+// `grep -O<cmd>` opens a pager program, `grep -f <file>` reads a pattern
+// file, `blame -S <file>` reads a revs file. A value-taking letter (`grep
+// -e`, `blame -L`) ends the cluster — the rest is its value — and with
+// nothing after it, the next argument is the value; `*value_next` reports
+// that so the caller skips checking it as an option.
+static bool git_short_cluster_is_unsafe(const std::string& subcommand,
+                                        const std::string& arg, bool* value_next) {
+    *value_next = false;
+    if (arg.size() < 2 || arg[0] != '-' || arg[1] == '-') return false;
+    const char* unsafe = subcommand == "grep" ? "Of" : subcommand == "blame" ? "S" : "";
+    char value_letter = subcommand == "grep" ? 'e' : subcommand == "blame" ? 'L' : 0;
+    for (size_t i = 1; i < arg.size(); ++i) {
+        if (arg[i] != '\0' && std::strchr(unsafe, arg[i])) return true;
+        if (arg[i] == value_letter) {
+            *value_next = i + 1 == arg.size();
+            return false;
+        }
+    }
+    return false;
+}
+
+// True when a positional argument names a path outside `working_dir`. git
+// diff silently switches to --no-index (and prints any file it can read)
+// when one of its paths lies outside the work tree. Revisions and ranges
+// (`HEAD~1`, `main...topic`) resolve lexically inside, so they pass.
+static bool git_arg_escapes(const std::string& arg, const std::string& working_dir) {
+    if (arg.empty()) return false;
+    if (working_dir.empty()) {
+        if (arg[0] == '/') return true;
+        std::string n = normalize_path(arg);
+        return n == ".." || n.rfind("../", 0) == 0;
+    }
+    std::string p = arg[0] == '/' ? arg : working_dir + "/" + arg;
+    return !path_resolves_within(p, working_dir);
+}
+
 // ---- git_invocation_is_readonly ----
 //
-// True only for invocations that provably cannot mutate the repo or write
-// files. The whole invocation is classified — the subcommand alone is not
+// True only for invocations that provably cannot mutate the repo, write
+// files, run a program, or read outside the project (the GitTool adds the
+// -c/flag hardening that keeps repo config from running drivers on these).
+// The whole invocation is classified — the subcommand alone is not
 // enough (`git branch -D foo` deletes, `git stash clear` wipes). Anything
 // unrecognized fails closed and goes through the gate.
 bool git_invocation_is_readonly(const std::string& subcommand,
-                                const std::vector<std::string>& args) {
-    // Any of these can redirect git's output to a file, which is a write.
+                                const std::vector<std::string>& args,
+                                const std::string& working_dir) {
+    bool skip_value = false;
     for (const auto& a : args) {
-        if (a == "--output" || a.rfind("--output=", 0) == 0)
-            return false;
+        if (skip_value) { skip_value = false; continue; }
+        if (git_arg_is_unsafe_long_option(subcommand, a)) return false;
+        if (git_short_cluster_is_unsafe(subcommand, a, &skip_value)) return false;
     }
 
-    // Unconditionally read-only subcommands (protected from `--output` above).
+    if (subcommand == "diff") {
+        bool after_separator = false;
+        for (const auto& a : args) {
+            if (!after_separator && a == "--") { after_separator = true; continue; }
+            if (!after_separator && !a.empty() && a[0] == '-') continue;
+            if (git_arg_escapes(a, working_dir)) return false;
+        }
+    }
+
+    // Unconditionally read-only subcommands (protected by the checks above).
     static const std::set<std::string> always = {
         "status", "diff", "log", "show", "blame",
         "ls-files", "shortlog", "describe", "rev-parse",
+        "merge-base", "rev-list", "ls-tree", "cat-file", "grep",
+        "for-each-ref",
     };
     if (always.count(subcommand)) return true;
 
@@ -596,6 +686,22 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
             "[offline mode] tool '" + name + "' is unavailable while offline",
             "offline", -1, true};
 
+    std::vector<std::string> git_args;
+    if (name == "git" && input.contains("args") && input["args"].is_array())
+        for (const auto& arg : input["args"])
+            if (arg.is_string()) git_args.push_back(arg.get<std::string>());
+    const std::string git_sub = name == "git" ? input.value("subcommand", "") : "";
+    // Plan mode is read-only: git is offered there for reviews, but no rule,
+    // grant, or toggle may let it run a mutating invocation — same hard
+    // boundary as the allowlist above.
+    if (name == "git" && ctx.mode == SessionMode::Plan
+            && !git_invocation_is_readonly(git_sub, git_args, ctx.working_dir))
+        return {PermissionEffect::Deny,
+            "[mode restriction] git is read-only in plan mode; 'git " + git_sub
+                + "' with these arguments can modify the repository, run a "
+                  "program, or read outside the project",
+            "mode", -1, true};
+
     auto builtin = [](const std::string& reason) {
         return AuthorizationDecision{PermissionEffect::Allow, reason, "builtin"};
     };
@@ -636,11 +742,7 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
             }
         }
         if (name == "git") {
-            std::vector<std::string> args;
-            if (input.contains("args") && input["args"].is_array())
-                for (const auto& arg : input["args"])
-                    if (arg.is_string()) args.push_back(arg.get<std::string>());
-            if (git_invocation_is_readonly(input.value("subcommand", ""), args)) {
+            if (git_invocation_is_readonly(git_sub, git_args, ctx.working_dir)) {
                 exemption = builtin("Read-only Git invocation");
                 has_exemption = true;
             }

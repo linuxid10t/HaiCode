@@ -901,6 +901,76 @@ static bool git_classifier_unit() {
     CHECK(!ro("tag", {"-d", "v1.0"}), "git tag -d deletes — gated");
     CHECK(!ro("tag", {"-a", "v1", "-m", "msg"}), "git tag -a creates — gated");
 
+    // Review subcommands added for Plan mode: read-only.
+    CHECK(ro("merge-base", {"HEAD", "main"}), "git merge-base is read-only");
+    CHECK(ro("rev-list", {"--count", "main..HEAD"}), "git rev-list is read-only");
+    CHECK(ro("ls-tree", {"-r", "HEAD"}), "git ls-tree is read-only");
+    CHECK(ro("cat-file", {"-p", "HEAD:README.md"}), "git cat-file -p is read-only");
+    CHECK(ro("grep", {"-n", "-i", "TODO"}), "git grep -n -i is read-only");
+    CHECK(ro("for-each-ref", {"--format=%(refname)"}), "git for-each-ref is read-only");
+    CHECK(!ro("range-diff", {"a..b", "c..d"}),
+          "range-diff runs textconv in its internal log -p — always gated");
+
+    // Options that write, run a program, or read an arbitrary file.
+    CHECK(!ro("diff", {"--ext-diff"}), "diff --ext-diff runs diff.external — gated");
+    CHECK(!ro("log", {"-p", "--textconv"}), "log --textconv runs a driver — gated");
+    CHECK(!ro("show", {"--textconv", "HEAD"}), "show --textconv runs a driver — gated");
+    CHECK(!ro("cat-file", {"--textconv", "HEAD:f"}), "cat-file --textconv — gated");
+    CHECK(!ro("cat-file", {"--filters", "HEAD:f"}), "cat-file --filters runs filters — gated");
+    CHECK(!ro("diff", {"--no-index", "a", "b"}), "diff --no-index reads anywhere — gated");
+    CHECK(!ro("grep", {"--no-index", "x"}), "grep --no-index reads anywhere — gated");
+    CHECK(!ro("blame", {"--contents", "/etc/passwd", "f"}),
+          "blame --contents annotates an arbitrary file — gated");
+    CHECK(!ro("blame", {"--content=/etc/passwd", "f"}),
+          "abbreviated --content= is parsed as --contents by git — gated");
+    CHECK(!ro("blame", {"--ignore-revs-file=/x", "f"}), "blame --ignore-revs-file — gated");
+    CHECK(!ro("blame", {"-S", "/x", "f"}), "blame -S reads a revs file — gated");
+    CHECK(!ro("grep", {"-Ovim", "x"}), "grep -O runs a program — gated");
+    CHECK(!ro("grep", {"-nO", "x"}), "grep -O inside a short cluster — gated");
+    CHECK(!ro("grep", {"--open-files-in-pager=sh", "x"}), "grep --open-files-in-pager — gated");
+    CHECK(!ro("grep", {"--open", "x"}), "abbreviated --open-files-in-pager — gated");
+    CHECK(!ro("grep", {"-f", "/etc/passwd"}), "grep -f reads a pattern file — gated");
+    CHECK(!ro("diff", {"--outp=/tmp/x"}), "abbreviated --output — gated");
+    CHECK(ro("diff", {"--no-ext-diff", "--no-textconv"}), "the disabling forms stay read-only");
+    CHECK(ro("diff", {"--text"}), "--text is a real diff option, not an abbreviation of --textconv");
+    CHECK(ro("blame", {"--text", "f"}), "--text is a real blame option");
+    CHECK(!ro("cat-file", {"--text", "HEAD:f"}),
+          "cat-file has no --text: git expands it to --textconv — gated");
+    CHECK(!ro("cat-file", {"--filter", "HEAD:f"}),
+          "cat-file --filter expands to --filters — gated");
+    CHECK(ro("rev-list", {"--filter=blob:none", "--objects", "HEAD"}),
+          "--filter is a real rev-list option");
+    CHECK(ro("grep", {"-e", "-foo"}), "a -e value is a pattern, not an option cluster");
+    CHECK(ro("grep", {"-ie", "-Oops"}), "a trailing -e takes the next arg as its value");
+    CHECK(ro("grep", {"-eOops"}), "an attached -e value is not an option cluster");
+    CHECK(!ro("grep", {"-e", "x", "-f", "/etc/passwd"}),
+          "the arg after the -e value is checked again — gated");
+    CHECK(ro("blame", {"-L", "/^Sig/,+3", "f"}), "a -L value is a range, not -S");
+    CHECK(ro("blame", {"-L/^Sig/,+3", "f"}), "an attached -L value is a range, not -S");
+    CHECK(!ro("blame", {"-wS", "/x", "f"}), "-S inside a blame cluster — gated");
+    CHECK(ro("blame", {"--ignore-rev", "abc", "f"}),
+          "--ignore-rev is a real option, not an abbreviation of --ignore-revs-file");
+    CHECK(ro("log", {"-S", "needle"}), "log -S is pickaxe, not blame's revs file");
+    CHECK(ro("diff", {"--output-indicator-new=>"}), "--output-indicator-* does not write");
+
+    // diff paths outside the project switch git to --no-index (lexical
+    // check without a working dir; resolved check with one, below).
+    CHECK(!ro("diff", {"/etc/passwd", "/dev/null"}), "diff of absolute outside paths — gated");
+    CHECK(!ro("diff", {"--", "../secret", "x"}), "diff of a ..-escaping path — gated");
+    CHECK(!ro("diff", {"--stat", "/etc/hosts", "README.md"}), "one outside path is enough — gated");
+    CHECK(ro("diff", {"main...HEAD", "--", "src/a.cpp"}), "branch diff of a project path is read-only");
+    CHECK(ro("diff", {"HEAD~1"}), "revision diff is read-only");
+    CHECK(ro("diff", {"--cached"}), "staged diff is read-only");
+    CHECK(git_invocation_is_readonly("diff", {"src/../README.md"}, "/tmp/tfc_wd"),
+          "in-project path with .. that stays inside is read-only");
+    CHECK(!git_invocation_is_readonly("diff", {"../other/x", "a"}, "/tmp/tfc_wd"),
+          "..-escape relative to the working dir — gated");
+    CHECK(!git_invocation_is_readonly("diff", {"/tmp/elsewhere", "a"}, "/tmp/tfc_wd"),
+          "absolute path outside the working dir — gated");
+    CHECK(git_invocation_is_readonly("diff", {"/tmp/tfc_wd/a", "b"}, "/tmp/tfc_wd"),
+          "absolute path inside the working dir is read-only");
+    CHECK(ro("log", {"--oneline", "-n", "5", "--", "src"}), "non-diff paths are not checked");
+
     // Everything else fails closed.
     CHECK(!ro("reset", {"--hard"}),   "git reset mutates — gated");
     CHECK(!ro("checkout", {"main"}),  "git checkout mutates — gated");
@@ -1111,6 +1181,159 @@ static bool git_readonly_ignores_repo_diff_drivers() {
     std::remove(script.c_str());
     std::remove(marker.c_str());
     std::cout << "[OK] read-only git ignores repo diff drivers/hooks config\n";
+    return true;
+}
+
+// Hostile repo: diff.external, a textconv driver, gpg.program with
+// log.showSignature, a signed commit, a stash, and a secret outside the
+// tree. Every escape hatch must be gated (denied under the deny-callback
+// gate, nothing run, nothing leaked), and the hardened read-only forms —
+// including the review subcommands — must still bypass and return real
+// output without running any driver.
+static bool git_readonly_closes_escape_hatches() {
+    const std::string repo = "/tmp/tfc_git_hatch_repo";
+    const std::string secret = "/tmp/tfc_git_hatch_secret.txt";
+    const std::string script = "/tmp/tfc_git_hatch.sh";
+    const std::string marker = "/tmp/tfc_git_hatch_marker";
+    system(("rm -rf " + repo).c_str());
+    std::remove(marker.c_str());
+    ::mkdir(repo.c_str(), 0755);
+    write_file(secret, "outside-secret\n");
+    // One script for every driver: records that it ran, echoes its input
+    // file (so textconv output still looks plausible), signs nothing.
+    write_file(script, "#!/bin/sh\necho ran >> " + marker
+                       + "\n[ -f \"$1\" ] && cat \"$1\"\nexit 0\n");
+    write_file(repo + "/data.bin", "one\n");
+    write_file(repo + "/.gitattributes", "*.bin diff=evil\n");
+    const std::string g = "git -c user.name=t -c user.email=t@t ";
+    system(("chmod +x " + script + " && cd " + repo + " && git init -q -b main && "
+            + g + "add . && " + g + "commit -q -m one && "
+            "echo two >> data.bin && " + g + "commit -q -am two && "
+            // Commit carrying a gpgsig header: log verifies it via gpg.program.
+            "printf 'tree %s\\nparent %s\\nauthor t <t@t> 1 +0000\\n"
+            "committer t <t@t> 1 +0000\\ngpgsig -----BEGIN PGP SIGNATURE-----\\n"
+            " \\n AAAA\\n -----END PGP SIGNATURE-----\\n\\nsigned\\n' "
+            "$(git rev-parse HEAD^{tree}) $(git rev-parse HEAD) > /tmp/tfc_git_hatch_c && "
+            "git update-ref refs/heads/signed "
+            "$(git hash-object -t commit -w /tmp/tfc_git_hatch_c) && "
+            "rm -f /tmp/tfc_git_hatch_c && "
+            "echo three >> data.bin && " + g + "stash -q && "
+            "git config diff.external " + script + " && "
+            "git config diff.evil.textconv " + script + " && "
+            "git config gpg.program " + script + " && "
+            "git config log.showSignature true").c_str());
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_callback_deny_gate();  // rules-free: only exemptions pass
+    haicode::ToolContext ctx;
+    ctx.working_dir = repo;
+    struct stat st;
+    auto ran = [&]() { return ::stat(marker.c_str(), &st) == 0; };
+    auto git = [&](const std::string& sub, std::vector<std::string> args) {
+        return reg.execute("git", {{"subcommand", sub}, {"args", args}}, ctx, gate);
+    };
+
+    // Escape hatches: gated (denied by the callback), never executed.
+    struct Hatch { const char* what; std::string sub; std::vector<std::string> args; };
+    const std::vector<Hatch> hatches = {
+        {"diff --ext-diff re-enabling diff.external", "diff", {"--ext-diff", "HEAD~1"}},
+        {"log --textconv re-enabling the driver", "log", {"-p", "-n", "1", "--textconv"}},
+        {"implicit --no-index diff of an outside file", "diff", {secret, "/dev/null"}},
+        {"explicit --no-index", "diff", {"--no-index", secret, "/dev/null"}},
+        {"blame --contents of an outside file", "blame", {"--contents", secret, "data.bin"}},
+        {"abbreviated blame --content=", "blame", {"--content=" + secret, "data.bin"}},
+        {"grep -O running a program", "grep", {"-O" + script, "one"}},
+        {"cat-file --filters", "cat-file", {"--filters", "HEAD:data.bin"}},
+        {"cat-file --text (git expands it to --textconv)", "cat-file", {"--text", "HEAD:data.bin"}},
+        {"range-diff (internal log -p runs textconv)", "range-diff", {"HEAD~1..HEAD", "HEAD~1..HEAD"}},
+    };
+    for (const auto& h : hatches) {
+        auto r = git(h.sub, h.args);
+        CHECK(!r.success && r.denied, std::string(h.what) + " must be gated");
+        CHECK(r.output.find("outside-secret") == std::string::npos
+                  && r.error.find("outside-secret") == std::string::npos,
+              std::string(h.what) + " must not leak the outside file");
+    }
+    CHECK(!ran(), "no driver may run for a gated invocation");
+
+    // Hardened read-only forms: bypass, real output, no driver run.
+    auto bl = git("blame", {"data.bin"});
+    CHECK(bl.success && bl.output.find("two") != std::string::npos,
+          "blame bypasses and annotates: " + bl.error);
+    CHECK(!ran(), "blame must not run the repo's textconv driver");
+    auto sl = git("stash", {"list", "-p"});
+    CHECK(sl.success && sl.output.find("+three") != std::string::npos,
+          "stash list -p bypasses and shows the stash: " + sl.error);
+    CHECK(!ran(), "stash list -p must not run the repo's textconv driver");
+    auto lg = git("log", {"-n", "1", "signed"});
+    CHECK(lg.success && lg.output.find("signed") != std::string::npos,
+          "log of a signed commit bypasses: " + lg.error);
+    auto fmt = git("log", {"-n", "1", "--format=%G?", "signed"});
+    CHECK(fmt.success, "log --format=%G? bypasses: " + fmt.error);
+    auto sig = git("log", {"-n", "1", "--show-signature", "signed"});
+    CHECK(sig.success, "log --show-signature bypasses: " + sig.error);
+    CHECK(!ran(), "log must not run the repo's gpg.program");
+    auto lp = git("log", {"-p", "-n", "1"});
+    CHECK(lp.success && lp.output.find("+two") != std::string::npos,
+          "log -p bypasses with the real patch: " + lp.error);
+    CHECK(!ran(), "log -p must not run the repo's textconv driver");
+
+    // Review subcommands bypass the gate.
+    auto mb = git("merge-base", {"HEAD", "main"});
+    CHECK(mb.success && mb.output.size() >= 40, "merge-base bypasses: " + mb.error);
+    auto rl = git("rev-list", {"--count", "HEAD"});
+    CHECK(rl.success && rl.output.find('2') != std::string::npos,
+          "rev-list --count bypasses: " + rl.error);
+    auto lt = git("ls-tree", {"HEAD"});
+    CHECK(lt.success && lt.output.find("data.bin") != std::string::npos,
+          "ls-tree bypasses: " + lt.error);
+    auto cf = git("cat-file", {"-p", "HEAD~1:data.bin"});
+    CHECK(cf.success && cf.output == "one\n", "cat-file -p bypasses: " + cf.error);
+    auto gr = git("grep", {"-n", "two"});
+    CHECK(gr.success && gr.output.find("data.bin:2:two") != std::string::npos,
+          "git grep bypasses: " + gr.error);
+    auto fr = git("for-each-ref", {"--format=%(refname)"});
+    CHECK(fr.success && fr.output.find("refs/heads/signed") != std::string::npos,
+          "for-each-ref bypasses: " + fr.error);
+    auto in = git("diff", {"HEAD~1", "--", "data.bin"});
+    CHECK(in.success && in.output.find("+two") != std::string::npos,
+          "in-project diff still bypasses: " + in.error);
+    CHECK(!ran(), "no driver may run on any read-only path");
+
+    system(("rm -rf " + repo).c_str());
+    std::remove(secret.c_str());
+    std::remove(script.c_str());
+    std::remove(marker.c_str());
+    std::cout << "[OK] read-only git closes ext-diff/textconv/no-index/contents/pager/gpg hatches\n";
+    return true;
+}
+
+// GIT_OPTIONAL_LOCKS=0: read-only `git status` must not rewrite the index.
+// A content-identical rewrite makes the index's stat info stale, which a
+// plain `git status` refreshes by writing .git/index.
+static bool git_readonly_status_leaves_index_alone() {
+    const std::string repo = setup_git_repo_fixture();
+    const std::string index = repo + "/.git/index";
+    sleep(1);  // index entry mtime strictly older than the rewrite below
+    write_file(repo + "/README.md", "gate fixture\n");
+    struct stat before{}, after{};
+    ::stat(index.c_str(), &before);
+    sleep(1);  // a write would land on a later mtime second
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    auto gate = make_callback_deny_gate();
+    haicode::ToolContext ctx;
+    ctx.working_dir = repo;
+    auto r = reg.execute("git", {{"subcommand", "status"}, {"args", {"--short"}}}, ctx, gate);
+    CHECK(r.success, "read-only status bypasses: " + r.error);
+    ::stat(index.c_str(), &after);
+    CHECK(after.st_mtime == before.st_mtime && after.st_size == before.st_size,
+          "read-only git status must not rewrite .git/index");
+
+    system(("rm -rf " + repo).c_str());
+    std::cout << "[OK] read-only git status leaves the index untouched\n";
     return true;
 }
 
@@ -1836,6 +2059,8 @@ int main() {
     ok &= bash_segmentation_gate_integration();
     ok &= bash_segmentation_execute_denied();
     ok &= git_readonly_ignores_repo_diff_drivers();
+    ok &= git_readonly_closes_escape_hatches();
+    ok &= git_readonly_status_leaves_index_alone();
 
     std::cout << "\n-- symlink containment --\n";
     ok &= registry_symlink_escape_denied();

@@ -1363,12 +1363,16 @@ class GitTool : public Tool {
     // from read-only classification: git_invocation_is_readonly()
     // (lib/src/permission/permission.cpp) decides which invocations bypass
     // the gate; everything here can still be reached through an explicit
-    // Allow rule.
+    // Allow rule. `range-diff` is never classified read-only: its internal
+    // `git log -p` runs repo textconv drivers and no flag reaches it, so it
+    // always asks (and is refused in Plan mode).
     static constexpr const char* kAllowed[] = {
         "status", "diff", "log", "show", "branch", "blame",
         "stash", "add", "commit", "checkout", "reset", "remote",
         "merge", "rebase", "pull", "push", "fetch", "tag",
         "shortlog", "describe", "rev-parse", "ls-files",
+        "merge-base", "rev-list", "ls-tree", "cat-file", "grep",
+        "range-diff", "for-each-ref",
     };
 
     static bool is_allowed(const std::string& sub) {
@@ -1379,10 +1383,16 @@ class GitTool : public Tool {
 public:
     std::string name() const override { return "git"; }
     std::string description() const override {
-        return "Run a git subcommand (status, diff, log, add, commit, branch, blame, "
-               "stash, checkout, reset, remote, merge, rebase, pull, push, fetch, tag, "
-               "shortlog, describe, rev-parse, ls-files) in the project directory. "
-               "Pass extra flags via the args array.";
+        return "Run a git subcommand (status, diff, log, show, blame, grep, add, commit, "
+               "branch, stash, checkout, reset, remote, merge, rebase, pull, push, fetch, "
+               "tag, shortlog, describe, rev-parse, rev-list, merge-base, ls-files, "
+               "ls-tree, cat-file, for-each-ref, range-diff) in the project directory. "
+               "Pass extra flags via the args array. Output over 100 KB is truncated, so "
+               "keep it bounded: always pass -n N to log; to review a branch, find the "
+               "base (merge-base HEAD main), list commits (log --oneline <base>..HEAD), "
+               "get the shape (diff --stat <base>...HEAD), then diff one file at a time "
+               "(diff <base>...HEAD -- <path>). show <rev>:<path> prints a file as of a "
+               "revision; blame -L <start>,<end> <path> narrows blame to lines.";
     }
     nlohmann::json input_schema() const override {
         return {
@@ -1413,29 +1423,50 @@ public:
                 if (a.is_string()) args.push_back(a.get<std::string>());
         }
 
-        // Read-only invocations (the gate's bypass path) must not honor
-        // repo-local config that can execute programs: blank core.fsmonitor
-        // and core.hooksPath via global -c, and disable external diff
-        // drivers / textconv filters for the diff-rendering subcommands —
-        // a repo that sets diff.external to a script must not have it run
-        // by `git diff`. Global -c precedes the subcommand; --no-ext-diff
-        // and --no-textconv are diff-porcelain options, not global ones.
+        // Read-only invocations (the gate's bypass path, and everything git
+        // may run in Plan mode) must not honor repo-local config that can
+        // execute programs: blank core.fsmonitor and core.hooksPath, point
+        // the signature verifiers at `false` (a repo setting gpg.program plus
+        // log.showSignature would otherwise run its program on a plain
+        // `git log`), and disable external diff drivers / textconv filters
+        // for the subcommands that render diffs or blame — a repo that sets
+        // diff.external to a script must not have it run by `git diff`.
+        // Global -c precedes the subcommand; --no-ext-diff and --no-textconv
+        // are subcommand options (for stash, after its list/show verb). The
+        // classifier refuses the re-enabling --ext-diff/--textconv, so the
+        // model's args, appended after these, can't override them.
+        // GIT_OPTIONAL_LOCKS=0 keeps `git status` from refreshing the index
+        // behind a read-only label.
         std::string cmd;
-        if (git_invocation_is_readonly(sub, args)) {
-            cmd = "git -c core.fsmonitor= -c core.hooksPath=/dev/null -C "
+        std::map<std::string, std::string> env = {
+            // A credential prompt (push/pull/fetch over https) must fail fast
+            // instead of hanging the 300 s timeout on a terminal that will
+            // never answer.
+            {"GIT_TERMINAL_PROMPT", "0"},
+        };
+        const bool readonly = git_invocation_is_readonly(sub, args, ctx.working_dir);
+        if (readonly) {
+            cmd = "git -c core.fsmonitor= -c core.hooksPath=/dev/null"
+                  " -c gpg.program=false -c gpg.ssh.program=false"
+                  " -c gpg.x509.program=false -c log.showSignature=false -C "
                 + sq(ctx.working_dir) + " " + sub;
             if (sub == "diff" || sub == "log" || sub == "show")
                 cmd += " --no-ext-diff --no-textconv";
+            else if (sub == "blame")
+                cmd += " --no-textconv";
+            env["GIT_OPTIONAL_LOCKS"] = "0";
         } else {
             cmd = "git -C " + sq(ctx.working_dir) + " " + sub;
         }
-        for (const auto& a : args) cmd += " " + sq(a);
+        for (size_t i = 0; i < args.size(); ++i) {
+            cmd += " " + sq(args[i]);
+            // Classified read-only, stash's only verbs are list and show.
+            if (i == 0 && sub == "stash" && readonly)
+                cmd += " --no-ext-diff --no-textconv";
+        }
 
-        // GIT_TERMINAL_PROMPT=0: a credential prompt (push/pull/fetch over
-        // https) must fail fast instead of hanging the 300 s timeout on a
-        // terminal that will never answer.
         util::SubprocessResult r = util::run_subprocess(
-            cmd, ".", 300, ctx.interrupt, {{"GIT_TERMINAL_PROMPT", "0"}});
+            cmd, ".", 300, ctx.interrupt, env);
         int exit_code = r.exit_code;
         std::string output = r.output;
         if (r.timed_out) {
