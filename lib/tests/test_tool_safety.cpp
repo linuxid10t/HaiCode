@@ -578,6 +578,76 @@ static bool registry_plan_mode_blocks_write_allows_read() {
     return true;
 }
 
+// Plan mode offers git (reviews need history) and symbols, but git is
+// read-only there: a mutating invocation is refused as a mode restriction
+// even under an allow-everything config AND a session bypass rule, and
+// never executes. Read-only invocations run.
+static bool registry_plan_mode_git_is_read_only() {
+    using haicode::tool_available;
+    CHECK(tool_available("git", haicode::SessionMode::Plan), "Plan offers git");
+    CHECK(tool_available("symbols", haicode::SessionMode::Plan), "Plan offers symbols");
+    CHECK(!tool_available("bash", haicode::SessionMode::Plan), "Plan still hides bash");
+    CHECK(!tool_available("git", haicode::SessionMode::Chat), "Chat still hides git");
+    CHECK(!tool_available("symbols", haicode::SessionMode::Chat), "Chat still hides symbols");
+
+    const std::string repo = "/tmp/tts_plan_git_repo";
+    rm_rf_dir(repo);
+    ::mkdir(repo.c_str(), 0755);
+    { std::ofstream(repo + "/a.txt") << "one\n"; }
+    CHECK(system(("cd " + repo + " && git init -q -b main && "
+                  "git -c user.name=t -c user.email=t@t add . && "
+                  "git -c user.name=t -c user.email=t@t commit -q -m init").c_str()) == 0,
+          "git fixture setup");
+
+    haicode::ToolRegistry reg;
+    haicode::register_builtin_tools(reg);
+    haicode::PermissionGate gate;
+    gate.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    gate.set_session_rules("s", {{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::ToolContext ctx;
+    ctx.working_dir = repo;
+    ctx.session_id = "s";
+    ctx.mode = haicode::SessionMode::Plan;
+
+    auto lg = reg.execute("git", {{"subcommand", "log"},
+                                  {"args", {"--oneline", "-n", "1"}}}, ctx, gate);
+    CHECK(lg.success && lg.output.find("init") != std::string::npos,
+          "Plan mode runs read-only git log: " + lg.error);
+
+    auto br = reg.execute("git", {{"subcommand", "branch"},
+                                  {"args", {"planned"}}}, ctx, gate);
+    CHECK(!br.success, "Plan mode must refuse git branch <name>");
+    CHECK(br.error.find("[mode restriction]") != std::string::npos,
+          "refusal is a mode restriction, got: " + br.error);
+    CHECK(!br.denied, "mode restriction is a failed result, not a denial");
+    auto ext = reg.execute("git", {{"subcommand", "diff"},
+                                   {"args", {"--ext-diff"}}}, ctx, gate);
+    CHECK(!ext.success && ext.error.find("[mode restriction]") != std::string::npos,
+          "Plan mode must refuse diff --ext-diff even with allow-all rules");
+    auto cm = reg.execute("git", {{"subcommand", "commit"},
+                                  {"args", {"--allow-empty", "-m", "x"}}}, ctx, gate);
+    CHECK(!cm.success && cm.error.find("[mode restriction]") != std::string::npos,
+          "Plan mode must refuse git commit");
+
+    auto after = reg.execute("git", {{"subcommand", "branch"}}, ctx, gate);
+    CHECK(after.success && after.output.find("planned") == std::string::npos,
+          "refused branch must not have been created");
+    auto count = reg.execute("git", {{"subcommand", "rev-list"},
+                                     {"args", {"--count", "HEAD"}}}, ctx, gate);
+    CHECK(count.success && count.output == "1\n",
+          "refused commit must not have been created: " + count.output);
+
+    // Build mode keeps the gate's say: the same allow-all rules let it run.
+    ctx.mode = haicode::SessionMode::Build;
+    auto bb = reg.execute("git", {{"subcommand", "branch"},
+                                  {"args", {"built"}}}, ctx, gate);
+    CHECK(bb.success, "Build mode with allow rules runs git branch: " + bb.error);
+
+    rm_rf_dir(repo);
+    std::cout << "[OK] registry Plan mode git is read-only, symbols offered\n";
+    return true;
+}
+
 // ============================================================
 // util::truncate_utf8
 // ============================================================
@@ -735,6 +805,7 @@ int main() {
     ok &= registry_offline_mode_restricts_web_tools_only();
     ok &= engine_offline_note_rides_dynamic_block();
     ok &= registry_plan_mode_blocks_write_allows_read();
+    ok &= registry_plan_mode_git_is_read_only();
 
     if (ok) {
         std::cout << "\nAll tool safety tests passed!\n";
