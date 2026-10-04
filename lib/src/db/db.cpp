@@ -645,6 +645,28 @@ void SessionStore::update_message_data(const std::string& session_id,
 
 void SessionStore::delete_messages_after(const std::string& session_id, int seq) {
     std::lock_guard<std::mutex> lock(conn_mu_);
+    // One transaction: a checkpoint must never outlive the rows it covers.
+    DbTxn txn(db_.handle());
+    {
+        // Checkpoints taken after row `seq` was written describe the deleted
+        // tail: an automatic compaction mid-turn can cover the turn's own
+        // tool exchanges (through_seq > seq), and an inline summary covers the
+        // whole visible conversation even when its boundary sits at or below
+        // seq. Left behind, the first kind hides the re-run's rows (seqs are
+        // reused from MAX(seq)+1, landing under the stale boundary) and both
+        // feed the model a summary of work that no longer exists. A missing
+        // row at seq (seq 0 — clear all) drops every checkpoint.
+        DbStmt stmt(db_.handle(),
+            "DELETE FROM compaction_checkpoint WHERE session_id=?"
+            " AND (through_seq>? OR time_created>=COALESCE("
+            "(SELECT time_created FROM session_message"
+            " WHERE session_id=? AND seq=?), 0))");
+        stmt.bind(1, session_id)
+            .bind(2, seq)
+            .bind(3, session_id)
+            .bind(4, seq)
+            .expect_done();
+    }
     {
         DbStmt stmt(db_.handle(),
             "DELETE FROM session_message WHERE session_id=? AND seq>?");
@@ -656,6 +678,7 @@ void SessionStore::delete_messages_after(const std::string& session_id, int seq)
     upd.bind(1, util::now_ms())
        .bind(2, session_id)
        .expect_done();
+    txn.commit();
 }
 
 std::vector<SessionMessage> SessionStore::load_messages(const std::string& session_id) {
