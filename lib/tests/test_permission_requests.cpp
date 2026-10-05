@@ -26,10 +26,11 @@ using namespace haicode;
 
 static PermissionRequest make_req(const std::string& sid,
                                   const std::string& action = "bash",
-                                  const std::string& resource = "/bin/true") {
+                                  const std::string& resource = "/bin/true",
+                                  const std::string& call_id = "call_1") {
     PermissionRequest r;
     r.session_id = sid;
-    r.call_id = "call_1";
+    r.call_id = call_id;
     r.tool_name = "bash";
     r.action = action;
     r.resource = resource;
@@ -255,7 +256,9 @@ static bool pending_snapshot_accuracy() {
     std::thread workers[3];
     for (int i = 0; i < 3; ++i) {
         workers[i] = std::thread([&broker, &outs, i] {
-            outs[size_t(i)] = broker.submit(make_req("s" + std::to_string(i)));
+            outs[size_t(i)] = broker.submit(make_req("s" + std::to_string(i),
+                                                     "bash", "/bin/true",
+                                                     "call_" + std::to_string(i)));
         });
     }
     while (broker.pending_count() < 3)
@@ -263,19 +266,48 @@ static bool pending_snapshot_accuracy() {
 
     auto pending = broker.pending_requests();
     CHECK(pending.size() == 3, "three pending visible");
-    broker.resolve(pending[0].id, PermissionDecision::Deny);
+
+    // Snapshot order across concurrently-submitting workers is arbitrary, so
+    // pending[0] says nothing about which worker submitted it — read that
+    // entry's own call_id to find its worker.
+    const std::string resolved_id = pending[0].id;
+    int resolved_worker = -1;
+    for (auto& p : pending) {
+        if (p.id != resolved_id) continue;
+        for (int i = 0; i < 3; ++i)
+            if (p.call_id == "call_" + std::to_string(i)) resolved_worker = i;
+    }
+    CHECK(resolved_worker >= 0, "resolved request maps to one worker");
+
+    CHECK(broker.resolve(resolved_id, PermissionDecision::Deny),
+          "resolve accepted");
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     CHECK(broker.pending_count() == 2, "resolved request leaves the snapshot");
     for (auto& p : broker.pending_requests())
-        CHECK(p.id != pending[0].id, "resolved id absent from snapshot");
+        CHECK(p.id != resolved_id, "resolved id absent from snapshot");
 
     broker.cancel_all("done");
     for (auto& w : workers) w.join();
     CHECK(broker.pending_count() == 0, "all clear after cancel_all");
-    CHECK(outs[0].effect == PermissionEffect::Deny && outs[0].user_decided,
-          "resolved-by-user outcome delivered");
-    CHECK(outs[1].effect == PermissionEffect::Deny && !outs[1].user_decided,
-          "cancelled outcome delivered");
+
+    // Exactly one outcome came from the explicit resolve — and it belongs to
+    // the worker whose request was resolved. The other two are cancel_all
+    // denials, which never count as user decisions.
+    int user_decided = 0;
+    for (int i = 0; i < 3; ++i) {
+        const PermissionOutcome& out = outs[size_t(i)];
+        if (out.user_decided) {
+            ++user_decided;
+            CHECK(i == resolved_worker, "user-decided outcome is the resolved worker's");
+            CHECK(out.effect == PermissionEffect::Deny
+                  && out.reason == "denied by user",
+                  "resolved-by-user outcome delivered");
+        } else {
+            CHECK(out.effect == PermissionEffect::Deny && out.reason == "done",
+                  "cancelled outcome delivered");
+        }
+    }
+    CHECK(user_decided == 1, "exactly one outcome user-decided");
     std::cout << "[OK] pending snapshot tracks waiting requests only\n";
     return true;
 }
