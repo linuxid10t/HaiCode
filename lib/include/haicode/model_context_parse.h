@@ -31,11 +31,22 @@ int parse_llamacpp_props(const nlohmann::json& j);
 int parse_lmstudio_native_models(const nlohmann::json& j,
                                  const std::string& model_id);
 
+// Placeholder turns translate_messages inserts where two user (or two plain
+// assistant) messages would otherwise meet, and before a leading assistant
+// (in practice the compaction summary heading the context).
+inline constexpr const char* kAlternationAssistantStub = "(no reply)";
+inline constexpr const char* kAlternationUserStub      = "Continue.";
+inline constexpr const char* kAlternationLeadStub =
+    "(A summary of the earlier conversation follows.)";
+
 // Translate Anthropic-shaped messages (see openai.cpp block comment) to the
 // OpenAI chat format. The stable `system` prompt becomes message[0] (the
 // cacheable prefix); a non-empty `system_dynamic` is appended at the tail so
 // it never disturbs the prefix (the engine sends it empty — see
-// LLMRequest::system_dynamic). Pure function, unit-testable.
+// LLMRequest::system_dynamic). The result always satisfies strict chat
+// templates' alternation check (user / tool-call-free assistant messages
+// alternate, starting with user), with the stubs below filling gaps.
+// Pure function, unit-testable.
 std::vector<nlohmann::json> translate_messages(
     const std::string& system,
     const std::string& system_dynamic,
