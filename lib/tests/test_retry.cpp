@@ -1,7 +1,10 @@
 // Tests for /retry: SessionStore::delete_messages_after (store unit) and
 // SessionEngine::retry_last_turn (engine e2e — happy path, skill-block
-// re-emission, refuse-while-running, no-prompt no-op).
+// re-emission, refuse-while-running, no-prompt no-op, auto-compaction inside
+// the retried turn).
 #include <haicode/engine.h>
+#include <haicode/compaction.h>
+#include <haicode/haicode.h>
 #include <haicode/db.h>
 #include <haicode/provider.h>
 #include <haicode/tool.h>
@@ -14,6 +17,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -137,6 +141,74 @@ static void test_store_delete_after() {
 
     rm_rf(tmp);
     std::cout << "[OK] store delete_messages_after (strict seq > N)\n";
+}
+
+
+// Checkpoints taken inside the retried turn go with its rows; earlier ones
+// stay. Regression: a mid-turn auto-compaction left a checkpoint whose
+// through_seq covered deleted rows, so the re-run's rows (reused seqs) were
+// hidden behind it and the model saw only a summary of discarded work.
+static void test_store_delete_after_checkpoints() {
+    std::string tmp = "/tmp/hc_test_retry_ckpt_XXXXXX";
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", tmp.c_str());
+    if (!mkdtemp(buf)) { CHECK(false, "mkdtemp"); return; }
+    tmp = buf;
+
+    haicode::Database db(tmp + "/store.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    std::string sid = store.create(tmp, "build", "{}").id;
+    auto pause = [] {  // distinct time_created stamps (ms resolution)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    };
+    auto row = [&](const char* type, const char* text) {
+        nlohmann::json d;
+        d["text"] = text;
+        store.append_message(sid, type, d.dump());
+    };
+
+    row("user_prompted", "old prompt");                          // seq 1
+    row("assistant_text", "old reply");                          // seq 2
+    std::string old_cp = store.insert_checkpoint(sid, 1, "", "");
+    store.complete_checkpoint(old_cp, "old summary");
+    pause();
+    row("user_prompted", "retried prompt");                      // seq 3
+    pause();
+    row("assistant_text", "step 1");                             // seq 4
+    row("tool_result", "r1");                                    // seq 5
+    row("assistant_text", "step 2");                             // seq 6
+    // Inline summary taken mid-turn: boundary at/below the prompt, but its
+    // summary describes the steps about to be deleted.
+    std::string inline_cp = store.insert_checkpoint(sid, 2, "", old_cp);
+    store.complete_checkpoint(inline_cp, "inline summary");
+    // Boundary inside the turn: covers rows about to be deleted.
+    std::string cover_cp = store.insert_checkpoint(sid, 5, "", inline_cp);
+    store.complete_checkpoint(cover_cp, "cover summary");
+    store.insert_checkpoint(sid, 6, "", cover_cp);  // left pending
+
+    store.delete_messages_after(sid, 3);
+    CHECK(store.load_messages(sid).size() == 3, "turn output deleted");
+    auto cps = store.list_complete_checkpoints(sid);
+    CHECK(cps.size() == 1 && cps[0].id == old_cp,
+          "only the pre-turn checkpoint survives");
+    CHECK(store.prune_stale_checkpoints(INT64_MAX) == 0,
+          "the turn's pending checkpoint is gone too");
+
+    // The re-run's rows reuse seq 4.. and must sit after the live boundary.
+    row("assistant_text", "rerun");
+    auto latest = store.latest_complete_checkpoint(sid);
+    CHECK(latest && latest->id == old_cp, "latest checkpoint is the old one");
+    auto rows = store.load_messages(sid);
+    CHECK(latest && !rows.empty() && rows.back().seq > latest->through_seq,
+          "re-run row is visible past the checkpoint boundary");
+
+    store.delete_messages_after(sid, 0);
+    CHECK(store.list_complete_checkpoints(sid).empty(),
+          "delete after seq 0 clears every checkpoint");
+
+    rm_rf(tmp);
+    std::cout << "[OK] store delete_messages_after drops the turn's checkpoints\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -457,12 +529,128 @@ static void test_retry_no_prompt() {
     std::cout << "[OK] retry on a prompt-less session is a no-op\n";
 }
 
+
+// Turn 1 runs several `ls` tool steps reporting huge usage against a tiny
+// window, so the loop auto-compacts mid-turn. With `tool_steps` = 0 it just
+// answers. Inline/standalone summary requests get a valid summary.
+class CompactingToolProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "ctool"; }
+    void cancel(const std::string& = "") override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"ctool-model"};
+    }
+    int get_model_context(const std::string&) const override { return 0; }
+    void stream(const haicode::LLMRequest& req,
+                haicode::StreamCallbacks cb, const std::string& = "") override {
+        if (haicode::is_inline_summary_request(req)
+                || req.system == "You are a precise conversation summarizer.") {
+            ++summaries;
+            cb.on_text_delta("t",
+                "## Objective\no\n\n## Constraints & Decisions\nc\n\n"
+                "## Completed Work\nDISCARDED-WORK\n\n## Active Work\naw\n\n"
+                "## Blockers\nb\n\n## Next Actions\nn\n\n"
+                "## Relevant Files\nf\n");
+            cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+            return;
+        }
+        last_chat_request = req;
+        if (tool_steps > 0) {
+            --tool_steps;
+            haicode::ToolCall call;
+            call.id = "ls-" + std::to_string(++call_n);
+            call.name = "ls";
+            call.input = nlohmann::json::object();
+            haicode::TokenUsage u;
+            u.input = 999999;  // over any threshold → arms the trigger
+            cb.on_finish(haicode::FinishReason::ToolUse, u, {call});
+            return;
+        }
+        cb.on_text_delta("t", "done");
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    int tool_steps = 0;
+    int call_n = 0;
+    int summaries = 0;
+    haicode::LLMRequest last_chat_request;
+};
+
+static void test_retry_after_mid_turn_compaction() {
+    std::string tmp = "/tmp/hc_test_retry_compact_XXXXXX";
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", tmp.c_str());
+    if (!mkdtemp(buf)) { CHECK(false, "mkdtemp"); return; }
+    tmp = buf;
+    mkdirs(tmp + "/proj");
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<CompactingToolProvider>();
+    provider->tool_steps = 6;
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "ctool-model";
+    cfg.provider = "ctool";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+    cfg.model_contexts["ctool-model"] = 2000;
+    cfg.compaction_recent_context = 100;
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(tmp + "/proj", "build",
+                                                "ctool-model", "ctool");
+
+        engine.submit_prompt(sid, "RETRY-PROMPT list things");
+        CHECK(wait_for_rows(store, sid, 2 + 2 * 6), "tool turn completes");
+        CHECK(wait_not_running(engine, sid), "tool turn drains");
+
+        // Precondition: the repro needs a checkpoint inside the turn.
+        int prompt_seq = -1;
+        for (const auto& m : store.load_messages(sid))
+            if (m.type == "user_prompted") prompt_seq = m.seq;
+        auto cp = store.latest_complete_checkpoint(sid);
+        CHECK(provider->summaries > 0 && cp && cp->through_seq > prompt_seq,
+              "turn auto-compacted past its own prompt row");
+
+        engine.retry_last_turn(sid);
+        CHECK(wait_for_rows(store, sid, 2), "retried turn completes");
+        CHECK(wait_not_running(engine, sid), "retried turn drains");
+
+        CHECK(store.load_messages(sid).size() == 2,
+              "retry leaves prompt + one fresh reply");
+        CHECK(store.list_complete_checkpoints(sid).empty(),
+              "the turn's checkpoints were dropped with its rows");
+        std::string reqd = FakeProvider::dump_messages(
+            provider->last_chat_request.messages);
+        CHECK(reqd.find("RETRY-PROMPT") != std::string::npos,
+              "retried request carries the prompt (not hidden by a stale "
+              "boundary)");
+        CHECK(reqd.find("DISCARDED-WORK") == std::string::npos
+              && reqd.find("HISTORICAL CONVERSATION") == std::string::npos,
+              "retried request carries no summary of the discarded turn");
+    }
+
+    rm_rf(tmp);
+    std::cout << "[OK] retry after a mid-turn auto-compaction drops its "
+                 "checkpoint\n";
+}
+
 int main() {
     test_store_delete_after();
+    test_store_delete_after_checkpoints();
     test_retry_happy_path();
     test_retry_skill_block();
     test_retry_refused_while_running();
     test_retry_no_prompt();
+    test_retry_after_mid_turn_compaction();
     if (g_fail == 0) {
         printf("test_retry: ALL PASSED\n");
         return 0;
