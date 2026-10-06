@@ -150,6 +150,11 @@ target_link_libraries(test_web_tools haicode network)
 add_executable(test_propose_plan tests/test_propose_plan.cpp)
 target_link_libraries(test_propose_plan haicode)
 
+# Markdown -> styled text (GUI transcript + plan review): block/inline subset,
+# GFM tables sized to the column budget, streaming frozen+tail == render.
+add_executable(test_markdown tests/test_markdown.cpp)
+target_link_libraries(test_markdown haicode)
+
 # Register every test executable with CTest (ctest --test-dir build).
 foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_config_permission test_step_budget test_compaction
@@ -160,6 +165,7 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_db_concurrency test_config_write test_config_trust
          test_subprocess test_turn_integrity test_engine_correctness
          test_session_lifecycle test_session_cleanup test_web_tools test_provider_params
-         test_pricing test_codex_params test_propose_plan test_model_db)
+         test_pricing test_codex_params test_propose_plan test_model_db
+         test_markdown)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
