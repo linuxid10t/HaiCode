@@ -150,6 +150,10 @@ private:
     void _AppendRendered(const RenderBuf& buf);
     void _AppendEntry(int model_idx);
     void _ReplaceEntry(int model_idx);
+    // Every Delete on the text view goes through here: BTextView::Delete()
+    // scrolls the caret into view, and this view's caret is not a reading
+    // position.
+    void _DeleteText(int32 start, int32 end);
     void SetCopyFeedback(int model_idx, bool visible);
     void ClearCopyFeedback();
     void ScrollToBottom();

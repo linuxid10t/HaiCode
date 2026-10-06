@@ -485,10 +485,39 @@ ChatView::_ReplaceEntry(int i)
     int32 old_len = end - start;
     _InsertRendered(start, buf);
     if (old_len > 0)
-        text_view_->Delete(start + buf.Length(), start + buf.Length() + old_len);
+        _DeleteText(start + buf.Length(), start + buf.Length() + old_len);
 
     if (i == md_stream_.idx)
         _ResyncStream();
+}
+
+// BTextView::Delete() collapses the selection onto the caret and scrolls the
+// caret into view. A SetText rebuild (every session load) leaves the caret at
+// offset 0, and appends at the end never move it, so in a session that was
+// switched to, each in-place re-render — the streamed markdown tail, a
+// collapse, the copy feedback — jumped the view to the top and back: two
+// full-view scrolls and repaints per update, and a streamed reply could stay
+// undrawn until something else scrolled the view. Park an unselected caret on
+// a line in the middle of the view (the top line may be only partly visible,
+// which still scrolls), where a delete below it leaves it in view, and put
+// the scroll position back in case the delete still moved it.
+void
+ChatView::_DeleteText(int32 start, int32 end)
+{
+    int32 sel_start, sel_end;
+    text_view_->GetSelection(&sel_start, &sel_end);
+    if (sel_start == sel_end) {
+        BRect bounds = text_view_->Bounds();
+        int32 park = text_view_->OffsetAt(
+            BPoint(bounds.left, bounds.top + bounds.Height() / 2));
+        if (park != sel_start)
+            text_view_->Select(park, park);
+    }
+    BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL);
+    float value = vsb ? vsb->Value() : 0;
+    text_view_->Delete(start, end);
+    if (vsb && vsb->Value() != value)
+        vsb->SetValue(value);
 }
 
 // Full re-render from the model in ONE SetText — used only at EndBatch
@@ -577,7 +606,7 @@ ChatView::_StreamMarkdown()
     // Insert before deleting so the content never transiently shrinks.
     _InsertRendered(at, buf);
     if (old_rest > 0)
-        text_view_->Delete(at + buf.Length(), at + buf.Length() + old_rest);
+        _DeleteText(at + buf.Length(), at + buf.Length() + old_rest);
 
     // Links of the old tail go; every link of `next` (which starts where the
     // old tail started) is registered — a kept prefix may hold a link whose
@@ -873,7 +902,7 @@ ChatView::SetCopyFeedback(int model_idx, bool visible)
         int32 selected_start, selected_end;
         text_view_->GetSelection(&selected_start, &selected_end);
         text_view_->MakeFocus(false);
-        text_view_->Delete(start, start + 3);
+        _DeleteText(start, start + 3);
         const char* label = visible ? "\xe2\x9c\x93" : "   ";
         text_view_->Insert(start, label, 3);
         BFont font(*be_bold_font);
