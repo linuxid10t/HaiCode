@@ -5,6 +5,8 @@
 #include <Entry.h>
 #include <File.h>
 #include <Message.h>
+#include <Messenger.h>
+#include <Node.h>
 #include <Roster.h>
 #include <ScrollBar.h>
 #include <Window.h>
@@ -156,12 +158,39 @@ ParentDirectory(const std::string& path)
     return slash == 0 ? "/" : path.substr(0, slash);
 }
 
+// Open `folder` in Tracker with `select` (a path inside it) selected — the
+// same request WebPositive's "Open containing folder" sends. Falls back to
+// opening the folder alone when there is nothing to select or Tracker isn't
+// reachable.
 void
-LaunchFile(std::string path, int line, bool directory)
+RevealInTracker(const std::string& folder, const std::string& select)
 {
+    entry_ref dir;
+    if (get_ref_for_path(folder.c_str(), &dir) != B_OK) return;
+    if (!select.empty()) {
+        BEntry entry(select.c_str());
+        node_ref node;
+        BMessenger tracker("application/x-vnd.Be-TRAK");
+        if (entry.GetNodeRef(&node) == B_OK && tracker.IsValid()) {
+            BMessage message(B_REFS_RECEIVED);
+            message.AddRef("refs", &dir);
+            message.AddData("nodeRefToSelect", B_RAW_TYPE, &node, sizeof(node_ref));
+            if (tracker.SendMessage(&message) == B_OK) return;
+        }
+    }
+    be_roster->Launch(&dir);
+}
+
+void
+LaunchAction(MarkdownLinkAction action)
+{
+    if (action.kind == MarkdownLinkAction::OpenFolder) {
+        RevealInTracker(action.target, action.select);
+        return;
+    }
     entry_ref ref;
-    if (get_ref_for_path(path.c_str(), &ref) != B_OK) return;
-    if (line > 0 && !directory) {
+    if (get_ref_for_path(action.target.c_str(), &ref) != B_OK) return;
+    if (action.line > 0) {
         // Preferred app with a "be:line" refs message (StyledEdit, Pe and
         // Koder honor it); fall through to a plain launch otherwise.
         entry_ref app;
@@ -173,18 +202,16 @@ LaunchFile(std::string path, int line, bool directory)
                 signature[0] = '\0';
             BMessage refs(B_REFS_RECEIVED);
             refs.AddRef("refs", &ref);
-            refs.AddInt32("be:line", EditorLineFor(signature, line));
-            refs.AddInt32("line", line);   // Pe's own key, 1-based
+            refs.AddInt32("be:line", EditorLineFor(signature, action.line));
+            refs.AddInt32("line", action.line);   // Pe's own key, 1-based
             status_t err = be_roster->Launch(&app, &refs);
             if (err == B_OK || err == B_ALREADY_RUNNING) return;
         }
     }
     status_t err = be_roster->Launch(&ref);
-    if (err == B_OK || err == B_ALREADY_RUNNING || directory) return;
+    if (err == B_OK || err == B_ALREADY_RUNNING) return;
     // No preferred application: show the file in its folder.
-    entry_ref parent;
-    if (get_ref_for_path(ParentDirectory(path).c_str(), &parent) == B_OK)
-        be_roster->Launch(&parent);
+    RevealInTracker(ParentDirectory(action.target), action.target);
 }
 
 }  // namespace
@@ -225,6 +252,7 @@ PlanMarkdownLink(const std::string& target, const std::string& base_dir)
     } else if (RevealInstead(link.target, st)) {
         action.kind = MarkdownLinkAction::OpenFolder;
         action.target = ParentDirectory(link.target);
+        action.select = link.target;
     } else {
         action.kind = MarkdownLinkAction::OpenFile;
         action.target = link.target;
@@ -254,8 +282,7 @@ OpenMarkdownLink(const std::string& target, const std::string& base_dir)
         return true;
     case MarkdownLinkAction::OpenFile:
     case MarkdownLinkAction::OpenFolder:
-        std::thread(LaunchFile, action.target, action.line,
-                    action.kind == MarkdownLinkAction::OpenFolder).detach();
+        std::thread(LaunchAction, action).detach();
         return true;
     }
     return false;
