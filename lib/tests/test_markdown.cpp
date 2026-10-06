@@ -79,10 +79,11 @@ void test_inline()
     s = render("See [the docs](https://x.org/d \"t\") or [https://y.org](https://y.org) "
                "or [sec](#a). ![diagram](d.png) <https://z.org>", opts());
     TEST_REQUIRE(s.text == "See the docs (https://x.org/d) or https://y.org or sec. "
-                           "[image: diagram] https://z.org", "links: " + s.text);
+                           "[image: diagram] (d.png) https://z.org", "links: " + s.text);
     TEST_REQUIRE(flags_of(s, "the docs") == kLink, "link flag");
     TEST_REQUIRE(flags_of(s, " (https://x.org/d)") == kDim, "url dim");
-    TEST_REQUIRE(flags_of(s, "[image") == kDim, "image dim");
+    TEST_REQUIRE(flags_of(s, "[image") == kLink && flags_of(s, " (d.png)") == kDim,
+                 "image styled as a link with its source dim");
     TEST_REQUIRE(flags_of(s, "https://z.org") == kLink, "autolink");
 
     // Bold link text keeps both flags.
@@ -260,10 +261,17 @@ void test_links()
     TEST_REQUIRE(links[1] == P("https://z.org", "https://z.org"), "autolink");
     TEST_REQUIRE(links[2] == P("https://bare.org/a_(b)", "https://bare.org/a_(b)"),
                  "bare url keeps balanced paren, drops trailing dot: " + links[2].first);
-    TEST_REQUIRE(links[3] == P("[image: shot]", "/tmp/s.png"), "image links its source");
+    TEST_REQUIRE(links[3] == P("[image: shot] (/tmp/s.png)", "/tmp/s.png"), "image links its source");
     TEST_REQUIRE(links[4] == P("sec", "#a"), "anchor link recorded (resolves to nothing)");
     TEST_REQUIRE(flags_of(s, "https://bare") == kLink, "bare url styled as link");
     for (const auto& l : s.links) TEST_REQUIRE(!l.implicit, "explicit links");
+
+    // Images: <...> source form, no alt, bold context.
+    s = render("![](<a b.png>) **![x](y.png)**", opts());
+    TEST_REQUIRE(s.text == "[image] (a b.png) [image: x] (y.png)", "image forms: " + s.text);
+    TEST_REQUIRE(links_of(s).size() == 2 && links_of(s)[0].second == "a b.png"
+                 && links_of(s)[1] == P("[image: x] (y.png)", "y.png"), "image links");
+    TEST_REQUIRE(flags_of(s, "[image: x]") == (kBold | kLink), "bold image label");
 
     // Unbalanced paren / trailing punctuation; no bare link mid-word.
     s = render("(see https://a.org/x) and xhttps://no.org", opts());

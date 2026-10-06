@@ -613,14 +613,24 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                 if (cp != std::string_view::npos) {
                     std::string_view alt = trim(s.substr(i + 2, cb - i - 2));
                     std::string_view src = trim(s.substr(cb + 2, cp - cb - 2));
-                    size_t sp = 0;
-                    while (sp < src.size() && !is_ws(src[sp])) ++sp;
+                    if (!src.empty() && src.front() == '<') {
+                        size_t gt = src.find('>');
+                        src = gt != std::string_view::npos ? src.substr(1, gt - 1)
+                                                           : src.substr(1);
+                    } else {
+                        size_t sp = 0;
+                        while (sp < src.size() && !is_ws(src[sp])) ++sp;
+                        src = src.substr(0, sp);
+                    }
                     flush();
+                    // Styled like any other link: label, then the source dim.
                     std::string label = alt.empty() ? std::string("[image]")
                                                     : "[image: " + std::string(alt) + "]";
                     size_t start = out.text.size();
-                    out.add(label, keep | kDim, heading);
-                    add_link(start, src.substr(0, sp), false);
+                    out.add(label, flags | kLink, heading);
+                    if (!src.empty())
+                        out.add(" (" + std::string(src) + ")", keep | kDim, heading);
+                    add_link(start, src, false);
                     i = cp + 1;
                     continue;
                 }
