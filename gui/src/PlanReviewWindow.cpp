@@ -1,4 +1,5 @@
 #include "PlanReviewWindow.h"
+#include "MarkdownView.h"
 #include "Messages.h"
 
 #include <Window.h>
@@ -40,16 +41,13 @@ PlanReviewWindow::PlanReviewWindow(const std::string& plan_markdown,
         path_label->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
     }
 
-    BTextView* plan_view = new BTextView("plan");
-    plan_view->SetText(plan_markdown.c_str());
-    plan_view->MakeEditable(false);
-    plan_view->MakeSelectable(true);
-    plan_view->SetWordWrap(true);
-    plan_view->SetStylable(true);
+    MarkdownTextView* plan_view = new MarkdownTextView("plan",
+        MarkdownPaletteFor(ui_color(B_PANEL_TEXT_COLOR)));
     plan_view->SetViewColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     plan_view->SetLowColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     plan_view->SetExplicitMinSize(BSize(600, 400));
     plan_view->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    plan_view->SetMarkdown(plan_markdown);
 
     BScrollView* plan_scroll = new BScrollView("plan_scroll", plan_view,
                                                0, true, true, B_FANCY_BORDER);

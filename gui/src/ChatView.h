@@ -4,6 +4,8 @@
 #include <ScrollView.h>
 #include <MessageRunner.h>
 
+#include <haicode/markdown.h>
+
 #include <deque>
 #include <memory>
 #include <string>
@@ -20,6 +22,7 @@ public:
     void SetOwner(ChatView* owner) { owner_ = owner; }
     void MouseDown(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override;
+    void FrameResized(float width, float height) override;
     void MakeFocus(bool focus = true) override;
     void Select(int32 startOffset, int32 endOffset) override;
     void MessageReceived(BMessage* message) override;
@@ -93,6 +96,17 @@ public:
     void EndBatch();
 
     BScrollView* ScrollContainer() const { return scroll_; }
+    BTextView*   TextView() const { return text_view_; }
+
+    // Assistant replies and compaction summaries render as markdown; tables
+    // and rules are laid out to the view's fixed-font column count. A width
+    // change re-renders the affected entries (debounced through
+    // ViewResized -> RelayoutWidthDependent).
+    void ViewResized();
+    void RelayoutWidthDependent();
+    // Apply a column count / border style and re-render the entries that
+    // depend on it (no-op when unchanged). Public for tests.
+    void SetMarkdownLayout(int cols, bool ascii_borders);
 
     // Called by ClickableTextView::MouseDown
     int  FindBlockAt(int32 offset) const;
@@ -120,6 +134,12 @@ private:
     void ClearCopyFeedback();
     void ScrollToBottom();
     void _Rebuild();
+    // Streamed assistant text: re-render only the open tail of the reply
+    // (haicode::md::render_from) and touch only the bytes that changed.
+    void _StreamMarkdown();
+    // Re-derive the streaming state from the canonical rendering of the
+    // last entry (after a full rebuild or an in-place re-render of it).
+    void _ResyncStream();
 
     ClickableTextView* text_view_       = nullptr;
     BScrollView*       scroll_          = nullptr;
@@ -138,4 +158,16 @@ private:
     // Tool calls still waiting for their result, oldest first; each result
     // collapses the oldest (parallel calls in one batch resolve in order).
     std::deque<int>              pending_tools_;
+
+    haicode::md::Options            md_opts_;
+    std::unique_ptr<BMessageRunner> relayout_timer_;
+    // Streaming assistant entry: source bytes before frozen_src are rendered
+    // for good; `tail` is what the view currently shows for the rest (the
+    // last tail.text.size() bytes of the view).
+    struct MdStream {
+        int                 idx = -1;
+        size_t              frozen_src = 0;
+        haicode::md::State  state;
+        haicode::md::Styled tail;
+    } md_stream_;
 };

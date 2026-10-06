@@ -47,3 +47,11 @@ add_executable(test_session_list_item tests/test_session_list_item.cpp src/Sessi
 target_include_directories(test_session_list_item PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(test_session_list_item PRIVATE ${BE_LIB} ${ROOT_LIB})
 add_test(NAME session_list_item COMMAND test_session_list_item)
+
+# ChatView markdown rendering: streamed / batched / re-laid-out transcripts
+# must show byte-for-byte (text and per-byte font/color) the same view.
+add_executable(test_chat_view tests/test_chat_view.cpp src/ChatView.cpp
+               src/MarkdownView.cpp)
+target_include_directories(test_chat_view PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_chat_view PRIVATE haicode ${BE_LIB} ${ROOT_LIB})
+add_test(NAME chat_view COMMAND test_chat_view)
