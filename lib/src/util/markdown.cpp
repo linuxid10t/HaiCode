@@ -444,7 +444,6 @@ delimiter_row(std::string_view line, size_t ncols, std::vector<Align>* aligns)
 // ---------------------------------------------------------------------------
 
 constexpr int kMaxInlineDepth = 16;
-constexpr int kTableGap = 2;   // spaces between table columns
 
 // Opening position of an emphasis closer: a run of exactly k `c` characters
 // not preceded by whitespace (for '_', not followed by a word character).
@@ -933,7 +932,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
     }
 
-    const int frame = kTableGap * (static_cast<int>(n) - 1);
+    const int frame = 3 * static_cast<int>(n) + 1;
     const int avail = opts.max_cols - frame;
     long total = 0;
     for (int w : nat) total += w;
@@ -1003,20 +1002,17 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
     }
 
-    // Horizontal rules only: a text view leaves a gap between lines, so
-    // vertical box glyphs never join up into a solid border, while a rule
-    // within one line always does. The header is underlined column by
-    // column; rows that wrap are set apart by an empty line.
-    const std::string h = opts.ascii_borders ? "-" : "\xe2\x94\x80";   // ─
-    const std::string gap(kTableGap, ' ');
-    auto rule = [&] {
+    const bool ascii = opts.ascii_borders;
+    const std::string h = ascii ? "-" : "\xe2\x94\x80";
+    const std::string v = ascii ? "|" : "\xe2\x94\x82";
+    auto border = [&](const char* l, const char* m, const char* r) {
         begin_line(out, st);
-        std::string line;
+        std::string s = ascii ? "+" : l;
         for (size_t c = 0; c < n; ++c) {
-            if (c) line += gap;
-            line += repeat(h, width[c]);
+            s += repeat(h, width[c] + 2);
+            s += c + 1 < n ? (ascii ? "+" : m) : (ascii ? "+" : r);
         }
-        out.add(line, kMono | kDim);
+        out.add(s, kMono | kDim);
     };
     auto row = [&](const std::vector<Cell>& cells) {
         std::vector<std::vector<GlyphLine>> wrapped(n);
@@ -1027,21 +1023,14 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
         for (size_t y = 0; y < height; ++y) {
             begin_line(out, st);
-            // Padding is emitted lazily, just before the next glyph, so a
-            // line never ends in whitespace (empty trailing cells, last-column
-            // padding).
-            size_t pending = 0;
-            auto flush_pad = [&] {
-                if (pending) out.add(std::string(pending, ' '), kMono);
-                pending = 0;
-            };
+            out.add(v, kMono | kDim);
             for (size_t c = 0; c < n; ++c) {
                 GlyphLine empty;
                 const GlyphLine& gl = y < wrapped[c].size() ? wrapped[c][y] : empty;
                 int pad = std::max(0, width[c] - line_width(gl));
                 int lpad = aligns[c] == Align::Right ? pad
                          : aligns[c] == Align::Center ? pad / 2 : 0;
-                pending += (c ? gap.size() : 0) + lpad;
+                out.add(std::string(1 + lpad, ' '), kMono);
                 // A link wrapped over several lines becomes one span per line.
                 int open = -1;
                 size_t open_start = 0;
@@ -1053,7 +1042,6 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
                     open = -1;
                 };
                 for (const auto& g : gl) {
-                    flush_pad();
                     if (g.link != open) {
                         close_link();
                         open = g.link;
@@ -1062,24 +1050,29 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
                     out.add(g.s, g.flags);
                 }
                 close_link();
-                pending += pad - lpad;
+                out.add(std::string(pad - lpad + 1, ' '), kMono);
+                out.add(v, kMono | kDim);
             }
         }
+        return height;
     };
 
+    // Body rows get separators only when some row wraps onto several lines.
     bool multi = false;
     for (size_t r = 0; r < body.size() && !multi; ++r)
         for (size_t c = 0; c < n && !multi; ++c)
             multi = wrap_cell(body[r][c].glyphs, width[c]).size() > 1;
 
+    border("\xe2\x94\x8c", "\xe2\x94\xac", "\xe2\x94\x90");    // ┌ ┬ ┐
     row(head);
-    rule();
+    if (!body.empty())
+        border("\xe2\x94\x9c", "\xe2\x94\xbc", "\xe2\x94\xa4");    // ├ ┼ ┤
     for (size_t r = 0; r < body.size(); ++r) {
-        if (r > 0 && multi) {
-            begin_line(out, st);   // empty line between wrapped rows
-        }
+        if (r > 0 && multi)
+            border("\xe2\x94\x9c", "\xe2\x94\xbc", "\xe2\x94\xa4");
         row(body[r]);
     }
+    border("\xe2\x94\x94", "\xe2\x94\xb4", "\xe2\x94\x98");    // └ ┴ ┘
 }
 
 // Render the unit starting at lines[i]. `consumed` receives the number of
