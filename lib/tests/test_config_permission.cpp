@@ -1057,6 +1057,48 @@ static bool bash_segmentation_unit() {
           "a quoted ; is not a command separator");
     CHECK(bash_pattern_authorizes("*", "make; rm -rf ~"),
           "the universal pattern still covers compounds");
+
+    // `&` is a control operator with or without surrounding whitespace.
+    CHECK(!bash_pattern_authorizes("make*", "make&rm -rf ~"),
+          "make* must not authorize an unspaced & compound");
+    CHECK(!bash_pattern_authorizes("make*", "make& rm x"),
+          "make* must not authorize a half-spaced & compound");
+    CHECK(!bash_pattern_authorizes("make*", "make|&rm x"),
+          "|& is a pipe separator");
+    CHECK(bash_pattern_authorizes("make*", "make&"),
+          "a trailing & only backgrounds the authorized command");
+
+    // Process substitution runs a command the pattern never sees.
+    CHECK(!bash_pattern_authorizes("make*", "make <(rm -rf ~)"),
+          "<(...) never matches a pattern");
+    CHECK(!bash_pattern_authorizes("make*", "make >(rm -rf ~)"),
+          ">(...) never matches a pattern");
+    CHECK(bash_pattern_authorizes("echo*", "echo \"<(x)\""),
+          "a quoted <( is literal text");
+
+    // Output redirects to files write anywhere; fd dups and /dev/null don't.
+    CHECK(!bash_pattern_authorizes("echo*", "echo x > ~/.profile"),
+          "> to a file never matches a pattern");
+    CHECK(!bash_pattern_authorizes("echo*", "echo x>>~/.profile"),
+          ">> to a file never matches a pattern");
+    CHECK(!bash_pattern_authorizes("make*", "make &>log"),
+          "&> to a file never matches a pattern");
+    CHECK(!bash_pattern_authorizes("make*", "make >& log"),
+          ">& to a file never matches a pattern");
+    CHECK(!bash_pattern_authorizes("make*", "make 1<>f"),
+          "<> opens a file for writing");
+    CHECK(bash_pattern_authorizes("make*", "make >&2"),
+          ">&N duplicates a descriptor");
+    CHECK(bash_pattern_authorizes("make*", "make 2>&-"),
+          ">&- closes a descriptor");
+    CHECK(bash_pattern_authorizes("make*", "make >/dev/null 2>&1"),
+          "/dev/null redirects stay matchable");
+    CHECK(bash_pattern_authorizes("make*", "make &>/dev/null"),
+          "&>/dev/null stays matchable");
+    CHECK(bash_pattern_authorizes("make*", "make <input.txt"),
+          "input redirects stay matchable");
+    CHECK(bash_pattern_authorizes("echo*", "echo 'a > b'"),
+          "a quoted > is not a redirect");
     std::cout << "[OK] bash_pattern_authorizes segmentation matrix\n";
     return true;
 }
@@ -1128,6 +1170,21 @@ static bool bash_segmentation_execute_denied() {
     struct stat st;
     CHECK(::stat(marker.c_str(), &st) != 0,
           "denied compound must not have executed its second segment");
+
+    // Forms the pattern can't see through: unspaced &, process
+    // substitution, output redirect. Each denied, none executed.
+    const std::string escapes[] = {
+        "echo hi&touch " + marker,
+        "echo <(touch " + marker + ")",
+        "echo hi > " + marker,
+    };
+    for (const auto& cmd : escapes) {
+        auto e = reg.execute("bash", {{"command", cmd}}, ctx, gate);
+        CHECK(!e.success && e.denied,
+              "pattern Allow must not cover '" + cmd + "'");
+        CHECK(::stat(marker.c_str(), &st) != 0,
+              "denied '" + cmd + "' must not have touched the marker");
+    }
 
     // Session bypass still runs compounds end to end.
     gate.set_session_rules("s1", {{"*", "*", haicode::PermissionEffect::Allow}});

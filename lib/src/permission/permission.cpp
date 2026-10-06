@@ -525,30 +525,55 @@ bool git_invocation_is_readonly(const std::string& subcommand,
 // command in the invocation, not just its first word: fnmatch on the whole
 // string lets `make*` authorize `make; rm -rf ~` (the `*` happily matches
 // the rest). The command is split quote-aware at the shell's command
-// separators and each segment must fnmatch the pattern. Command
-// substitution (`$(...)`, backticks) produces unknowable text, so a
-// segment containing it never matches any pattern except the universal
-// `*` — the safe direction is to ask.
+// separators (`;`, newline, `|`, `|&`, `||`, `&&`, and `&` — which needs no
+// surrounding whitespace: `make&rm x` is two commands) and each segment
+// must fnmatch the pattern. A segment that can do more than the pattern
+// shows never matches any pattern except the universal `*` — the safe
+// direction is to ask:
+//   - command substitution (`$(...)`, backticks) and process substitution
+//     (`<(...)`, `>(...)`) run commands whose text the pattern never sees;
+//   - an output redirect to a file (`>`, `>>`, `>|`, `&>`, `>&word`, `<>`)
+//     writes anywhere (`echo x > ~/.profile`); fd duplications (`2>&1`,
+//     `>&-`) and `/dev/null` targets stay matchable.
 bool bash_pattern_authorizes(const std::string& pattern, const std::string& command) {
     if (pattern == "*") return true;
 
     std::vector<std::string> segments;
-    std::vector<bool> has_subst;
+    std::vector<bool> unmatchable;
     std::string cur;
-    bool cur_subst = false;
+    bool cur_unmatchable = false;
     char quote = 0;
     auto flush = [&]() {
         size_t b = cur.find_first_not_of(" \t\r");
-        if (b == std::string::npos) { cur.clear(); cur_subst = false; return; }
+        if (b == std::string::npos) { cur.clear(); cur_unmatchable = false; return; }
         size_t e = cur.find_last_not_of(" \t\r");
         segments.push_back(cur.substr(b, e - b + 1));
-        has_subst.push_back(cur_subst);
+        unmatchable.push_back(cur_unmatchable);
         cur.clear();
-        cur_subst = false;
+        cur_unmatchable = false;
     };
     auto marks_subst = [&](const std::string& s, size_t i) {
         return s[i] == '`'
             || (s[i] == '$' && i + 1 < s.size() && s[i + 1] == '(');
+    };
+    // Called with `i` on a `>` outside quotes that does not open a process
+    // substitution. True when the redirect it starts can only duplicate a
+    // file descriptor or write /dev/null. The target word is read up to
+    // whitespace or an operator character; a quoted or expanded target is
+    // never `/dev/null` verbatim, so it counts as a file (over-strict).
+    auto redirect_is_harmless = [&](size_t i) {
+        size_t j = i + 1;
+        bool dup = false;
+        if (j < command.size() && (command[j] == '>' || command[j] == '|')) ++j;
+        else if (j < command.size() && command[j] == '&') { ++j; dup = true; }
+        while (j < command.size() && (command[j] == ' ' || command[j] == '\t')) ++j;
+        size_t k = j;
+        while (k < command.size()
+               && std::strchr(" \t\r\n;|&<>()", command[k]) == nullptr) ++k;
+        std::string target = command.substr(j, k - j);
+        if (target == "/dev/null") return true;
+        return dup && !target.empty()
+            && target.find_first_not_of("0123456789-") == std::string::npos;
     };
     for (size_t i = 0; i < command.size(); ++i) {
         char c = command[i];
@@ -556,7 +581,7 @@ bool bash_pattern_authorizes(const std::string& pattern, const std::string& comm
             // Substitution inside double quotes really executes; inside
             // single quotes it is literal — flagging both is over-strict,
             // which is the safe direction.
-            if (marks_subst(command, i)) cur_subst = true;
+            if (marks_subst(command, i)) cur_unmatchable = true;
             if (quote == '"' && c == '\\' && i + 1 < command.size()) {
                 cur += c;
                 cur += command[++i];
@@ -574,7 +599,9 @@ bool bash_pattern_authorizes(const std::string& pattern, const std::string& comm
         if (c == ';' || c == '\n') { flush(); continue; }
         if (c == '|') {
             flush();
-            if (i + 1 < command.size() && command[i + 1] == '|') ++i;
+            // `||` is one operator; `|&` pipes stderr too.
+            if (i + 1 < command.size()
+                    && (command[i + 1] == '|' || command[i + 1] == '&')) ++i;
             continue;
         }
         if (c == '&') {
@@ -583,23 +610,32 @@ bool bash_pattern_authorizes(const std::string& pattern, const std::string& comm
                 ++i;
                 continue;
             }
-            // A whitespace-delimited `&` backgrounds the left side and starts
-            // a new command. Redirect forms (2>&1, &>, >&) must not split.
-            bool prev_sp = i > 0 && (command[i - 1] == ' ' || command[i - 1] == '\t');
-            bool next_sp = i + 1 >= command.size() || command[i + 1] == ' '
-                        || command[i + 1] == '\t' || command[i + 1] == '\n';
-            if (prev_sp && next_sp) { flush(); continue; }
+            // A lone `&` backgrounds the left side and starts a new command,
+            // with or without whitespace around it (`make&rm x`). It belongs
+            // to a redirect only after `>`/`<` (`2>&1`, `>&2`, `<&3`) or
+            // before `>` (`&>log`, `&>>log`) — the `>` branch judges those.
+            bool redirect = (i > 0 && (command[i - 1] == '>' || command[i - 1] == '<'))
+                         || (i + 1 < command.size() && command[i + 1] == '>');
+            if (!redirect) { flush(); continue; }
             cur += c;
             continue;
         }
-        if (marks_subst(command, i)) cur_subst = true;
+        if ((c == '<' || c == '>') && i + 1 < command.size() && command[i + 1] == '(') {
+            cur_unmatchable = true;  // process substitution runs a command
+        } else if (c == '>') {
+            // `>>`, `>|`, `>&` are judged as one operator from the first `>`;
+            // the second `>` of `>>` is skipped so it isn't judged twice.
+            if (!redirect_is_harmless(i)) cur_unmatchable = true;
+            if (i + 1 < command.size() && command[i + 1] == '>') { cur += c; c = command[++i]; }
+        }
+        if (marks_subst(command, i)) cur_unmatchable = true;
         cur += c;
     }
     flush();
 
     if (segments.empty()) return true;
     for (size_t i = 0; i < segments.size(); ++i) {
-        if (has_subst[i]) return false;
+        if (unmatchable[i]) return false;
         if (fnmatch(pattern.c_str(), segments[i].c_str(), 0) != 0) return false;
     }
     return true;
