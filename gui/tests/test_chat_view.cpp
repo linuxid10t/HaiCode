@@ -354,6 +354,50 @@ main()
         }
     }
 
+    // Follow-the-bottom: live appends keep the view at the bottom only when
+    // it was there; scrolled up, streaming text/reasoning/tool/system lines
+    // leave the reading position alone; back at the bottom, following
+    // resumes; a new prompt always jumps to the bottom.
+    {
+        live.Clear();
+        live.SetMarkdownLayout(60, false);
+        BScrollBar* vsb = live.ScrollContainer()->ScrollBar(B_VERTICAL);
+        auto range_hi = [&]() {
+            float lo = 0, hi = 0;
+            vsb->GetRange(&lo, &hi);
+            return hi;
+        };
+        Apply(live, {Step::User, "q"});
+        for (int i = 0; i < 60; ++i)
+            Apply(live, {Step::Delta, "streamed line " + std::to_string(i) + "\n"});
+        CHECK(vsb && range_hi() > 0, "transcript must be taller than the view");
+        if (vsb) {
+            CHECK(vsb->Value() == range_hi(), "at the bottom: streaming follows");
+
+            vsb->SetValue(range_hi() / 3);
+            float reading = vsb->Value();
+            for (int i = 0; i < 20; ++i)
+                Apply(live, {Step::Delta, "more line " + std::to_string(i) + "\n"});
+            CHECK(vsb->Value() == reading, "scrolled up: streamed text must not scroll");
+            Apply(live, {Step::End, ""});
+            Apply(live, {Step::Reasoning, "thinking about it"});
+            Apply(live, {Step::Tool, "{\"path\":\"a.cpp\"}"});
+            Apply(live, {Step::Result, "contents"});
+            live.AppendSystem("build \xe2\x9c\x93");
+            CHECK(vsb->Value() == reading,
+                  "scrolled up: reasoning/tool/system appends must not scroll");
+
+            vsb->SetValue(range_hi());  // the user scrolls back down
+            for (int i = 0; i < 10; ++i)
+                Apply(live, {Step::Delta, "resumed " + std::to_string(i) + "\n"});
+            CHECK(vsb->Value() == range_hi(), "back at the bottom: following resumes");
+
+            vsb->SetValue(0);
+            Apply(live, {Step::User, "next question"});
+            CHECK(vsb->Value() == range_hi(), "a new prompt jumps to the bottom");
+        }
+    }
+
     // What a click would do (planned only — nothing is launched here).
     {
         char tmpl[] = "/tmp/haicode_linktest_XXXXXX";

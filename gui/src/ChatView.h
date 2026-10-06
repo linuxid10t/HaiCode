@@ -157,6 +157,17 @@ private:
     void SetCopyFeedback(int model_idx, bool visible);
     void ClearCopyFeedback();
     void ScrollToBottom();
+    // Live appends follow the bottom only when the view was showing it
+    // before the change: a user who scrolled up to read stays put while a
+    // reply streams in. Take the anchor FIRST (an append grows the range),
+    // then _FollowScroll after the change. Sending a prompt and loading a
+    // session still jump to the bottom unconditionally.
+    struct ScrollAnchor {
+        bool  at_bottom = true;
+        float value     = 0;
+    };
+    ScrollAnchor _AnchorScroll() const;
+    void _FollowScroll(const ScrollAnchor& anchor);
     void _Rebuild();
     // Streamed assistant text: re-render only the open tail of the reply
     // (haicode::md::render_from) and touch only the bytes that changed.

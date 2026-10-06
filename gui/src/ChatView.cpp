@@ -295,6 +295,33 @@ ChatView::ScrollToBottom()
     }
 }
 
+ChatView::ScrollAnchor
+ChatView::_AnchorScroll() const
+{
+    ScrollAnchor a;
+    if (BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL)) {
+        float lo, hi;
+        vsb->GetRange(&lo, &hi);
+        a.value = vsb->Value();
+        a.at_bottom = a.value >= hi - 1;
+    }
+    return a;
+}
+
+void
+ChatView::_FollowScroll(const ScrollAnchor& anchor)
+{
+    if (anchor.at_bottom) {
+        ScrollToBottom();
+        return;
+    }
+    // Scrolled up: keep the reading position (an append at the end never
+    // moves it by itself; this guards any in-place edit that did).
+    BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL);
+    if (vsb && vsb->Value() != anchor.value)
+        vsb->SetValue(anchor.value);
+}
+
 // The canonical rendering of one entry. Live streaming paths append the same
 // bytes piecewise, so a later _ReplaceEntry lands on identical layout.
 //
@@ -563,6 +590,7 @@ ChatView::AppendUserText(const std::string& text,
 void
 ChatView::AppendTextDelta(const std::string& delta)
 {
+    ScrollAnchor anchor = _AnchorScroll();
     EndReasoningStreaming();
     if (!streaming_ || model_.empty()
             || model_.back().kind != ChatEntry::AssistantText) {
@@ -575,7 +603,7 @@ ChatView::AppendTextDelta(const std::string& delta)
     }
     model_.back().text += delta;
     _StreamMarkdown();
-    ScrollToBottom();
+    _FollowScroll(anchor);
 }
 
 void
@@ -683,14 +711,7 @@ ChatView::SetMarkdownLayout(int cols, bool ascii_borders)
     md_opts_.ascii_borders = ascii_borders;
     if (defer_rebuild_) return;  // EndBatch renders with the new layout
 
-    BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL);
-    float value = 0, lo = 0, hi = 0;
-    if (vsb) {
-        value = vsb->Value();
-        vsb->GetRange(&lo, &hi);
-    }
-    bool at_bottom = !vsb || value >= hi - 1;
-
+    ScrollAnchor anchor = _AnchorScroll();
     for (int i = 0; i < (int)model_.size(); ++i) {
         const ChatEntry& e = model_[i];
         bool markdown = e.kind == ChatEntry::AssistantText
@@ -698,16 +719,13 @@ ChatView::SetMarkdownLayout(int cols, bool ascii_borders)
         if (markdown && haicode::md::width_dependent(e.text))
             _ReplaceEntry(i);
     }
-
-    if (at_bottom)
-        ScrollToBottom();
-    else if (vsb)
-        vsb->SetValue(value);
+    _FollowScroll(anchor);
 }
 
 void
 ChatView::AppendReasoningDelta(const std::string& delta)
 {
+    ScrollAnchor anchor = _AnchorScroll();
     if (!reasoning_streaming_) {
         bool collapsed = thinking_display_ == ThinkingDisplay::AlwaysCollapsed;
         _AppendEntry(_PushEntry({ChatEntry::Reasoning, "", "", true, collapsed, {}}));
@@ -723,7 +741,7 @@ ChatView::AppendReasoningDelta(const std::string& delta)
     }
     e.text += delta;
     _AppendRendered(buf);
-    ScrollToBottom();
+    _FollowScroll(anchor);
 }
 
 void
@@ -743,19 +761,21 @@ ChatView::EndReasoningStreaming()
 void
 ChatView::AppendToolCalled(const std::string& tool_name, const std::string& input_json)
 {
+    ScrollAnchor anchor = _AnchorScroll();
     EndReasoningStreaming();
     streaming_ = false;
     // Shown expanded while the tool runs; collapsed when its result arrives.
     int idx = _PushEntry({ChatEntry::ToolCalled, input_json, tool_name, true, false, {}});
     pending_tools_.push_back(idx);
     _AppendEntry(idx);
-    ScrollToBottom();
+    _FollowScroll(anchor);
 }
 
 void
 ChatView::AppendToolResult(const std::string& output, bool success,
                            const std::string& call_id)
 {
+    ScrollAnchor anchor = _AnchorScroll();
     EndReasoningStreaming();
     streaming_ = false;
     // Collapse the oldest tool call still waiting for its result — in place,
@@ -770,7 +790,7 @@ ChatView::AppendToolResult(const std::string& output, bool success,
     }
     _AppendEntry(_PushEntry({ChatEntry::ToolResult, output, "", success, false,
                              call_id}));
-    ScrollToBottom();
+    _FollowScroll(anchor);
 }
 
 bool
@@ -794,20 +814,22 @@ ChatView::UpdateToolResult(const std::string& call_id, const std::string& output
 void
 ChatView::AppendSystem(const std::string& text)
 {
+    ScrollAnchor anchor = _AnchorScroll();
     EndReasoningStreaming();
     streaming_ = false;
     _AppendEntry(_PushEntry({ChatEntry::System, text, "", true, false, {}}));
-    ScrollToBottom();
+    _FollowScroll(anchor);
 }
 
 void
 ChatView::AppendCompactionSummary(const std::string& header,
                                   const std::string& summary)
 {
+    ScrollAnchor anchor = _AnchorScroll();
     EndReasoningStreaming();
     streaming_ = false;
     _AppendEntry(_PushEntry({ChatEntry::CompactionSummary, summary, header, true, true, {}}));
-    ScrollToBottom();
+    _FollowScroll(anchor);
 }
 
 void
