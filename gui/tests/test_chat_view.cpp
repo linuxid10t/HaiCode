@@ -316,6 +316,12 @@ main()
               a.url_mime);
         CHECK(plan("mailto:a@b.c").url_mime == "application/x-vnd.Be.URL.mailto", "mailto mime");
         CHECK(plan("javascript:alert(1)").kind == MarkdownLinkAction::None, "script url refused");
+        // be:line: 1-based for Pe/Koder/others, 0-based for StyledEdit.
+        CHECK(EditorLineFor("application/x-vnd.Haiku-StyledEdit", 12) == 11, "StyledEdit line");
+        CHECK(EditorLineFor("application/x-vnd.haiku-stylededit", 1) == 0, "StyledEdit first line");
+        CHECK(EditorLineFor("application/x-vnd.KapiX-Koder", 12) == 12, "Koder line");
+        CHECK(EditorLineFor("application/x-vnd.beunited.pe", 12) == 12, "Pe line");
+        CHECK(EditorLineFor("", 12) == 12, "unknown editor line");
         CHECK(plan("x-vnd.app:open").kind == MarkdownLinkAction::None, "app scheme refused");
 
         for (const char* name : {"notes.md", "run.sh", "thing.hpkg"})

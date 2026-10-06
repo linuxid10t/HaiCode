@@ -1,7 +1,9 @@
 #include "MarkdownView.h"
 
+#include <AppFileInfo.h>
 #include <Cursor.h>
 #include <Entry.h>
+#include <File.h>
 #include <Message.h>
 #include <Roster.h>
 #include <ScrollBar.h>
@@ -161,9 +163,15 @@ LaunchFile(std::string path, int line, bool directory)
         // Koder honor it); fall through to a plain launch otherwise.
         entry_ref app;
         if (be_roster->FindApp(&ref, &app) == B_OK) {
+            char signature[B_MIME_TYPE_LENGTH] = "";
+            BFile app_file(&app, B_READ_ONLY);
+            BAppFileInfo info(&app_file);
+            if (info.InitCheck() != B_OK || info.GetSignature(signature) != B_OK)
+                signature[0] = '\0';
             BMessage refs(B_REFS_RECEIVED);
             refs.AddRef("refs", &ref);
-            refs.AddInt32("be:line", line);
+            refs.AddInt32("be:line", EditorLineFor(signature, line));
+            refs.AddInt32("line", line);   // Pe's own key, 1-based
             status_t err = be_roster->Launch(&app, &refs);
             if (err == B_OK || err == B_ALREADY_RUNNING) return;
         }
@@ -177,6 +185,17 @@ LaunchFile(std::string path, int line, bool directory)
 }
 
 }  // namespace
+
+int32
+EditorLineFor(const std::string& app_signature, int line)
+{
+    std::string sig = app_signature;
+    std::transform(sig.begin(), sig.end(), sig.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    if (sig == "application/x-vnd.haiku-stylededit")
+        return std::max(0, line - 1);
+    return line;
+}
 
 MarkdownLinkAction
 PlanMarkdownLink(const std::string& target, const std::string& base_dir)

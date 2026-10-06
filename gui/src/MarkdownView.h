@@ -69,6 +69,11 @@ struct MarkdownLinkAction {
 MarkdownLinkAction PlanMarkdownLink(const std::string& target,
                                     const std::string& base_dir);
 
+// The "be:line" value to send an editor for 1-based `line`. The convention
+// (TextSearch, Pe, Koder) is 1-based, but StyledEdit passes it straight to
+// BTextView::GoToLine(), which counts from 0 — so it gets line - 1.
+int32 EditorLineFor(const std::string& app_signature, int line);
+
 // Opens a usable link without blocking the caller (the launch runs on a
 // detached thread): web URLs and mailto in their registered handler,
 // directories in Tracker, files in their preferred application (at the
