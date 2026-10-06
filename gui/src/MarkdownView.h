@@ -66,6 +66,7 @@ struct MarkdownLinkAction {
     std::string target;     // URL, or the path to open
     std::string url_mime;   // OpenUrl: application/x-vnd.Be.URL.<scheme>
     int         line = 0;   // OpenFile: 1-based line, 0 = none
+    std::string select;     // OpenFolder: file to select in the folder, "" = none
 };
 MarkdownLinkAction PlanMarkdownLink(const std::string& target,
                                     const std::string& base_dir);
@@ -79,8 +80,8 @@ int32 EditorLineFor(const std::string& app_signature, int line);
 // detached thread): web URLs and mailto in their registered handler,
 // directories in Tracker, files in their preferred application (at the
 // linked line when there is one). An executable, or a package, is never
-// launched from a click — its folder opens instead. False when the link is
-// not usable.
+// launched from a click — its folder opens in Tracker with the file selected.
+// False when the link is not usable.
 bool OpenMarkdownLink(const std::string& target, const std::string& base_dir);
 
 // Read-only text view showing rendered markdown; re-renders when a width

@@ -304,11 +304,14 @@ main()
         a = plan("file://" + doc);
         CHECK(a.kind == MarkdownLinkAction::OpenFile && a.target == doc, "file url");
         a = plan("run.sh");
-        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir, "executable only reveals");
+        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir && a.select == script,
+              "executable only reveals, selected");
         a = plan("thing.hpkg");
-        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir, "package only reveals");
+        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir && a.select == pkg,
+              "package only reveals, selected");
         a = plan("sub");
-        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir + "/sub", "directory opens");
+        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir + "/sub" && a.select.empty(),
+              "directory opens, nothing selected");
         CHECK(plan("missing.md").kind == MarkdownLinkAction::None, "missing file unusable");
         CHECK(!MarkdownLinkUsable("missing.md", dir) && MarkdownLinkUsable("notes.md", dir), "usable");
         a = plan("https://x.org/a");
