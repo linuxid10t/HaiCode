@@ -902,14 +902,28 @@ ChatView::SetCopyFeedback(int model_idx, bool visible)
         int32 selected_start, selected_end;
         text_view_->GetSelection(&selected_start, &selected_end);
         text_view_->MakeFocus(false);
-        _DeleteText(start, start + 3);
-        const char* label = visible ? "\xe2\x9c\x93" : "   ";
-        text_view_->Insert(start, label, 3);
-        BFont font(*be_bold_font);
-        rgb_color color = visible ? kColorCopyFeedback : kColorCopyControl;
-        text_view_->SetFontAndColor(start, start + 3, &font, B_FONT_ALL, &color);
-        text_view_->Select(selected_start, selected_end);
-        if (vsb)
+
+        // Swap the 3-byte slot like _ReplaceEntry: insert the new bytes WITH
+        // their style run, then delete the old ones. Never SetFontAndColor
+        // here: with a font mode it calls InvalidateLayout(), so a relayout
+        // re-wraps the whole transcript AFTER this returns — after the scroll
+        // position below was put back (a copy click moved the view).
+        RenderBuf buf;
+        if (visible)
+            buf.Add("\xe2\x9c\x93", kColorCopyFeedback, true);
+        else
+            buf.Add("   ", kColorCopyFeedback);  // as AddCopyControl renders it
+        TextRunArrayPtr runs = MakeRunArray(buf);
+        text_view_->Insert(start, buf.text.data(), buf.Length(), runs.get());
+        _DeleteText(start + buf.Length(), start + buf.Length() + 3);
+
+        // Put back a real selection (Insert collapses it). A bare caret
+        // stays where _DeleteText parked it, in view: restoring it would put
+        // it back where appends left it — the end of the transcript — for
+        // the next caret scroll to jump to.
+        if (selected_start != selected_end)
+            text_view_->Select(selected_start, selected_end);
+        if (vsb && vsb->Value() != scroll_value)
             vsb->SetValue(scroll_value);
         return;
     }
