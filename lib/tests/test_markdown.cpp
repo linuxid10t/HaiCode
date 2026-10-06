@@ -121,7 +121,7 @@ void test_blocks()
     TEST_REQUIRE(lines[0] == repeat_check("\xe2\x94\x80", 10), "rule spans max_cols");
     TEST_REQUIRE(flags_of(s, "\xe2\x94\x80") == (kMono | kDim), "rule style");
     TEST_REQUIRE(lines[1] == "x y", "bold paragraph");
-    TEST_REQUIRE(split(render("---", opts(200)).text)[0].size() == 80 * 3, "rule capped at 80");
+    TEST_REQUIRE(split(render("---", opts(200)).text)[0].size() == 200 * 3, "rule spans max_cols");
     TEST_REQUIRE(render("---", opts(10, true)).text == "----------", "ascii rule");
 
     // Quotes.
@@ -171,35 +171,38 @@ void test_tables()
         "| pear | 12 | a \\| b |\n";
     Styled s = render(md, opts());
     auto lines = split(s.text);
-    TEST_REQUIRE(lines.size() == 6, "table line count: " + s.text);
-    TEST_REQUIRE(lines[0] == "\xe2\x94\x8c\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
-                 "\xe2\x94\xac\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
-                 "\xe2\x94\xac\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
-                 "\xe2\x94\x90", "top border: " + lines[0]);
-    const std::string V = "\xe2\x94\x82";
-    TEST_REQUIRE(lines[1] == V + " Name  " + V + " Qty " + V + " Note  " + V, "header row: " + lines[1]);
-    TEST_REQUIRE(lines[3] == V + " apple " + V + "   3 " + V + "  ok   " + V, "aligned row: " + lines[3]);
-    TEST_REQUIRE(lines[4] == V + " pear  " + V + "  12 " + V + " a | b " + V, "escaped pipe: " + lines[4]);
-    for (const auto& l : lines)
-        TEST_REQUIRE(display_width(l) == display_width(lines[0]), "rows equal width: " + l);
+    const std::string H = "\xe2\x94\x80";   // ─
+    // Horizontal rules only: header, column-wise underline, rows; columns two
+    // spaces apart; no trailing whitespace.
+    TEST_REQUIRE(lines.size() == 4, "table line count: " + s.text);
+    TEST_REQUIRE(lines[0] == "Name   Qty  Note", "header row: [" + lines[0] + "]");
+    TEST_REQUIRE(lines[1] == repeat_check(H, 5) + "  " + repeat_check(H, 3) + "  " + repeat_check(H, 5),
+                 "header underline: " + lines[1]);
+    TEST_REQUIRE(lines[2] == "apple    3   ok", "aligned row: [" + lines[2] + "]");
+    TEST_REQUIRE(lines[3] == "pear    12  a | b", "escaped pipe: [" + lines[3] + "]");
+    TEST_REQUIRE(s.text.find("\xe2\x94\x82") == std::string::npos, "no vertical borders");
     TEST_REQUIRE(flags_of(s, "Name") == (kMono | kBold), "header style");
     TEST_REQUIRE(flags_of(s, "apple") == (kMono | kBold), "bold cell");
     TEST_REQUIRE(flags_of(s, "ok") == (kMono | kCode), "code cell");
     TEST_REQUIRE(flags_of(s, "pear") == kMono, "plain cell");
-    TEST_REQUIRE(flags_of(s, V) == (kMono | kDim), "border style");
+    TEST_REQUIRE(flags_of(s, H) == (kMono | kDim), "rule style");
     TEST_REQUIRE(width_dependent(md), "table is width dependent");
 
-    // ASCII borders.
+    // ASCII rule.
     s = render("a|b\n-|-\n1|2", opts(80, true));
-    TEST_REQUIRE(s.text == "+---+---+\n| a | b |\n+---+---+\n| 1 | 2 |\n+---+---+", "ascii table: " + s.text);
+    TEST_REQUIRE(s.text == "a  b\n-  -\n1  2", "ascii table: " + s.text);
 
-    // Short rows padded, long rows truncated; header-only table.
+    // Short rows padded (no trailing spaces), long rows truncated; header-only table.
     s = render("|a|b|\n|-|-|\n|1|\n|1|2|3|", opts(80, true));
-    TEST_REQUIRE(split(s.text)[3] == "| 1 |   |" && split(s.text)[4] == "| 1 | 2 |", "pad/truncate: " + s.text);
-    TEST_REQUIRE(render("|a|\n|-|", opts(80, true)).text == "+---+\n| a |\n+---+",
+    TEST_REQUIRE(s.text == "a  b\n-  -\n1\n1  2", "pad/truncate: [" + s.text + "]");
+    TEST_REQUIRE(render("|a|\n|-|", opts(80, true)).text == "a\n-",
                  "header only: " + render("|a|\n|-|", opts(80, true)).text);
+    // An empty leading cell still aligns the next column.
+    s = render("|a|b|\n|-|-|\n||x|", opts(80, true));
+    TEST_REQUIRE(split(s.text)[2] == "   x", "empty first cell: [" + s.text + "]");
 
-    // Narrow: wide columns wrap inside their cells; every line fits exactly.
+    // Narrow: wide columns wrap inside their cells; nothing exceeds max_cols,
+    // the underline spans it exactly, wrapped rows are set apart.
     const std::string wide =
         "| id | description |\n|---|---|\n"
         "| 1 | the quick brown fox jumps over the lazy dog again and again |\n"
@@ -207,23 +210,29 @@ void test_tables()
     s = render(wide, opts(30, true));
     lines = split(s.text);
     for (const auto& l : lines)
-        TEST_REQUIRE(display_width(l) == 30, "wrapped table fills max_cols: [" + l + "]");
-    TEST_REQUIRE(s.text.find("| 1  | the quick brown fox   |") != std::string::npos,
-                 "first wrapped line: " + s.text);
-    TEST_REQUIRE(lines.size() > 6, "wrapped rows add lines");
-    // Multi-line rows get separators between body rows.
-    int seps = 0;
-    for (const auto& l : lines) if (l.rfind("+", 0) == 0) ++seps;
-    TEST_REQUIRE(seps == 4, "top/head/between/bottom separators: " + s.text);
+        TEST_REQUIRE(display_width(l) <= 30, "wrapped table fits max_cols: [" + l + "]");
+    TEST_REQUIRE(display_width(lines[1]) == 30, "underline spans max_cols: " + lines[1]);
+    TEST_REQUIRE(lines[2] == "1   the quick brown fox jumps", "first wrapped line: [" + lines[2] + "]");
+    TEST_REQUIRE(lines[3] == "    over the lazy dog again", "continuation: [" + lines[3] + "]");
+    size_t blank = 0;
+    for (const auto& l : lines) blank += l.empty();
+    TEST_REQUIRE(blank == 1 && lines.back() == "2   short", "empty line between wrapped rows: " + s.text);
+    // Rows that never wrap are not spaced out.
+    TEST_REQUIRE(split(render("|a|b|\n|-|-|\n|1|2|\n|3|4|", opts()).text).size() == 4, "compact rows");
 
     // <br> breaks inside a cell.
     s = render("|a|\n|-|\n|x<br>yy<br/>z|", opts(80, true));
-    TEST_REQUIRE(s.text == "+----+\n| a  |\n+----+\n| x  |\n| yy |\n| z  |\n+----+", "br: " + s.text);
+    TEST_REQUIRE(s.text == "a\n--\nx\nyy\nz", "br: " + s.text);
 
     // Too narrow for a grid: record layout.
-    s = render("| k | v |\n|---|---|\n| one | **1** |\n| two | 2 |", opts(8));
+    s = render("| k | v |\n|---|---|\n| one | **1** |\n| two | 2 |", opts(5));
     TEST_REQUIRE(s.text == "k: one\nv: 1\n\nk: two\nv: 2", "record layout: " + s.text);
     TEST_REQUIRE(flags_of(s, "k:") == kBold && flags_of(s, "1") == kBold, "record styles");
+
+    // Links in cells drop the dim URL (it would only widen the column).
+    s = render("| site |\n|---|\n| [docs](https://x.org/very/long/path) |", opts());
+    TEST_REQUIRE(split(s.text)[2] == "docs" && s.text.find("x.org") == std::string::npos,
+                 "no URL suffix in cells: " + s.text);
 
     // Not a table: count mismatch, missing delimiter, pipes in code.
     TEST_REQUIRE(render("a | b | c\n--|--", opts()).text == "a | b | c\n--|--", "count mismatch");
@@ -236,7 +245,7 @@ void test_tables()
     TEST_REQUIRE(display_width("a\xe4\xb8\xad") == 3, "CJK width");
     TEST_REQUIRE(display_width("e\xcc\x81") == 1, "combining width");
     s = render("|\xe4\xb8\xad|x|\n|-|-|", opts(80, true));
-    TEST_REQUIRE(split(s.text)[1] == "| \xe4\xb8\xad | x |", "wide cell: " + s.text);
+    TEST_REQUIRE(split(s.text)[0] == "\xe4\xb8\xad  x", "wide cell: " + s.text);
 }
 
 // Text covered by each link span, paired with its target.
@@ -256,14 +265,21 @@ void test_links()
     Styled s = render("See [the docs](https://x.org/d \"t\"), <https://z.org>, "
                       "https://bare.org/a_(b). and ![shot](/tmp/s.png) or [sec](#a)", opts());
     auto links = links_of(s);
-    TEST_REQUIRE(links.size() == 5, "five links: " + std::to_string(links.size()));
+    TEST_REQUIRE(links.size() == 4, "four links (anchor can't open): " + std::to_string(links.size()));
     TEST_REQUIRE(links[0] == P("the docs (https://x.org/d)", "https://x.org/d"), "md link covers label + url");
     TEST_REQUIRE(links[1] == P("https://z.org", "https://z.org"), "autolink");
     TEST_REQUIRE(links[2] == P("https://bare.org/a_(b)", "https://bare.org/a_(b)"),
                  "bare url keeps balanced paren, drops trailing dot: " + links[2].first);
     TEST_REQUIRE(links[3] == P("[image: shot] (/tmp/s.png)", "/tmp/s.png"), "image links its source");
-    TEST_REQUIRE(links[4] == P("sec", "#a"), "anchor link recorded (resolves to nothing)");
+    TEST_REQUIRE(flags_of(s, "sec") == 0, "anchor label plain");
     TEST_REQUIRE(flags_of(s, "https://bare") == kLink, "bare url styled as link");
+
+    // Destinations that can never open keep a plain label (URL still shown).
+    s = render("[bad](javascript:alert(1)) ![x](data:image/png;base64,AA)", opts());
+    TEST_REQUIRE(s.text == "bad (javascript:alert(1)) [image: x] (data:image/png;base64,AA)",
+                 "refused links: " + s.text);
+    TEST_REQUIRE(s.links.empty() && flags_of(s, "bad") == 0 && flags_of(s, "[image") == kDim,
+                 "refused links unstyled, unregistered");
     for (const auto& l : s.links) TEST_REQUIRE(!l.implicit, "explicit links");
 
     // Images: <...> source form, no alt, bold context.
@@ -297,7 +313,7 @@ void test_links()
     // Links inside table cells keep their spans through padding and wrapping.
     s = render("| file | note |\n|---|---|\n| [x](a.md) | see `lib/b.cpp` now |", opts(80, true));
     links = links_of(s);
-    TEST_REQUIRE(links.size() == 2 && links[0] == P("x (a.md)", "a.md")
+    TEST_REQUIRE(links.size() == 2 && links[0] == P("x", "a.md")
                  && links[1] == P("lib/b.cpp", "lib/b.cpp") && links[1].first.size() == 9,
                  "table cell links: " + s.text);
     s = render("|a|\n|-|\n|[one two three four](https://w.org)|", opts(14, true));
@@ -305,7 +321,7 @@ void test_links()
     TEST_REQUIRE(links.size() >= 2, "wrapped link split per line: " + s.text);
     for (const auto& l : links) TEST_REQUIRE(l.second == "https://w.org", "wrapped link target");
     // Record layout keeps links.
-    s = render("| k | v |\n|---|---|\n| [x](https://r.org) | 1 |", opts(8));
+    s = render("| k | v |\n|---|---|\n| [x](https://r.org) | 1 |", opts(5));
     TEST_REQUIRE(links_of(s).size() == 1 && links_of(s)[0].second == "https://r.org", "record layout link");
 
     // append/slice carry links with rebased offsets.
@@ -327,12 +343,14 @@ void test_resolve_link()
     TEST_REQUIRE(r("www.x.org").kind == LinkKind::Web && r("www.x.org").target == "https://www.x.org", "www");
     TEST_REQUIRE(r("mailto:a@b.c").kind == LinkKind::Mail, "mailto");
     for (const char* bad : {"javascript:alert(1)", "data:text/html,x", "x-vnd.foo:bar", "ftp://x",
-                            "#anchor", "", "https://", "a b.txt", "file://relative/x", "%00.txt"})
+                            "#anchor", "", "https://", "https://a b.org", "www.a b.org", "a\tb.txt", "file://relative/x", "%00.txt"})
         TEST_REQUIRE(r(bad).kind == LinkKind::None, std::string("refused: ") + bad);
 
     auto f = r("lib/x.cpp");
     TEST_REQUIRE(f.kind == LinkKind::File && f.target == "/proj/lib/x.cpp" && f.line == 0, "relative: " + f.target);
     TEST_REQUIRE(r("./a.md").target == "/proj/a.md", "dot-slash");
+    TEST_REQUIRE(r("my shot.png").kind == LinkKind::File && r("my shot.png").target == "/proj/my shot.png",
+                 "spaces allowed in paths");
     TEST_REQUIRE(r("../up.md").target == "/proj/../up.md", "parent kept for the OS to resolve");
     TEST_REQUIRE(r("/abs/p.png").target == "/abs/p.png", "absolute");
     TEST_REQUIRE(r("~/n.txt").target == "/home/u/n.txt", "home");

@@ -444,6 +444,7 @@ delimiter_row(std::string_view line, size_t ncols, std::vector<Align>* aligns)
 // ---------------------------------------------------------------------------
 
 constexpr int kMaxInlineDepth = 16;
+constexpr int kTableGap = 2;   // spaces between table columns
 
 // Opening position of an emphasis closer: a run of exactly k `c` characters
 // not preceded by whitespace (for '_', not followed by a word character).
@@ -551,6 +552,14 @@ looks_like_link(std::string_view c)
     return letter;
 }
 
+// Whether a link destination can open at all (scheme policy only; whether a
+// file exists is the frontend's call). Any base works for that decision.
+bool
+link_openable(std::string_view dest)
+{
+    return resolve_link(dest, "/", "/").kind != LinkKind::None;
+}
+
 void render_inline(std::string_view s, uint16_t flags, uint8_t heading,
                    Styled& out, int depth = 0);
 
@@ -627,10 +636,11 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                     std::string label = alt.empty() ? std::string("[image]")
                                                     : "[image: " + std::string(alt) + "]";
                     size_t start = out.text.size();
-                    out.add(label, flags | kLink, heading);
-                    if (!src.empty())
+                    const bool openable = link_openable(src);
+                    out.add(label, openable ? flags | kLink : keep | kDim, heading);
+                    if (!src.empty() && !(flags & kMono))
                         out.add(" (" + std::string(src) + ")", keep | kDim, heading);
-                    add_link(start, src, false);
+                    if (openable) add_link(start, src, false);
                     i = cp + 1;
                     continue;
                 }
@@ -656,10 +666,16 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                     }
                     flush();
                     size_t start = out.text.size();
-                    render_inline(label, flags | kLink, heading, out, depth + 1);
-                    if (!dest.empty() && dest != label && dest.front() != '#')
+                    // A destination that can never open (javascript:, an
+                    // anchor, ...) keeps its label plain, not link-styled.
+                    const bool openable = link_openable(dest);
+                    render_inline(label, openable ? flags | kLink : flags, heading, out,
+                                  depth + 1);
+                    // Inside a table the URL would only widen the column.
+                    if (!dest.empty() && dest != label && dest.front() != '#'
+                        && !(flags & kMono))
                         out.add(" (" + std::string(dest) + ")", keep | kDim, heading);
-                    add_link(start, dest, false);
+                    if (openable) add_link(start, dest, false);
                     i = cp + 1;
                     continue;
                 }
@@ -917,7 +933,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
     }
 
-    const int frame = 3 * static_cast<int>(n) + 1;
+    const int frame = kTableGap * (static_cast<int>(n) - 1);
     const int avail = opts.max_cols - frame;
     long total = 0;
     for (int w : nat) total += w;
@@ -987,17 +1003,20 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
     }
 
-    const bool ascii = opts.ascii_borders;
-    const std::string h = ascii ? "-" : "\xe2\x94\x80";
-    const std::string v = ascii ? "|" : "\xe2\x94\x82";
-    auto border = [&](const char* l, const char* m, const char* r) {
+    // Horizontal rules only: a text view leaves a gap between lines, so
+    // vertical box glyphs never join up into a solid border, while a rule
+    // within one line always does. The header is underlined column by
+    // column; rows that wrap are set apart by an empty line.
+    const std::string h = opts.ascii_borders ? "-" : "\xe2\x94\x80";   // ─
+    const std::string gap(kTableGap, ' ');
+    auto rule = [&] {
         begin_line(out, st);
-        std::string s = ascii ? "+" : l;
+        std::string line;
         for (size_t c = 0; c < n; ++c) {
-            s += repeat(h, width[c] + 2);
-            s += c + 1 < n ? (ascii ? "+" : m) : (ascii ? "+" : r);
+            if (c) line += gap;
+            line += repeat(h, width[c]);
         }
-        out.add(s, kMono | kDim);
+        out.add(line, kMono | kDim);
     };
     auto row = [&](const std::vector<Cell>& cells) {
         std::vector<std::vector<GlyphLine>> wrapped(n);
@@ -1008,14 +1027,21 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
         for (size_t y = 0; y < height; ++y) {
             begin_line(out, st);
-            out.add(v, kMono | kDim);
+            // Padding is emitted lazily, just before the next glyph, so a
+            // line never ends in whitespace (empty trailing cells, last-column
+            // padding).
+            size_t pending = 0;
+            auto flush_pad = [&] {
+                if (pending) out.add(std::string(pending, ' '), kMono);
+                pending = 0;
+            };
             for (size_t c = 0; c < n; ++c) {
                 GlyphLine empty;
                 const GlyphLine& gl = y < wrapped[c].size() ? wrapped[c][y] : empty;
                 int pad = std::max(0, width[c] - line_width(gl));
                 int lpad = aligns[c] == Align::Right ? pad
                          : aligns[c] == Align::Center ? pad / 2 : 0;
-                out.add(std::string(1 + lpad, ' '), kMono);
+                pending += (c ? gap.size() : 0) + lpad;
                 // A link wrapped over several lines becomes one span per line.
                 int open = -1;
                 size_t open_start = 0;
@@ -1027,6 +1053,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
                     open = -1;
                 };
                 for (const auto& g : gl) {
+                    flush_pad();
                     if (g.link != open) {
                         close_link();
                         open = g.link;
@@ -1035,29 +1062,24 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
                     out.add(g.s, g.flags);
                 }
                 close_link();
-                out.add(std::string(pad - lpad + 1, ' '), kMono);
-                out.add(v, kMono | kDim);
+                pending += pad - lpad;
             }
         }
-        return height;
     };
 
-    // Body rows get separators only when some row wraps onto several lines.
     bool multi = false;
     for (size_t r = 0; r < body.size() && !multi; ++r)
         for (size_t c = 0; c < n && !multi; ++c)
             multi = wrap_cell(body[r][c].glyphs, width[c]).size() > 1;
 
-    border("\xe2\x94\x8c", "\xe2\x94\xac", "\xe2\x94\x90");    // ┌ ┬ ┐
     row(head);
-    if (!body.empty())
-        border("\xe2\x94\x9c", "\xe2\x94\xbc", "\xe2\x94\xa4");    // ├ ┼ ┤
+    rule();
     for (size_t r = 0; r < body.size(); ++r) {
-        if (r > 0 && multi)
-            border("\xe2\x94\x9c", "\xe2\x94\xbc", "\xe2\x94\xa4");
+        if (r > 0 && multi) {
+            begin_line(out, st);   // empty line between wrapped rows
+        }
         row(body[r]);
     }
-    border("\xe2\x94\x94", "\xe2\x94\xb4", "\xe2\x94\x98");    // └ ┴ ┘
 }
 
 // Render the unit starting at lines[i]. `consumed` receives the number of
@@ -1121,7 +1143,7 @@ render_unit(const std::vector<Line>& lines, size_t i, State& st,
 
     if (thematic_break(L.s)) {
         begin_line(out, st);
-        int w = std::clamp(opts.max_cols, 3, 80);
+        int w = std::max(opts.max_cols, 3);
         out.add(repeat(opts.ascii_borders ? "-" : "\xe2\x94\x80", w), kMono | kDim);
         return;
     }
@@ -1283,23 +1305,28 @@ resolve_link(std::string_view dest, std::string_view base_dir, std::string_view 
     LinkTarget r;
     std::string_view d = trim(dest);
     if (d.empty() || d.front() == '#') return r;
-    if (std::any_of(d.begin(), d.end(), [](char c) { return is_ws(c); })) return r;
+    // Spaces are legal in file names (`![x](<my shot.png>)`), never in URLs;
+    // other whitespace (tabs, line breaks) is never part of a destination.
+    if (std::any_of(d.begin(), d.end(), [](char c) { return is_ws(c) && c != ' '; }))
+        return r;
+    const bool has_space = d.find(' ') != std::string_view::npos;
 
     if (starts_with_ci(d, "http://") || starts_with_ci(d, "https://")) {
-        if (d.size() > (starts_with_ci(d, "https://") ? 8u : 7u)) {
+        if (!has_space && d.size() > (starts_with_ci(d, "https://") ? 8u : 7u)) {
             r.kind = LinkKind::Web;
             r.target = d;
         }
         return r;
     }
     if (starts_with_ci(d, "mailto:")) {
-        if (d.size() > 7) {
+        if (!has_space && d.size() > 7) {
             r.kind = LinkKind::Mail;
             r.target = d;
         }
         return r;
     }
     if (starts_with_ci(d, "www.")) {
+        if (has_space) return r;
         r.kind = LinkKind::Web;
         r.target = "https://" + std::string(d);
         return r;
