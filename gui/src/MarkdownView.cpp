@@ -27,6 +27,8 @@ MarkdownPaletteFor(rgb_color base)
     p.code_block = {  70,  70,  95, 255 };
     p.link       = {  30,  90, 200, 255 };
     p.dim        = { 150, 150, 150, 255 };
+    // Darker than `dim`: the grid must read clearly yet stay behind the text.
+    p.rule       = {  90,  90,  90, 255 };
     p.quote      = { 105, 105, 105, 255 };
     return p;
 }
@@ -56,6 +58,7 @@ MarkdownFont(uint16 flags, uint8 heading)
 rgb_color
 MarkdownColor(uint16 flags, const MarkdownPalette& palette)
 {
+    if (flags & kRule) return palette.rule;
     if (flags & kDim) return palette.dim;
     if (flags & kCode) return palette.code;
     if (flags & kCodeBlock) return palette.code_block;

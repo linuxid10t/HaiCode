@@ -31,9 +31,10 @@ enum StyleFlag : uint16_t {
     kCode      = 1u << 3,   // inline code span
     kCodeBlock = 1u << 4,   // fenced code block line
     kLink      = 1u << 5,   // link text
-    kDim       = 1u << 6,   // decoration: table borders, rules, URLs, fence labels
+    kDim       = 1u << 6,   // decoration: URLs, fence labels
     kMono      = 1u << 7,   // fixed-width grid (tables, rules)
     kQuote     = 1u << 8,   // block quote content
+    kRule      = 1u << 9,   // table borders and thematic breaks
 };
 
 struct Run {

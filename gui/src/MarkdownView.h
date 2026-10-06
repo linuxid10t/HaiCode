@@ -19,7 +19,8 @@ struct MarkdownPalette {
     rgb_color code;        // inline code spans
     rgb_color code_block;  // fenced code lines
     rgb_color link;
-    rgb_color dim;         // table borders, rules, URLs, fence labels
+    rgb_color dim;         // URLs after links, fence labels
+    rgb_color rule;        // table borders, thematic breaks
     rgb_color quote;
 };
 

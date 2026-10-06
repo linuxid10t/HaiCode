@@ -1012,7 +1012,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
             s += repeat(h, width[c] + 2);
             s += c + 1 < n ? (ascii ? "+" : m) : (ascii ? "+" : r);
         }
-        out.add(s, kMono | kDim);
+        out.add(s, kMono | kRule);
     };
     auto row = [&](const std::vector<Cell>& cells) {
         std::vector<std::vector<GlyphLine>> wrapped(n);
@@ -1023,7 +1023,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
         for (size_t y = 0; y < height; ++y) {
             begin_line(out, st);
-            out.add(v, kMono | kDim);
+            out.add(v, kMono | kRule);
             for (size_t c = 0; c < n; ++c) {
                 GlyphLine empty;
                 const GlyphLine& gl = y < wrapped[c].size() ? wrapped[c][y] : empty;
@@ -1051,7 +1051,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
                 }
                 close_link();
                 out.add(std::string(pad - lpad + 1, ' '), kMono);
-                out.add(v, kMono | kDim);
+                out.add(v, kMono | kRule);
             }
         }
         return height;
@@ -1137,7 +1137,7 @@ render_unit(const std::vector<Line>& lines, size_t i, State& st,
     if (thematic_break(L.s)) {
         begin_line(out, st);
         int w = std::max(opts.max_cols, 3);
-        out.add(repeat(opts.ascii_borders ? "-" : "\xe2\x94\x80", w), kMono | kDim);
+        out.add(repeat(opts.ascii_borders ? "-" : "\xe2\x94\x80", w), kMono | kRule);
         return;
     }
 

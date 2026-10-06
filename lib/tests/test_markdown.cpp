@@ -119,7 +119,7 @@ void test_blocks()
     s = render("* * *\n**x** y", opts(10));
     lines = split(s.text);
     TEST_REQUIRE(lines[0] == repeat_check("\xe2\x94\x80", 10), "rule spans max_cols");
-    TEST_REQUIRE(flags_of(s, "\xe2\x94\x80") == (kMono | kDim), "rule style");
+    TEST_REQUIRE(flags_of(s, "\xe2\x94\x80") == (kMono | kRule), "rule style");
     TEST_REQUIRE(lines[1] == "x y", "bold paragraph");
     TEST_REQUIRE(split(render("---", opts(200)).text)[0].size() == 200 * 3, "rule spans max_cols");
     TEST_REQUIRE(render("---", opts(10, true)).text == "----------", "ascii rule");
@@ -186,7 +186,7 @@ void test_tables()
     TEST_REQUIRE(flags_of(s, "apple") == (kMono | kBold), "bold cell");
     TEST_REQUIRE(flags_of(s, "ok") == (kMono | kCode), "code cell");
     TEST_REQUIRE(flags_of(s, "pear") == kMono, "plain cell");
-    TEST_REQUIRE(flags_of(s, V) == (kMono | kDim), "border style");
+    TEST_REQUIRE(flags_of(s, V) == (kMono | kRule), "border style");
     TEST_REQUIRE(width_dependent(md), "table is width dependent");
 
     // ASCII borders.
