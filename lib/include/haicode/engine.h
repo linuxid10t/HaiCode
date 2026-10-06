@@ -64,13 +64,17 @@ public:
 
 // Per-step status the agentic loop keeps the model anchored to: the
 // final-stretch step-budget text (render_dynamic_prompt), the rendered todo
-// list (todos_tracked=false in Plan mode, which doesn't show it), and the
-// offline flag.
+// list (todos_tracked=false in Plan mode, which doesn't show it), the
+// offline flag, and the active plan (.haicode/plans/): `plan` is the text to
+// send, `plan_key` its identity (file name + content hash; empty = no active
+// plan) — only the key is compared and persisted.
 struct StepStatus {
     std::string budget;
     std::string todos;
     bool todos_tracked = true;
     bool offline = false;
+    std::string plan;
+    std::string plan_key;
 };
 
 // Everything besides the stored messages that determines an agentic step's
@@ -550,10 +554,11 @@ std::string render_dynamic_prompt(const std::string& model,
 // and replayed in place), so only the parts that CHANGED since the last
 // persisted update (`previous`, null when none is in context) are sent;
 // unchanged state is already in context. Parts that disappeared get an
-// explicit line (budget renewed, todo list empty, offline off) so a stale
-// earlier copy is never the model's latest word. Returns null when nothing
-// changed, else {"text", "budget", "todos", "offline"} — the full current
-// state, which the next call compares against.
+// explicit line (budget renewed, todo list empty, offline off, no active
+// plan) so a stale earlier copy is never the model's latest word. Returns
+// null when nothing changed, else {"text", "budget", "todos", "offline",
+// "plan"} ("plan" = plan_key, absent when no plan is active) — the full
+// current state, which the next call compares against.
 nlohmann::json next_status_update(const StepStatus& now,
                                   const nlohmann::json& previous);
 
