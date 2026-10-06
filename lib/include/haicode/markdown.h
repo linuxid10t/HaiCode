@@ -42,17 +42,31 @@ struct Run {
     uint8_t  heading;   // 0 = none, 1..6 = heading level
 };
 
+// A clickable range of the display text. `target` is the destination as
+// written (URL, file:// URL, absolute/relative/~ path) — resolve_link()
+// decides what it opens. Implicit links are inline code spans that merely
+// look like a path or URL: the frontend makes them clickable only when the
+// target actually exists.
+struct LinkSpan {
+    size_t      start;
+    size_t      end;
+    std::string target;
+    bool        implicit = false;
+    bool operator==(const LinkSpan& o) const = default;
+};
+
 // Display text plus contiguous style runs (each run lasts until the next
 // run's offset). Adjacent identical styles are always merged.
 struct Styled {
-    std::string      text;
-    std::vector<Run> runs;
+    std::string           text;
+    std::vector<Run>      runs;
+    std::vector<LinkSpan> links;   // ascending, non-overlapping
 
     void add(std::string_view s, uint16_t flags = 0, uint8_t heading = 0);
     void append(const Styled& other);
     // Style of the byte at `pos` (pos < text.size()).
     Run style_at(size_t pos) const;
-    // Copy of [from, end) with runs rebased to 0.
+    // Copy of [from, end) with runs (and links, clipped) rebased to 0.
     Styled slice(size_t from) const;
     bool operator==(const Styled& o) const;
 };
@@ -98,6 +112,24 @@ bool width_dependent(std::string_view text);
 // and the style of every byte agree, backed off to a UTF-8 character
 // boundary.
 size_t common_prefix(const Styled& a, const Styled& b);
+
+// What a link destination opens.
+enum class LinkKind { None, Web, Mail, File };
+
+struct LinkTarget {
+    LinkKind    kind = LinkKind::None;
+    std::string target;   // URL for Web/Mail, absolute path for File
+    int         line = 0; // File: 1-based line from "#L12" / ":12", 0 = none
+};
+
+// Resolve a link destination. http(s) and mailto open as-is; file:// URLs,
+// absolute paths, ~/ paths, and paths relative to `base_dir` (percent-decoded,
+// "#L12" / ":12[:3]" line suffixes split off) open as files. Every other
+// scheme (javascript:, data:, custom app schemes, ...) and bare #anchors
+// resolve to None — the model writes these links, so only known-safe kinds
+// are ever handed to the system.
+LinkTarget resolve_link(std::string_view dest, std::string_view base_dir,
+                        std::string_view home_dir);
 
 // Terminal-style display width of UTF-8 text in fixed-width cells (East
 // Asian wide characters count 2, combining marks 0).

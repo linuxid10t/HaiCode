@@ -47,6 +47,17 @@ PlanReviewWindow::PlanReviewWindow(const std::string& plan_markdown,
     plan_view->SetLowColor(ui_color(B_PANEL_BACKGROUND_COLOR));
     plan_view->SetExplicitMinSize(BSize(600, 400));
     plan_view->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
+    // Relative links in the plan resolve against the project directory
+    // (plans live in <project>/.haicode/plans/).
+    std::string base_dir = plan_path;
+    size_t plans = base_dir.rfind("/.haicode/plans/");
+    if (plans != std::string::npos)
+        base_dir.resize(plans);
+    else if (size_t slash = base_dir.rfind('/'); slash != std::string::npos)
+        base_dir.resize(slash);
+    else
+        base_dir.clear();
+    plan_view->SetBaseDirectory(base_dir);
     plan_view->SetMarkdown(plan_markdown);
 
     BScrollView* plan_scroll = new BScrollView("plan_scroll", plan_view,

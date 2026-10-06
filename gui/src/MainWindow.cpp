@@ -639,6 +639,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // ---- ChatView ----
     chat_view_ = new ChatView("chat_view");
+    chat_view_->SetBaseDirectory(project_dir_);
     // Engine already exists (created before MainWindow) — apply the persisted
     // thinking-display preference so the initial view matches the config.
     _ApplyThinkingDisplay();
@@ -1510,6 +1511,7 @@ MainWindow::_SelectSession(int idx)
         if (!si->directory.empty()) {
             project_dir_ = si->directory;
             dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
+            chat_view_->SetBaseDirectory(project_dir_);
         }
 
         // Restore provider + model dropdowns
@@ -1799,6 +1801,7 @@ MainWindow::_ApplyDirectory(const std::string& path)
 {
     project_dir_ = path;
     dir_btn_->SetLabel(dir_basename(project_dir_).c_str());
+    chat_view_->SetBaseDirectory(project_dir_);
     _RefreshSkills();  // project skill dir is relative
     if (!active_session_id_.empty()) {
         store_.update_directory(active_session_id_, project_dir_);

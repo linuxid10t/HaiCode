@@ -21,6 +21,7 @@ public:
                       uint32 flags, uint32 resizingMode);
     void SetOwner(ChatView* owner) { owner_ = owner; }
     void MouseDown(BPoint where) override;
+    void MouseUp(BPoint where) override;
     void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override;
     void FrameResized(float width, float height) override;
     void MakeFocus(bool focus = true) override;
@@ -28,6 +29,7 @@ public:
     void MessageReceived(BMessage* message) override;
 private:
     ChatView* owner_ = nullptr;
+    int32     pressed_link_offset_ = -1;   // offset of a primary press on a link
 };
 
 struct ChatEntry {
@@ -57,6 +59,14 @@ struct CopyControlRange {
     int32 start, end;
     int32 feedback_start;
     int   model_idx;
+};
+
+// A clickable link in the view (from haicode::md::LinkSpan).
+struct LinkRange {
+    int32       start, end;
+    int         model_idx;
+    std::string target;
+    bool        implicit;
 };
 
 class ChatView {
@@ -108,6 +118,16 @@ public:
     // depend on it (no-op when unchanged). Public for tests.
     void SetMarkdownLayout(int cols, bool ascii_borders);
 
+    // Links in rendered markdown open on click; relative paths resolve
+    // against the session's project directory.
+    void SetBaseDirectory(const std::string& dir);
+    int  FindLinkAt(int32 offset) const;
+    // Hand cursor? Existence is cached while the pointer stays on one link;
+    // -1 (pointer off every link) clears the cache.
+    bool LinkUsable(int link_idx);
+    void OpenLink(int link_idx);
+    const std::vector<LinkRange>& Links() const { return link_ranges_; }
+
     // Called by ClickableTextView::MouseDown
     int  FindBlockAt(int32 offset) const;
     bool IsIndicatorAt(BPoint where) const;
@@ -152,6 +172,12 @@ private:
     std::vector<int32>            entry_starts_;  // parallel to model_
     std::vector<ToolHeaderRange>  header_ranges_;
     std::vector<CopyControlRange> copy_ranges_;
+    std::vector<LinkRange>        link_ranges_;
+    std::string                   base_dir_;
+    // Hover cache: MouseMoved fires constantly, so a file link is stat()ed
+    // once per entry into it rather than per move.
+    std::string                   hover_target_;
+    bool                          hover_usable_ = false;
     int                          feedback_idx_ = -1;
     int32                        feedback_generation_ = 0;
     std::unique_ptr<BMessageRunner> feedback_timer_;

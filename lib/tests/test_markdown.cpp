@@ -238,6 +238,111 @@ void test_tables()
     TEST_REQUIRE(split(s.text)[1] == "| \xe4\xb8\xad | x |", "wide cell: " + s.text);
 }
 
+// Text covered by each link span, paired with its target.
+std::vector<std::pair<std::string, std::string>> links_of(const Styled& s)
+{
+    std::vector<std::pair<std::string, std::string>> out;
+    for (const auto& l : s.links) {
+        TEST_REQUIRE(l.start < l.end && l.end <= s.text.size(), "link span in range");
+        out.push_back({s.text.substr(l.start, l.end - l.start), l.target});
+    }
+    return out;
+}
+
+void test_links()
+{
+    using P = std::pair<std::string, std::string>;
+    Styled s = render("See [the docs](https://x.org/d \"t\"), <https://z.org>, "
+                      "https://bare.org/a_(b). and ![shot](/tmp/s.png) or [sec](#a)", opts());
+    auto links = links_of(s);
+    TEST_REQUIRE(links.size() == 5, "five links: " + std::to_string(links.size()));
+    TEST_REQUIRE(links[0] == P("the docs (https://x.org/d)", "https://x.org/d"), "md link covers label + url");
+    TEST_REQUIRE(links[1] == P("https://z.org", "https://z.org"), "autolink");
+    TEST_REQUIRE(links[2] == P("https://bare.org/a_(b)", "https://bare.org/a_(b)"),
+                 "bare url keeps balanced paren, drops trailing dot: " + links[2].first);
+    TEST_REQUIRE(links[3] == P("[image: shot]", "/tmp/s.png"), "image links its source");
+    TEST_REQUIRE(links[4] == P("sec", "#a"), "anchor link recorded (resolves to nothing)");
+    TEST_REQUIRE(flags_of(s, "https://bare") == kLink, "bare url styled as link");
+    for (const auto& l : s.links) TEST_REQUIRE(!l.implicit, "explicit links");
+
+    // Unbalanced paren / trailing punctuation; no bare link mid-word.
+    s = render("(see https://a.org/x) and xhttps://no.org", opts());
+    TEST_REQUIRE(links_of(s).size() == 1 && links_of(s)[0].second == "https://a.org/x",
+                 "unbalanced paren trimmed");
+
+    // Code spans that look like paths are implicit candidates; others aren't.
+    s = render("Edit `lib/src/x.cpp`, `README.md:12`, `~/n.txt`, `/tmp/a.png`, "
+               "`std::vector`, `x = 1`, `1.5`, `foo()`, `main`", opts());
+    links = links_of(s);
+    TEST_REQUIRE(links.size() == 4, "path-like code spans only: " + std::to_string(links.size()));
+    TEST_REQUIRE(links[0] == P("lib/src/x.cpp", "lib/src/x.cpp") && links[1].second == "README.md:12"
+                 && links[2].second == "~/n.txt" && links[3].second == "/tmp/a.png", "code path targets");
+    for (const auto& l : s.links) TEST_REQUIRE(l.implicit, "code spans are implicit");
+    TEST_REQUIRE(flags_of(s, "lib/src") == kCode, "code style kept on implicit links");
+
+    // Nothing nests: a code span or URL inside a link label adds no span.
+    s = render("[`a/b.c` and https://x.org](https://y.org) **[bold](b.md)**", opts());
+    links = links_of(s);
+    TEST_REQUIRE(links.size() == 2 && links[0].second == "https://y.org"
+                 && links[1] == P("bold (b.md)", "b.md"), "no nested spans");
+
+    // Links inside table cells keep their spans through padding and wrapping.
+    s = render("| file | note |\n|---|---|\n| [x](a.md) | see `lib/b.cpp` now |", opts(80, true));
+    links = links_of(s);
+    TEST_REQUIRE(links.size() == 2 && links[0] == P("x (a.md)", "a.md")
+                 && links[1] == P("lib/b.cpp", "lib/b.cpp") && links[1].first.size() == 9,
+                 "table cell links: " + s.text);
+    s = render("|a|\n|-|\n|[one two three four](https://w.org)|", opts(14, true));
+    links = links_of(s);
+    TEST_REQUIRE(links.size() >= 2, "wrapped link split per line: " + s.text);
+    for (const auto& l : links) TEST_REQUIRE(l.second == "https://w.org", "wrapped link target");
+    // Record layout keeps links.
+    s = render("| k | v |\n|---|---|\n| [x](https://r.org) | 1 |", opts(8));
+    TEST_REQUIRE(links_of(s).size() == 1 && links_of(s)[0].second == "https://r.org", "record layout link");
+
+    // append/slice carry links with rebased offsets.
+    Styled a = render("x [l](https://a.org)", opts());
+    Styled b = a;
+    b.append(a);
+    TEST_REQUIRE(b.links.size() == 2 && b.links[1].start == a.links[0].start + a.text.size(),
+                 "append rebases links");
+    Styled sl = a.slice(4);
+    TEST_REQUIRE(sl.links.size() == 1 && sl.links[0].start == 0
+                 && sl.links[0].end == a.links[0].end - 4, "slice clips links");
+}
+
+void test_resolve_link()
+{
+    auto r = [](const char* d) { return resolve_link(d, "/proj/", "/home/u"); };
+    TEST_REQUIRE(r("https://x.org/a").kind == LinkKind::Web && r("https://x.org/a").target == "https://x.org/a", "https");
+    TEST_REQUIRE(r("HTTP://x.org").kind == LinkKind::Web, "scheme case-insensitive");
+    TEST_REQUIRE(r("www.x.org").kind == LinkKind::Web && r("www.x.org").target == "https://www.x.org", "www");
+    TEST_REQUIRE(r("mailto:a@b.c").kind == LinkKind::Mail, "mailto");
+    for (const char* bad : {"javascript:alert(1)", "data:text/html,x", "x-vnd.foo:bar", "ftp://x",
+                            "#anchor", "", "https://", "a b.txt", "file://relative/x", "%00.txt"})
+        TEST_REQUIRE(r(bad).kind == LinkKind::None, std::string("refused: ") + bad);
+
+    auto f = r("lib/x.cpp");
+    TEST_REQUIRE(f.kind == LinkKind::File && f.target == "/proj/lib/x.cpp" && f.line == 0, "relative: " + f.target);
+    TEST_REQUIRE(r("./a.md").target == "/proj/a.md", "dot-slash");
+    TEST_REQUIRE(r("../up.md").target == "/proj/../up.md", "parent kept for the OS to resolve");
+    TEST_REQUIRE(r("/abs/p.png").target == "/abs/p.png", "absolute");
+    TEST_REQUIRE(r("~/n.txt").target == "/home/u/n.txt", "home");
+    TEST_REQUIRE(r("file:///tmp/a%20b.png").target == "/tmp/a b.png", "file url decoded");
+    TEST_REQUIRE(r("file://localhost/tmp/x").target == "/tmp/x", "file://localhost");
+    TEST_REQUIRE(r("my%20file.md").target == "/proj/my file.md", "relative decoded");
+    f = r("README.md:12");
+    TEST_REQUIRE(f.kind == LinkKind::File && f.target == "/proj/README.md" && f.line == 12, "name:line");
+    f = r("src/a.cpp:40:7");
+    TEST_REQUIRE(f.target == "/proj/src/a.cpp" && f.line == 40, "path:line:col");
+    f = r("src/a.cpp#L9");
+    TEST_REQUIRE(f.target == "/proj/src/a.cpp" && f.line == 9, "#L line");
+    TEST_REQUIRE(r("src/a.cpp#section").line == 0 && r("src/a.cpp#section").target == "/proj/src/a.cpp", "other fragment dropped");
+    TEST_REQUIRE(resolve_link("a.md", "", "/h").kind == LinkKind::None, "relative without base");
+    TEST_REQUIRE(resolve_link("~/a", "/p", "").kind == LinkKind::None, "home without HOME");
+    TEST_REQUIRE(resolve_link("a.md", "/", "").target == "/a.md", "root base");
+}
+
 void test_common_prefix()
 {
     Styled a, b;
@@ -302,6 +407,8 @@ void test_streaming()
         "\n\n\nleading blanks\n\n\n\ntrailing\n\n\n",
         "| x |\n|---|\n| 1 |\n\n| y | z |\n|---|---|\n| 2 | 3 |",
         "- [ ] a\n- [x] b\n* * *\n___\nsnake_case and **bold _it_**\n\xe4\xb8\xad\xe6\x96\x87 text \xc3\xa9\n",
+        "Links: [docs](https://x.org/a) and https://bare.org/p(1). See `lib/a.cpp:3`, ![s](/tmp/s.png)\n"
+        "| f | u |\n|---|---|\n| [x](a.md) | https://t.org long words to wrap here |\n<https://end.org>",
     };
     std::mt19937 rng(1234);
     for (size_t d = 0; d < docs.size(); ++d) {
@@ -325,6 +432,8 @@ int main()
     test_blocks();
     test_code_fences();
     test_tables();
+    test_links();
+    test_resolve_link();
     test_common_prefix();
     test_streaming();
     std::cout << "test_markdown: all tests passed\n";

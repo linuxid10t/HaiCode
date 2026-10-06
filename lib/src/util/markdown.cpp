@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 
 namespace haicode::md {
 
@@ -21,6 +22,9 @@ Styled::add(std::string_view s, uint16_t flags, uint8_t heading)
 void
 Styled::append(const Styled& other)
 {
+    const size_t base = text.size();
+    for (const LinkSpan& l : other.links)
+        links.push_back({l.start + base, l.end + base, l.target, l.implicit});
     for (size_t i = 0; i < other.runs.size(); ++i) {
         size_t start = other.runs[i].offset;
         size_t end = i + 1 < other.runs.size() ? other.runs[i + 1].offset
@@ -51,13 +55,19 @@ Styled::slice(size_t from) const
         out.add(std::string_view(text).substr(start, end - start),
                 runs[i].flags, runs[i].heading);
     }
+    for (const LinkSpan& l : links) {
+        if (l.end <= from) continue;
+        out.links.push_back({std::max(l.start, from) - from, l.end - from,
+                             l.target, l.implicit});
+    }
     return out;
 }
 
 bool
 Styled::operator==(const Styled& o) const
 {
-    if (text != o.text || runs.size() != o.runs.size()) return false;
+    if (text != o.text || runs.size() != o.runs.size() || links != o.links)
+        return false;
     for (size_t i = 0; i < runs.size(); ++i) {
         if (runs[i].offset != o.runs[i].offset || runs[i].flags != o.runs[i].flags
             || runs[i].heading != o.runs[i].heading)
@@ -500,6 +510,47 @@ close_paren(std::string_view s, size_t open)
     return std::string_view::npos;
 }
 
+bool
+starts_with_ci(std::string_view s, std::string_view prefix)
+{
+    if (s.size() < prefix.size()) return false;
+    for (size_t i = 0; i < prefix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(s[i]))
+            != std::tolower(static_cast<unsigned char>(prefix[i])))
+            return false;
+    }
+    return true;
+}
+
+// An inline code span that reads as a path (`lib/src/x.cpp`, `/tmp/a.png`,
+// `~/notes.md`, `config.json:12`) or a URL. Only a candidate: the frontend
+// makes it clickable once the target turns out to exist.
+bool
+looks_like_link(std::string_view c)
+{
+    if (c.empty() || c.size() > 512) return false;
+    if (starts_with_ci(c, "http://") || starts_with_ci(c, "https://")) return true;
+    if (c.find("::") != std::string_view::npos) return false;
+    for (char ch : c) {
+        if (is_ws(ch) || std::strchr("()<>=,;{}\"'*$`|&!?[]\\", ch)) return false;
+    }
+    if (c.front() == '/' || c.rfind("~/", 0) == 0 || c.rfind("./", 0) == 0
+        || c.rfind("../", 0) == 0 || c.find('/') != std::string_view::npos)
+        return true;
+    // name.ext[:line] — the extension carries a letter (not "1.5").
+    std::string_view name = c.substr(0, c.find(':'));
+    size_t dot = name.rfind('.');
+    if (dot == std::string_view::npos || dot == 0 || dot + 1 >= name.size()) return false;
+    std::string_view ext = name.substr(dot + 1);
+    if (ext.size() > 10) return false;
+    bool letter = false;
+    for (char ch : ext) {
+        if (!std::isalnum(static_cast<unsigned char>(ch))) return false;
+        letter = letter || std::isalpha(static_cast<unsigned char>(ch));
+    }
+    return letter;
+}
+
 void render_inline(std::string_view s, uint16_t flags, uint8_t heading,
                    Styled& out, int depth = 0);
 
@@ -517,6 +568,12 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
         buf.clear();
     };
     const uint16_t keep = flags & (kMono | kQuote);  // survives into decorations
+    // Inside a link label nothing registers another link (spans never nest).
+    const bool in_link = (flags & kLink) != 0;
+    auto add_link = [&](size_t start, std::string_view target, bool implicit) {
+        if (!in_link && out.text.size() > start)
+            out.links.push_back({start, out.text.size(), std::string(target), implicit});
+    };
     size_t i = 0;
     while (i < s.size()) {
         char c = s[i];
@@ -542,7 +599,9 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                 && !trim(code).empty())
                 code = code.substr(1, code.size() - 2);
             flush();
+            size_t start = out.text.size();
             out.add(code, flags | kCode, heading);
+            if (looks_like_link(code)) add_link(start, code, true);
             i = close + k;
             continue;
         }
@@ -553,10 +612,15 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                 size_t cp = close_paren(s, cb + 1);
                 if (cp != std::string_view::npos) {
                     std::string_view alt = trim(s.substr(i + 2, cb - i - 2));
+                    std::string_view src = trim(s.substr(cb + 2, cp - cb - 2));
+                    size_t sp = 0;
+                    while (sp < src.size() && !is_ws(src[sp])) ++sp;
                     flush();
                     std::string label = alt.empty() ? std::string("[image]")
                                                     : "[image: " + std::string(alt) + "]";
+                    size_t start = out.text.size();
                     out.add(label, keep | kDim, heading);
+                    add_link(start, src.substr(0, sp), false);
                     i = cp + 1;
                     continue;
                 }
@@ -581,9 +645,11 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                         dest = dest.substr(0, sp);
                     }
                     flush();
+                    size_t start = out.text.size();
                     render_inline(label, flags | kLink, heading, out, depth + 1);
                     if (!dest.empty() && dest != label && dest.front() != '#')
                         out.add(" (" + std::string(dest) + ")", keep | kDim, heading);
+                    add_link(start, dest, false);
                     i = cp + 1;
                     continue;
                 }
@@ -600,7 +666,9 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
                                           [](char ch) { return is_ws(ch) || ch == '<'; });
                 if (scheme && clean) {
                     flush();
+                    size_t start = out.text.size();
                     out.add(url, flags | kLink, heading);
+                    add_link(start, url, false);
                     i = gt + 1;
                     continue;
                 }
@@ -635,6 +703,36 @@ render_inline(std::string_view s, uint16_t flags, uint8_t heading, Styled& out,
             continue;
         }
 
+        // Bare http(s) URL (GFM autolink extension): runs to whitespace,
+        // minus trailing punctuation and an unbalanced closing paren.
+        if ((c == 'h' || c == 'H') && !in_link && (i == 0 || !is_word(s[i - 1]))
+            && (starts_with_ci(s.substr(i), "http://")
+                || starts_with_ci(s.substr(i), "https://"))) {
+            size_t e = i;
+            while (e < s.size() && !is_ws(s[e]) && s[e] != '<' && s[e] != '`') ++e;
+            while (e > i) {
+                char t = s[e - 1];
+                if (std::strchr(".,;:!?'\"*_~", t)) { --e; continue; }
+                if (t == ')') {
+                    std::string_view u = s.substr(i, e - i);
+                    if (std::count(u.begin(), u.end(), ')') > std::count(u.begin(), u.end(), '(')) {
+                        --e;
+                        continue;
+                    }
+                }
+                break;
+            }
+            size_t scheme_len = (s[i + 4] == 's' || s[i + 4] == 'S') ? 8 : 7;
+            if (e > i + scheme_len) {
+                flush();
+                size_t start = out.text.size();
+                out.add(s.substr(i, e - i), flags | kLink, heading);
+                add_link(start, s.substr(i, e - i), false);
+                i = e;
+                continue;
+            }
+        }
+
         buf += c;
         ++i;
     }
@@ -663,9 +761,15 @@ struct Glyph {
     int         w = 0;
     uint16_t    flags = 0;
     bool        brk = false;   // forced line break (<br> in a cell)
+    int         link = -1;     // index into the cell's links, -1 = none
 };
 
-std::vector<Glyph>
+struct Cell {
+    std::vector<Glyph>    glyphs;
+    std::vector<LinkSpan> links;   // targets only; positions come from layout
+};
+
+Cell
 cell_glyphs(std::string_view raw, uint16_t base)
 {
     // Split on <br>, <br/>, <br /> (case-insensitive) — common in LLM tables.
@@ -687,11 +791,14 @@ cell_glyphs(std::string_view raw, uint16_t base)
     }
     parts.push_back(raw.substr(start));
 
-    std::vector<Glyph> glyphs;
+    Cell cell;
     for (size_t p = 0; p < parts.size(); ++p) {
-        if (p > 0) glyphs.push_back({"", 0, 0, true});
+        if (p > 0) cell.glyphs.push_back({"", 0, 0, true});
         Styled st;
         render_inline(trim(parts[p]), base, 0, st);
+        const int link_base = static_cast<int>(cell.links.size());
+        cell.links.insert(cell.links.end(), st.links.begin(), st.links.end());
+        size_t li = 0;
         for (size_t i = 0; i < st.text.size();) {
             size_t len = 1;
             uint32_t cp = decode_utf8(st.text, i, len);
@@ -699,11 +806,14 @@ cell_glyphs(std::string_view raw, uint16_t base)
             g.flags = st.style_at(i).flags;
             if (cp == '\t') { g.s = " "; g.w = 1; }
             else { g.s = st.text.substr(i, len); g.w = cp_width(cp); }
-            glyphs.push_back(std::move(g));
+            while (li < st.links.size() && st.links[li].end <= i) ++li;
+            if (li < st.links.size() && st.links[li].start <= i)
+                g.link = link_base + static_cast<int>(li);
+            cell.glyphs.push_back(std::move(g));
             i += len;
         }
     }
-    return glyphs;
+    return cell;
 }
 
 int
@@ -785,16 +895,15 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
     }
 
     // Natural column widths.
-    std::vector<std::vector<Glyph>> head(n);
-    std::vector<std::vector<std::vector<Glyph>>> body(body_raw.size(),
-                                                      std::vector<std::vector<Glyph>>(n));
+    std::vector<Cell> head(n);
+    std::vector<std::vector<Cell>> body(body_raw.size(), std::vector<Cell>(n));
     std::vector<int> nat(n, 1);
     for (size_t c = 0; c < n; ++c) {
         head[c] = cell_glyphs(head_raw[c], kMono | kBold);
-        nat[c] = std::max(nat[c], natural_width(head[c]));
+        nat[c] = std::max(nat[c], natural_width(head[c].glyphs));
         for (size_t r = 0; r < body_raw.size(); ++r) {
             body[r][c] = cell_glyphs(body_raw[r][c], kMono);
-            nat[c] = std::max(nat[c], natural_width(body[r][c]));
+            nat[c] = std::max(nat[c], natural_width(body[r][c].glyphs));
         }
     }
 
@@ -880,11 +989,11 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
         }
         out.add(s, kMono | kDim);
     };
-    auto row = [&](const std::vector<std::vector<Glyph>>& cells) {
+    auto row = [&](const std::vector<Cell>& cells) {
         std::vector<std::vector<GlyphLine>> wrapped(n);
         size_t height = 1;
         for (size_t c = 0; c < n; ++c) {
-            wrapped[c] = wrap_cell(cells[c], width[c]);
+            wrapped[c] = wrap_cell(cells[c].glyphs, width[c]);
             height = std::max(height, wrapped[c].size());
         }
         for (size_t y = 0; y < height; ++y) {
@@ -897,7 +1006,25 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
                 int lpad = aligns[c] == Align::Right ? pad
                          : aligns[c] == Align::Center ? pad / 2 : 0;
                 out.add(std::string(1 + lpad, ' '), kMono);
-                for (const auto& g : gl) out.add(g.s, g.flags);
+                // A link wrapped over several lines becomes one span per line.
+                int open = -1;
+                size_t open_start = 0;
+                auto close_link = [&] {
+                    if (open >= 0 && out.text.size() > open_start) {
+                        const LinkSpan& l = cells[c].links[open];
+                        out.links.push_back({open_start, out.text.size(), l.target, l.implicit});
+                    }
+                    open = -1;
+                };
+                for (const auto& g : gl) {
+                    if (g.link != open) {
+                        close_link();
+                        open = g.link;
+                        open_start = out.text.size();
+                    }
+                    out.add(g.s, g.flags);
+                }
+                close_link();
                 out.add(std::string(pad - lpad + 1, ' '), kMono);
                 out.add(v, kMono | kDim);
             }
@@ -909,7 +1036,7 @@ render_table(const std::vector<Line>& lines, size_t header, size_t end,
     bool multi = false;
     for (size_t r = 0; r < body.size() && !multi; ++r)
         for (size_t c = 0; c < n && !multi; ++c)
-            multi = wrap_cell(body[r][c], width[c]).size() > 1;
+            multi = wrap_cell(body[r][c].glyphs, width[c]).size() > 1;
 
     border("\xe2\x94\x8c", "\xe2\x94\xac", "\xe2\x94\x90");    // ┌ ┬ ┐
     row(head);
@@ -1099,6 +1226,130 @@ render(std::string_view text, const Options& opts)
     Styled out = std::move(inc.frozen);
     out.append(inc.tail);
     return out;
+}
+
+namespace {
+
+std::string
+percent_decode(std::string_view s)
+{
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size() && hex(s[i + 1]) >= 0 && hex(s[i + 2]) >= 0) {
+            out += static_cast<char>(hex(s[i + 1]) * 16 + hex(s[i + 2]));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// Pop a trailing ":<digits>" off `path`; false (path untouched) if none.
+bool
+pop_line_number(std::string& path, int& value)
+{
+    size_t colon = path.rfind(':');
+    if (colon == std::string::npos || colon + 1 >= path.size() || path.size() - colon > 10)
+        return false;
+    for (size_t i = colon + 1; i < path.size(); ++i)
+        if (!std::isdigit(static_cast<unsigned char>(path[i]))) return false;
+    value = std::stoi(path.substr(colon + 1));
+    path.resize(colon);
+    return true;
+}
+
+}  // namespace
+
+LinkTarget
+resolve_link(std::string_view dest, std::string_view base_dir, std::string_view home_dir)
+{
+    LinkTarget r;
+    std::string_view d = trim(dest);
+    if (d.empty() || d.front() == '#') return r;
+    if (std::any_of(d.begin(), d.end(), [](char c) { return is_ws(c); })) return r;
+
+    if (starts_with_ci(d, "http://") || starts_with_ci(d, "https://")) {
+        if (d.size() > (starts_with_ci(d, "https://") ? 8u : 7u)) {
+            r.kind = LinkKind::Web;
+            r.target = d;
+        }
+        return r;
+    }
+    if (starts_with_ci(d, "mailto:")) {
+        if (d.size() > 7) {
+            r.kind = LinkKind::Mail;
+            r.target = d;
+        }
+        return r;
+    }
+    if (starts_with_ci(d, "www.")) {
+        r.kind = LinkKind::Web;
+        r.target = "https://" + std::string(d);
+        return r;
+    }
+
+    std::string path;
+    if (starts_with_ci(d, "file://")) {
+        std::string_view rest = d.substr(7);
+        if (starts_with_ci(rest, "localhost/")) rest.remove_prefix(9);
+        if (rest.empty() || rest.front() != '/') return r;
+        path = percent_decode(rest);
+    } else {
+        // Any other scheme is refused — except "name.ext:12", a path with a
+        // line number that merely looks like one.
+        size_t colon = d.find(':');
+        if (colon != std::string_view::npos && colon > 0
+            && std::isalpha(static_cast<unsigned char>(d[0]))) {
+            std::string_view scheme = d.substr(0, colon);
+            bool is_scheme = std::all_of(scheme.begin(), scheme.end(), [](char c) {
+                return std::isalnum(static_cast<unsigned char>(c)) || c == '+' || c == '-'
+                    || c == '.';
+            });
+            std::string_view after = d.substr(colon + 1);
+            bool line_suffix = !after.empty()
+                && std::all_of(after.begin(), after.end(), [](char c) {
+                       return std::isdigit(static_cast<unsigned char>(c)) || c == ':';
+                   });
+            if (is_scheme && !line_suffix) return r;
+        }
+        path = percent_decode(d);
+    }
+    if (path.find('\0') != std::string::npos) return r;
+
+    size_t hash = path.find('#');
+    if (hash != std::string::npos) {
+        std::string frag = path.substr(hash + 1);
+        path.resize(hash);
+        if (frag.size() > 1 && frag.size() <= 10 && (frag[0] == 'L' || frag[0] == 'l')
+            && std::all_of(frag.begin() + 1, frag.end(),
+                           [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+            r.line = std::stoi(frag.substr(1));
+    }
+    int a = 0, b = 0;
+    if (pop_line_number(path, a))
+        r.line = pop_line_number(path, b) ? b : a;   // path:line:col
+    if (path.empty()) return r;
+
+    if (path.rfind("~/", 0) == 0 || path == "~") {
+        if (home_dir.empty()) return r;
+        path = std::string(home_dir) + path.substr(1);
+    } else if (path.front() != '/') {
+        if (base_dir.empty()) return r;
+        while (path.rfind("./", 0) == 0) path.erase(0, 2);
+        std::string base(base_dir);
+        while (base.size() > 1 && base.back() == '/') base.pop_back();
+        path = base + (base == "/" ? "" : "/") + path;
+    }
+    r.kind = LinkKind::File;
+    r.target = std::move(path);
+    return r;
 }
 
 bool

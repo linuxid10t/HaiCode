@@ -12,6 +12,7 @@
 #include <TextView.h>
 #include <Window.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -63,9 +64,29 @@ ClickableTextView::MouseDown(BPoint where)
                 owner_->ToggleBlock(idx);
                 return;
             }
+            // Links open on release (MouseUp), so text in them stays
+            // drag-selectable.
+            pressed_link_offset_ = MarkdownPointOverText(this, where)
+                && owner_->FindLinkAt(offset) >= 0 ? offset : -1;
         }
     }
     BTextView::MouseDown(where);
+}
+
+void
+ClickableTextView::MouseUp(BPoint where)
+{
+    BTextView::MouseUp(where);
+    int32 pressed = pressed_link_offset_;
+    pressed_link_offset_ = -1;
+    if (pressed < 0 || !owner_) return;
+    // A click, not a drag-select: no selection and still on the same link.
+    int32 start, end;
+    GetSelection(&start, &end);
+    int link = owner_->FindLinkAt(pressed);
+    if (start == end && link >= 0 && MarkdownPointOverText(this, where)
+        && owner_->FindLinkAt(OffsetAt(where)) == link)
+        owner_->OpenLink(link);
 }
 
 void
@@ -95,26 +116,22 @@ ClickableTextView::MouseMoved(BPoint where, uint32 transit, const BMessage* drag
     BTextView::MouseMoved(where, transit, dragMessage);
     static const BCursor pointer(B_CURSOR_ID_SYSTEM_DEFAULT);
     static const BCursor text_cursor(B_CURSOR_ID_I_BEAM);
+    static const BCursor hand(B_CURSOR_ID_FOLLOW_LINK);
     if (transit == B_EXITED_VIEW) {
+        if (owner_) owner_->LinkUsable(-1);
         SetViewCursor(&pointer);
         return;
     }
 
-    bool over_text = false;
-    if (TextLength() > 0 && Bounds().Contains(where)) {
-        int32 line = LineAt(where);
-        if (line >= 0 && line < CountLines()) {
-            float height;
-            BPoint origin = PointAt(OffsetAt(line), &height);
-            float width = LineWidth(line);
-            over_text = width > 0 && where.x >= origin.x
-                && where.x < origin.x + width && where.y >= origin.y
-                && where.y < origin.y + height;
-        }
-    }
+    bool over_text = MarkdownPointOverText(this, where);
     bool over_copy = over_text && owner_ && owner_->FindCopyAt(OffsetAt(where)) >= 0;
     bool over_indicator = over_text && owner_ && owner_->IsIndicatorAt(where);
-    SetViewCursor(over_text && !over_copy && !over_indicator ? &text_cursor : &pointer);
+    int link = over_text && owner_ ? owner_->FindLinkAt(OffsetAt(where)) : -1;
+    bool over_link = owner_ && owner_->LinkUsable(link);
+    if (over_link)
+        SetViewCursor(&hand);
+    else
+        SetViewCursor(over_text && !over_copy && !over_indicator ? &text_cursor : &pointer);
 }
 
 void
@@ -158,6 +175,7 @@ struct RenderBuf {
     std::vector<Run>              runs;
     std::vector<ToolHeaderRange>  headers;  // offsets relative to text
     std::vector<CopyControlRange> copies;   // offsets relative to text
+    std::vector<LinkRange>        links;    // offsets relative to text
 
     int32 Length() const { return (int32)text.size(); }
 
@@ -177,8 +195,12 @@ struct RenderBuf {
         text.append(s);
     }
 
-    void AddMarkdown(const haicode::md::Styled& md, const MarkdownPalette& palette)
+    void AddMarkdown(const haicode::md::Styled& md, const MarkdownPalette& palette,
+                     int model_idx)
     {
+        for (const auto& l : md.links)
+            links.push_back({Length() + (int32)l.start, Length() + (int32)l.end,
+                             model_idx, l.target, l.implicit});
         for (size_t i = 0; i < md.runs.size(); ++i) {
             size_t start = md.runs[i].offset;
             size_t end = i + 1 < md.runs.size() ? md.runs[i + 1].offset
@@ -307,7 +329,7 @@ ChatView::_RenderEntry(int i, RenderBuf& out) const
         out.AddCopyControl(i);
         out.Add("\n", kColorAssistant);
         out.AddMarkdown(haicode::md::render(e.text, md_opts_),
-                        MarkdownPaletteFor(kColorAssistant));
+                        MarkdownPaletteFor(kColorAssistant), i);
         break;
 
     case ChatEntry::ToolCalled: {
@@ -348,7 +370,7 @@ ChatView::_RenderEntry(int i, RenderBuf& out) const
         if (!e.collapsed && !e.text.empty()) {
             out.Add("\n", kColorThinkingBody);
             out.AddMarkdown(haicode::md::render(e.text, md_opts_),
-                            MarkdownPaletteFor(kColorThinkingBody));
+                            MarkdownPaletteFor(kColorThinkingBody), i);
         }
         break;
     }
@@ -378,6 +400,11 @@ ChatView::_InsertRendered(int32 offset, const RenderBuf& buf)
         c.end            += offset;
         c.feedback_start += offset;
         copy_ranges_.push_back(c);
+    }
+    for (auto l : buf.links) {
+        l.start += offset;
+        l.end   += offset;
+        link_ranges_.push_back(std::move(l));
     }
 }
 
@@ -441,6 +468,14 @@ ChatView::_ReplaceEntry(int i)
         copies.push_back(c);
     }
     copy_ranges_.swap(copies);
+    std::vector<LinkRange> links;
+    links.reserve(link_ranges_.size());
+    for (auto& l : link_ranges_) {
+        if (l.model_idx == i) continue;
+        if (l.start >= end) { l.start += delta; l.end += delta; }
+        links.push_back(std::move(l));
+    }
+    link_ranges_.swap(links);
     for (size_t j = i + 1; j < entry_starts_.size(); ++j)
         entry_starts_[j] += delta;
 
@@ -465,6 +500,7 @@ ChatView::_Rebuild()
     text_view_->MakeFocus(false);
     header_ranges_.clear();
     copy_ranges_.clear();
+    link_ranges_.clear();
 
     RenderBuf buf;
     for (int i = 0; i < (int)model_.size(); i++) {
@@ -475,6 +511,7 @@ ChatView::_Rebuild()
     text_view_->SetText(buf.text.data(), buf.Length(), runs.get());
     header_ranges_ = std::move(buf.headers);
     copy_ranges_   = std::move(buf.copies);
+    link_ranges_   = std::move(buf.links);
     _ResyncStream();
     ScrollToBottom();
 }
@@ -531,15 +568,26 @@ ChatView::_StreamMarkdown()
     // Replace only what differs from what is already shown — usually the
     // delta is a pure append and nothing is deleted.
     size_t keep = haicode::md::common_prefix(md_stream_.tail, next);
-    int32 at = text_view_->TextLength() - (int32)md_stream_.tail.text.size()
-        + (int32)keep;
+    int32 tail_start = text_view_->TextLength() - (int32)md_stream_.tail.text.size();
+    int32 at = tail_start + (int32)keep;
     int32 old_rest = (int32)(md_stream_.tail.text.size() - keep);
     RenderBuf buf;
-    buf.AddMarkdown(next.slice(keep), MarkdownPaletteFor(kColorAssistant));
+    buf.AddMarkdown(next.slice(keep), MarkdownPaletteFor(kColorAssistant), last);
+    buf.links.clear();  // re-registered below for the whole replaced region
     // Insert before deleting so the content never transiently shrinks.
     _InsertRendered(at, buf);
     if (old_rest > 0)
         text_view_->Delete(at + buf.Length(), at + buf.Length() + old_rest);
+
+    // Links of the old tail go; every link of `next` (which starts where the
+    // old tail started) is registered — a kept prefix may hold a link whose
+    // target changed, and nothing after the tail exists to shift.
+    link_ranges_.erase(std::remove_if(link_ranges_.begin(), link_ranges_.end(),
+        [&](const LinkRange& l) { return l.model_idx == last && l.start >= tail_start; }),
+        link_ranges_.end());
+    for (const auto& l : next.links)
+        link_ranges_.push_back({tail_start + (int32)l.start, tail_start + (int32)l.end,
+                                last, l.target, l.implicit});
 
     md_stream_.frozen_src = inc.frozen_end;
     md_stream_.state = inc.state;
@@ -745,6 +793,7 @@ ChatView::Clear()
     entry_starts_.clear();
     header_ranges_.clear();
     copy_ranges_.clear();
+    link_ranges_.clear();
     text_view_->MakeFocus(false);
     text_view_->SetText("");
 }
@@ -762,6 +811,45 @@ ChatView::EndBatch()
     if (!defer_rebuild_) return;
     defer_rebuild_ = false;
     _Rebuild();
+}
+
+void
+ChatView::SetBaseDirectory(const std::string& dir)
+{
+    base_dir_ = dir;
+    LinkUsable(-1);
+}
+
+int
+ChatView::FindLinkAt(int32 offset) const
+{
+    for (size_t i = 0; i < link_ranges_.size(); ++i) {
+        if (offset >= link_ranges_[i].start && offset < link_ranges_[i].end)
+            return (int)i;
+    }
+    return -1;
+}
+
+bool
+ChatView::LinkUsable(int link_idx)
+{
+    if (link_idx < 0 || link_idx >= (int)link_ranges_.size()) {
+        hover_target_.clear();
+        return false;
+    }
+    const std::string& target = link_ranges_[link_idx].target;
+    if (hover_target_.empty() || hover_target_ != target) {
+        hover_target_ = target;
+        hover_usable_ = MarkdownLinkUsable(target, base_dir_);
+    }
+    return hover_usable_;
+}
+
+void
+ChatView::OpenLink(int link_idx)
+{
+    if (link_idx < 0 || link_idx >= (int)link_ranges_.size()) return;
+    OpenMarkdownLink(link_ranges_[link_idx].target, base_dir_);
 }
 
 int

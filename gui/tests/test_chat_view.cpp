@@ -5,14 +5,21 @@
 // fresh batch render of the same transcript shows.
 
 #include "ChatView.h"
+#include "MarkdownView.h"
 
 #include <Application.h>
 #include <Font.h>
 #include <TextView.h>
 #include <Window.h>
 
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
+#include <tuple>
 #include <string>
 #include <vector>
 
@@ -36,6 +43,9 @@ struct ByteStyle {
 struct Snapshot {
     std::string            text;
     std::vector<ByteStyle> styles;
+    // (start, end, target), sorted — registration order differs between
+    // the streaming and batch paths.
+    std::vector<std::tuple<int32, int32, std::string>> links;
 };
 
 Snapshot
@@ -55,6 +65,9 @@ Snap(ChatView& view)
             s.styles[b] = {runs->runs[r].font, runs->runs[r].color};
     }
     BTextView::FreeRunArray(runs);
+    for (const auto& l : view.Links())
+        s.links.emplace_back(l.start, l.end, l.target);
+    std::sort(s.links.begin(), s.links.end());
     return s;
 }
 
@@ -75,6 +88,17 @@ Same(const Snapshot& a, const Snapshot& b, std::string* why)
     for (size_t i = 0; i < a.styles.size(); ++i) {
         if (!SameStyle(a.styles[i], b.styles[i])) {
             *why = "style differs at byte " + std::to_string(i) + " in:\n" + a.text;
+            return false;
+        }
+    }
+    if (a.links != b.links) {
+        *why = "links differ (" + std::to_string(a.links.size()) + " live vs "
+            + std::to_string(b.links.size()) + " fresh) in:\n" + a.text;
+        return false;
+    }
+    for (const auto& [start, end, target] : a.links) {
+        if (start < 0 || end > (int32)a.text.size() || start >= end) {
+            *why = "link out of range: " + target;
             return false;
         }
     }
@@ -117,6 +141,9 @@ const char* kDocs[] = {
     "```cpp\nint f(int x) { return x * 2; }\n```\n\n---\n> quote\nEnd **done**",
     "Text with a | pipe\n| h1 | h2 |\n| -- | -- |\n| c | d |\nnext para\n\n\n",
     "Short answer with [a link](https://example.org) and ~~strike~~.",
+    "Wrote `lib/a.cpp:12` and [the plan](.haicode/plans/p.md); docs at https://x.org/a(b).\n"
+    "| file | url |\n|---|---|\n| `src/x.cpp` | [w](https://w.org) long cell text to wrap |\n"
+    "![shot](/tmp/s.png) <https://end.org>",
 };
 
 }  // namespace
@@ -170,7 +197,12 @@ main()
             // reply; ending the stream changes nothing visible.
             std::vector<Step> tail = {
                 {Step::End, ""}, {Step::Reasoning, "thinking **hard**"},
-                {Step::Tool, "{\"path\":\"x\"}"}, {Step::Result, "ok"},
+                {Step::Tool, "{\"path\":\"x\"}"},
+                // A reply with links lands before the tool result, whose
+                // collapse re-renders the (earlier) tool entry in place:
+                // the later entry's links must shift with it.
+                {Step::Delta, "Mid [l](https://l.org) and `a/b.md`"}, {Step::End, ""},
+                {Step::Result, "ok"},
                 {Step::Delta, "Second | reply\n"}, {Step::Delta, "|-|-|\n|1|2|"},
                 {Step::End, ""}};
             for (const auto& s : tail) {
@@ -180,6 +212,30 @@ main()
             }
             if (failures) break;
         }
+    }
+
+    // Link ranges point at the right bytes of the view, and FindLinkAt
+    // hits them (and only them).
+    {
+        live.Clear();
+        live.SetMarkdownLayout(70, false);
+        live.AppendUserText("q");
+        std::string md = "Intro line.\nSee [a link](https://example.org) and `lib/a.cpp`.";
+        for (size_t pos = 0; pos < md.size(); pos += 4)
+            live.AppendTextDelta(md.substr(pos, 4));
+        live.EndStreaming();
+        std::string text(live.TextView()->Text(), live.TextView()->TextLength());
+        CHECK(live.Links().size() == 2, "two links");
+        for (const auto& l : live.Links()) {
+            std::string covered = text.substr(l.start, l.end - l.start);
+            if (l.target == "https://example.org")
+                CHECK(covered == "a link (https://example.org)", covered);
+            else
+                CHECK(l.target == "lib/a.cpp" && covered == "lib/a.cpp", covered);
+            CHECK(live.FindLinkAt(l.start) >= 0 && live.FindLinkAt(l.end - 1) >= 0
+                  && live.FindLinkAt(l.end) < 0, "FindLinkAt bounds");
+        }
+        CHECK(live.FindLinkAt(0) < 0, "no link on the header");
     }
 
     // Width change while a table is still streaming (it is the open tail):
@@ -225,6 +281,47 @@ main()
             CHECK(Same(Snap(live), Fresh(fresh, steps, 60), &why), why);
             if (failures) break;
         }
+    }
+
+    // What a click would do (planned only — nothing is launched here).
+    {
+        char tmpl[] = "/tmp/haicode_linktest_XXXXXX";
+        std::string dir = mkdtemp(tmpl);
+        auto touch = [&](const std::string& name, mode_t mode) {
+            std::string path = dir + "/" + name;
+            if (FILE* f = std::fopen(path.c_str(), "w")) std::fclose(f);
+            chmod(path.c_str(), mode);
+            return path;
+        };
+        std::string doc = touch("notes.md", 0644);
+        std::string script = touch("run.sh", 0755);
+        std::string pkg = touch("thing.hpkg", 0644);
+        mkdir((dir + "/sub").c_str(), 0755);
+
+        auto plan = [&](const std::string& t) { return PlanMarkdownLink(t, dir); };
+        MarkdownLinkAction a = plan("notes.md:7");
+        CHECK(a.kind == MarkdownLinkAction::OpenFile && a.target == doc && a.line == 7, "doc at line");
+        a = plan("file://" + doc);
+        CHECK(a.kind == MarkdownLinkAction::OpenFile && a.target == doc, "file url");
+        a = plan("run.sh");
+        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir, "executable only reveals");
+        a = plan("thing.hpkg");
+        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir, "package only reveals");
+        a = plan("sub");
+        CHECK(a.kind == MarkdownLinkAction::OpenFolder && a.target == dir + "/sub", "directory opens");
+        CHECK(plan("missing.md").kind == MarkdownLinkAction::None, "missing file unusable");
+        CHECK(!MarkdownLinkUsable("missing.md", dir) && MarkdownLinkUsable("notes.md", dir), "usable");
+        a = plan("https://x.org/a");
+        CHECK(a.kind == MarkdownLinkAction::OpenUrl && a.url_mime == "application/x-vnd.Be.URL.https",
+              a.url_mime);
+        CHECK(plan("mailto:a@b.c").url_mime == "application/x-vnd.Be.URL.mailto", "mailto mime");
+        CHECK(plan("javascript:alert(1)").kind == MarkdownLinkAction::None, "script url refused");
+        CHECK(plan("x-vnd.app:open").kind == MarkdownLinkAction::None, "app scheme refused");
+
+        for (const char* name : {"notes.md", "run.sh", "thing.hpkg"})
+            std::remove((dir + "/" + name).c_str());
+        rmdir((dir + "/sub").c_str());
+        rmdir(dir.c_str());
     }
 
     window->Quit();
