@@ -57,6 +57,23 @@ main()
     // Empty directory falls back to the shared placeholder.
     SessionListItem empty("Untitled session", "", "s2", now);
     CHECK(empty.Directory() == "No project directory");
+    CHECK(empty.DetailLabel() == "No project directory");
+
+    // Chat-mode sessions show a chat-only note instead of their directory;
+    // the directory itself is kept (switching back to Build restores it).
+    CHECK(!item.IsChatOnly());
+    CHECK(item.DetailLabel() == "/boot/home/work/demo");
+    SessionListItem chat("Ask a question", "/boot/home/work/demo", "s3", now,
+        true);
+    CHECK(chat.IsChatOnly());
+    CHECK(chat.Directory() == "/boot/home/work/demo");
+    CHECK(chat.DetailLabel().find("/boot/home") == std::string::npos);
+    CHECK(chat.DetailLabel().rfind("Chat only", 0) == 0);
+    CHECK(!chat.SetChatOnly(true));
+    CHECK(chat.SetChatOnly(false));
+    CHECK(chat.DetailLabel() == "/boot/home/work/demo");
+    CHECK(chat.SetChatOnly(true));
+    CHECK(chat.DetailLabel().rfind("Chat only", 0) == 0);
 
     // Spinner state: idempotent setters, frame cycling wraps at 12.
     CHECK(item.SetRunning(true));

@@ -97,6 +97,9 @@ target_link_libraries(test_permission_requests haicode)
 add_executable(test_db_upgrade tests/test_db_upgrade.cpp)
 target_link_libraries(test_db_upgrade haicode)
 
+add_executable(test_project_used tests/test_project_used.cpp)
+target_link_libraries(test_project_used haicode)
+
 add_executable(test_db_concurrency tests/test_db_concurrency.cpp)
 target_link_libraries(test_db_concurrency haicode)
 
@@ -166,6 +169,6 @@ foreach(t test_db test_diff test_git_find test_process test_file_tools
          test_subprocess test_turn_integrity test_engine_correctness
          test_session_lifecycle test_session_cleanup test_web_tools test_provider_params
          test_pricing test_codex_params test_propose_plan test_model_db
-         test_markdown)
+         test_markdown test_project_used)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

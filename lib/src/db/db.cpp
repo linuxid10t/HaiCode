@@ -1,4 +1,5 @@
 #include <haicode/db.h>
+#include <haicode/tool.h>
 #include <haicode/util.h>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -137,20 +138,20 @@ void Database::migrate() {
     // Numbered migrations keyed on PRAGMA user_version. Each step runs once
     // and bumps the cursor; fresh databases walk every step idempotently.
     int version = user_version();
+    // Column additions for pre-existing databases. SQLite has no ADD COLUMN
+    // IF NOT EXISTS, so check pragma table_info first.
+    auto has_column = [&](const char* table, const char* col) {
+        std::string q = std::string("PRAGMA table_info(") + table + ")";
+        DbStmt st(db_, q);
+        while (st.expect_row()) {
+            std::string name = st.text(1);
+            if (name == col) return true;
+        }
+        return false;
+    };
     if (version < 1) {
         exec(kSchema);
-        // Column additions for pre-existing databases. SQLite has no ADD
-        // COLUMN IF NOT EXISTS, so check pragma table_info first (fresh
-        // kSchema already contains the column).
-        auto has_column = [&](const char* table, const char* col) {
-            std::string q = std::string("PRAGMA table_info(") + table + ")";
-            DbStmt st(db_, q);
-            while (st.expect_row()) {
-                std::string name = st.text(1);
-                if (name == col) return true;
-            }
-            return false;
-        };
+        // (fresh kSchema already contains the column)
         if (!has_column("session", "tok_last_input"))
             exec("ALTER TABLE session ADD COLUMN tok_last_input INTEGER NOT NULL DEFAULT 0");
         set_user_version(1);
@@ -160,6 +161,70 @@ void Database::migrate() {
         // policy lives in config files and the in-memory PermissionGate.
         exec("DROP TABLE IF EXISTS permission");
         set_user_version(2);
+    }
+    if (version < 3) {
+        // session.project_used: has a turn ever run in Build/Plan? Chat-only
+        // sessions hide their (meaningless) directory in the sidebar. Not in
+        // kSchema (migration 1 must not change), so fresh databases get the
+        // column here too.
+        DbTxn txn(db_);
+        if (!has_column("session", "project_used"))
+            exec("ALTER TABLE session ADD COLUMN project_used INTEGER NOT NULL DEFAULT 0");
+        backfill_project_used();
+        set_user_version(3);
+        txn.commit();
+    }
+}
+
+// Migration 3's backfill. History doesn't record which mode each turn ran
+// in, so infer it: a session not currently in Chat counts as used (it shows
+// its directory either way), and a Chat session counts as used when its
+// transcript holds a call to a tool Chat mode can't run (read, bash, ...).
+// A Chat session whose earlier Build/Plan turns called no local tool is
+// classified chat-only — the best the stored rows allow.
+void Database::backfill_project_used() {
+    // Collect first, update after: no writes while a SELECT on the same
+    // table is still stepping.
+    std::vector<std::string> used_ids, chat_ids;
+    {
+        DbStmt st(db_, "SELECT id, model_json FROM session WHERE project_used=0");
+        while (st.expect_row()) {
+            std::string id = st.text(0);
+            auto mj = nlohmann::json::parse(st.text(1), nullptr, false);
+            bool chat = false;
+            if (mj.is_object()) {
+                auto it = mj.find("mode");
+                chat = it != mj.end() && it->is_string() && *it == "chat";
+            }
+            (chat ? chat_ids : used_ids).push_back(id);
+        }
+    }
+    for (const std::string& id : chat_ids) {
+        bool used = false;
+        DbStmt st(db_, "SELECT data_json FROM session_message"
+                       " WHERE session_id=? AND type='assistant_text'");
+        st.bind(1, id);
+        while (!used && st.expect_row()) {
+            auto d = nlohmann::json::parse(st.text(0), nullptr, false);
+            if (!d.is_object()) continue;
+            auto calls = d.find("tool_calls");
+            if (calls == d.end() || !calls->is_array()) continue;
+            for (const auto& c : *calls) {
+                if (!c.is_object()) continue;
+                auto name = c.find("name");
+                if (name != c.end() && name->is_string()
+                        && !tool_allowed_in_mode(name->get<std::string>(),
+                                                 SessionMode::Chat)) {
+                    used = true;
+                    break;
+                }
+            }
+        }
+        if (used) used_ids.push_back(id);
+    }
+    for (const std::string& id : used_ids) {
+        DbStmt upd(db_, "UPDATE session SET project_used=1 WHERE id=?");
+        upd.bind(1, id).expect_done();
     }
 }
 
@@ -268,7 +333,7 @@ std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
     DbStmt stmt(db_.handle(),
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
-        " tok_last_input, time_created, time_updated"
+        " tok_last_input, time_created, time_updated, project_used"
         " FROM session WHERE id=?");
     stmt.bind(1, session_id);
 
@@ -289,6 +354,7 @@ std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
     s.last_input_tokens = stmt.int_col(12);
     s.time_created      = stmt.int64_col(13);
     s.time_updated      = stmt.int64_col(14);
+    s.project_used      = stmt.int_col(15) != 0;
     return s;
 }
 
@@ -297,7 +363,7 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
     DbStmt stmt(db_.handle(),
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
-        " tok_last_input, time_created, time_updated"
+        " tok_last_input, time_created, time_updated, project_used"
         " FROM session ORDER BY time_updated DESC LIMIT ?");
     stmt.bind(1, limit);
 
@@ -319,6 +385,7 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
         s.last_input_tokens = stmt.int_col(12);
         s.time_created      = stmt.int64_col(13);
         s.time_updated      = stmt.int64_col(14);
+        s.project_used      = stmt.int_col(15) != 0;
         results.push_back(std::move(s));
     }
     return results;
@@ -442,6 +509,13 @@ void SessionStore::update_last_input_tokens(const std::string& session_id,
         .bind(2, util::now_ms())
         .bind(3, session_id)
         .expect_done();
+}
+
+void SessionStore::mark_project_used(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbStmt stmt(db_.handle(),
+        "UPDATE session SET project_used=1 WHERE id=? AND project_used=0");
+    stmt.bind(1, session_id).expect_done();
 }
 
 void SessionStore::delete_session(const std::string& session_id) {

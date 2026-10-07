@@ -35,15 +35,20 @@ constexpr const char* kSpinnerFrames[12] = {
 constexpr int kSpinnerFrameCount = 12;
 
 // Sidebar row: session title on the first line, project directory on the
-// second, and the last-modified time on the third. SetModifiedTime() returns
-// whether the label changed so refreshers can skip invalidating untouched
-// rows.
+// second (or a chat-only note for Chat-mode sessions, which have no local
+// access and so no meaningful directory), and the last-modified time on the
+// third. SetModifiedTime() returns whether the label changed so refreshers
+// can skip invalidating untouched rows.
 class SessionListItem : public BStringItem {
 public:
     SessionListItem(const std::string& title, const std::string& directory,
-                    const std::string& session_id, int64_t time_updated);
+                    const std::string& session_id, int64_t time_updated,
+                    bool chat_only = false);
 
     const std::string& Directory() const { return directory_; }
+    // The second line as drawn: the directory, or the chat-only note.
+    const std::string& DetailLabel() const;
+    bool IsChatOnly() const { return chat_only_; }
     const std::string& SessionId() const { return session_id_; }
     const std::string& ModifiedLabel() const { return modified_label_; }
     bool IsRunning() const { return running_; }
@@ -53,6 +58,8 @@ public:
     bool SetRunning(bool running);
     void SetSpinnerFrame(int frame);
     bool SetModifiedTime(int64_t time_updated);
+    // Returns whether the state changed (the row needs a repaint).
+    bool SetChatOnly(bool chat_only);
 
     // The glyph shown for the current spinner frame, honoring font coverage.
     static const char* SpinnerGlyph(int frame, const BFont& font);
@@ -66,5 +73,6 @@ private:
     std::string modified_label_;
     int64_t modified_time_ = -1;
     bool running_ = false;
+    bool chat_only_ = false;
     int spinner_frame_ = 0;
 };
