@@ -38,18 +38,21 @@ nlohmann::json build_openai_body(const LLMRequest& request, ServerFlavor flavor)
                        || flavor == ServerFlavor::LMStudio
                        || flavor == ServerFlavor::Ollama;
     if (flavor == ServerFlavor::LlamaCpp) {
-        // llama.cpp reads reasoning_effort ("none" disables thinking, any
-        // other value reaches the chat template — Mistral Small 4 only
-        // reasons when it is "high"). Mirrored into chat_template_kwargs for
-        // builds that predate the top-level field; enable_thinking:false
-        // still switches off templates that only know that flag (Qwen3).
+        // llama.cpp reads reasoning_effort: "none" disables thinking, any
+        // other value reaches the chat template (Mistral Small 4 only
+        // reasons when it is "high"; DeepSeek V4 has a "max" mode). A level
+        // is mirrored into chat_template_kwargs for builds that predate the
+        // top-level field — "none" is not, since several templates reject
+        // it; enable_thinking:false switches those builds (and templates
+        // that only know that flag, like Qwen3) off instead.
         const std::string effort = llamacpp_map_effort(request.model_id,
                                                        request.reasoning_effort);
-        if (!effort.empty()) {
+        if (effort == "none") {
+            body["reasoning_effort"] = effort;
+            body["chat_template_kwargs"] = {{"enable_thinking", false}};
+        } else if (!effort.empty()) {
             body["reasoning_effort"] = effort;
             body["chat_template_kwargs"] = {{"reasoning_effort", effort}};
-            if (effort == "none")
-                body["chat_template_kwargs"]["enable_thinking"] = false;
         }
     } else if (flavored) {
         if (request.reasoning_effort == "off")

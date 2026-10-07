@@ -136,19 +136,26 @@ std::string llamacpp_map_effort(const std::string& model_id,
                                 const std::string& ui_effort) {
     if (ui_effort.empty()) return "";
     if (ui_effort == "off") return "none";
+    if (ui_effort != "minimal" && ui_effort != "low" && ui_effort != "medium"
+            && ui_effort != "high" && ui_effort != "xhigh" && ui_effort != "max")
+        return "";
+    const bool low = ui_effort == "minimal" || ui_effort == "low";
     // llama.cpp model ids are whatever the server was started with: an
     // alias, a GGUF file name, or an -hf repo ("unsloth/Mistral-Small-4-
-    // 119B-2603-GGUF:Q4_K_M"), so match anywhere in the id. The template
-    // defaults to "none" (no reasoning) and raises on any value other than
-    // "none"/"high" — a 500 from the server.
+    // 119B-2603-GGUF:Q4_K_M"), so match anywhere in the id. These templates
+    // raise on unlisted values (a 500 from the server) or were trained on a
+    // fixed set; everything else gets the level verbatim.
     if (contains_ci(model_id, "mistral-small-4")
             || contains_ci(model_id, "mistral-small-2603"))
-        return "high";
-    if (ui_effort == "minimal" || ui_effort == "low") return "low";
-    if (ui_effort == "medium") return "medium";
-    if (ui_effort == "high" || ui_effort == "xhigh" || ui_effort == "max")
-        return "high";
-    return "";
+        return "high";                       // template: none/high
+    if (contains_ci(model_id, "hy3"))
+        return low ? "low" : "high";         // template: no_think/low/high
+    if (contains_ci(model_id, "gpt-oss")) {
+        if (low) return "low";
+        if (ui_effort == "medium") return "medium";
+        return "high";                       // Reasoning: low/medium/high
+    }
+    return ui_effort;
 }
 
 } // namespace haicode
