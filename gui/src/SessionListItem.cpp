@@ -9,11 +9,30 @@
 SessionListItem::SessionListItem(const std::string& title,
                                  const std::string& directory,
                                  const std::string& session_id,
-                                 int64_t time_updated)
+                                 int64_t time_updated,
+                                 bool chat_only)
     : BStringItem(title.c_str()), directory_(directory.empty()
-          ? "No project directory" : directory), session_id_(session_id)
+          ? "No project directory" : directory), session_id_(session_id),
+      chat_only_(chat_only)
 {
     SetModifiedTime(time_updated);
+}
+
+const std::string&
+SessionListItem::DetailLabel() const
+{
+    // The session keeps its directory (switching back to Build restores
+    // it); Chat just has no use for one, so the row doesn't claim one.
+    static const std::string kChatOnly = "Chat only \xE2\x80\x94 no project directory";
+    return chat_only_ ? kChatOnly : directory_;
+}
+
+bool
+SessionListItem::SetChatOnly(bool chat_only)
+{
+    if (chat_only_ == chat_only) return false;
+    chat_only_ = chat_only;
+    return true;
 }
 
 bool
@@ -82,7 +101,7 @@ SessionListItem::Update(BView* owner, const BFont* font)
     font->GetHeight(&metrics);
     float line = std::ceil(metrics.ascent + metrics.descent + metrics.leading);
     SetHeight(line * 3 + 8);
-    SetWidth(std::max({Width(), font->StringWidth(directory_.c_str()) + 12,
+    SetWidth(std::max({Width(), font->StringWidth(DetailLabel().c_str()) + 12,
         font->StringWidth(modified_label_.c_str()) + 12}));
 }
 
@@ -119,7 +138,7 @@ SessionListItem::DrawItem(BView* owner, BRect frame, bool complete)
     owner->DrawString(title.String(), BPoint(frame.left + 6, frame.top + 4 + metrics.ascent));
     font.SetSize(std::max(8.0f, font.Size() - 1));
     owner->SetFont(&font);
-    BString directory(directory_.c_str());
+    BString directory(DetailLabel().c_str());
     font.TruncateString(&directory, B_TRUNCATE_MIDDLE, width);
     owner->DrawString(directory.String(),
         BPoint(frame.left + 6, frame.top + 4 + metrics.ascent + line));
