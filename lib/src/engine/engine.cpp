@@ -54,12 +54,18 @@ std::pair<int, std::string> detail::run_build_hook(const std::string& command,
 // that renewal must not be able to lift.
 static constexpr int kStepCeilingMultiplier = 4;
 
-// Return the content of the most recently written *active* plan file under
-// <project_dir>/.haicode/plans/, or empty string if none exist.
-// Plans tagged <!-- haicode-status: active --> are live; any other status
-// (implemented, discarded, …) is treated as retired and skipped.
-// The status header line is stripped before returning the content.
-static std::string load_latest_plan(const std::string& project_dir) {
+// The most recently written *active* plan file under
+// <project_dir>/.haicode/plans/: its file name, full path, and content, or
+// all-empty if none exists. Plans tagged <!-- haicode-status: active --> are
+// live; any other status (implemented, discarded, …) is treated as retired
+// and skipped. The status header line is stripped from the content.
+struct ActivePlan {
+    std::string name;
+    std::string path;
+    std::string content;
+};
+
+static ActivePlan load_latest_plan(const std::string& project_dir) {
     std::string plans_dir = project_dir + "/.haicode/plans";
     DIR* d = opendir(plans_dir.c_str());
     if (!d) return {};
@@ -82,7 +88,10 @@ static std::string load_latest_plan(const std::string& project_dir) {
 
     if (latest_name.empty()) return {};
 
-    std::ifstream f(plans_dir + "/" + latest_name);
+    ActivePlan plan;
+    plan.name = latest_name;
+    plan.path = plans_dir + "/" + latest_name;
+    std::ifstream f(plan.path);
     if (!f.is_open()) return {};
     std::ostringstream ss;
     ss << f.rdbuf();
@@ -94,7 +103,37 @@ static std::string load_latest_plan(const std::string& project_dir) {
         content.substr(0, newline).find("haicode-status:") != std::string::npos) {
         content = content.substr(newline + 1);
     }
-    return content;
+    plan.content = std::move(content);
+    return plan;
+}
+
+// True when a tool_result row in `messages` reports writing `plan_path` —
+// the propose_plan call (and its full plan text) is then already in context.
+static bool plan_proposed_in_context(const std::vector<SessionMessage>& messages,
+                                     const std::string& plan_path) {
+    for (const auto& m : messages) {
+        if (m.type != "tool_result") continue;
+        auto data = nlohmann::json::parse(m.data_json, nullptr, false);
+        if (!data.is_object() || !data.value("success", false)) continue;
+        auto out = nlohmann::json::parse(data.value("output", ""), nullptr, false);
+        if (out.is_object() && out.value("path", "") == plan_path) return true;
+    }
+    return false;
+}
+
+// Identity of a plan's state for status-update diffing: file name plus a
+// content hash (FNV-1a), so an edited plan file counts as a change.
+static std::string plan_state_key(const ActivePlan& plan) {
+    if (plan.name.empty()) return {};
+    uint64_t h = 1469598103934665603ULL;
+    for (unsigned char c : plan.content) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    char hex[17];
+    std::snprintf(hex, sizeof(hex), "%016llx",
+                  static_cast<unsigned long long>(h));
+    return plan.name + "#" + hex;
 }
 
 static void substitute_all(std::string& s, const std::string& from, const std::string& to) {
@@ -209,6 +248,7 @@ nlohmann::json next_status_update(const StepStatus& now,
     const std::string prev_budget  = have_prev ? previous.value("budget", "") : "";
     const std::string prev_todos   = have_prev ? previous.value("todos", "") : "";
     const bool        prev_offline = have_prev && previous.value("offline", false);
+    const std::string prev_plan    = have_prev ? previous.value("plan", "") : "";
 
     const std::string budget = trim_ws(now.budget);
     // Plan mode doesn't show the list: carry the last known state forward so
@@ -240,14 +280,24 @@ nlohmann::json next_status_update(const StepStatus& now,
             parts.push_back("# Offline mode\n\nOffline mode is now off: "
                             "web_search and web_extract are available again.");
     }
+    if (now.plan_key != prev_plan) {
+        if (!now.plan_key.empty())
+            parts.push_back(trim_ws(now.plan));
+        else
+            parts.push_back("# Active plan\n\nNo plan is active any more (it "
+                            "was implemented or discarded) — disregard earlier "
+                            "active-plan notes.");
+    }
     if (parts.empty()) return nullptr;
 
     // Labeled: it rides in a user turn, but the user didn't write it.
     std::string text = "[HaiCode status update — automatic, not written by "
                        "the user]";
     for (const auto& p : parts) text += "\n\n" + p;
-    return {{"text", text}, {"budget", budget}, {"todos", todos},
-            {"offline", now.offline}};
+    nlohmann::json update = {{"text", text}, {"budget", budget},
+                             {"todos", todos}, {"offline", now.offline}};
+    if (!now.plan_key.empty()) update["plan"] = now.plan_key;
+    return update;
 }
 
 nlohmann::json last_status_update(const std::vector<SessionMessage>& messages) {
@@ -1948,17 +1998,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
                                                   enabled_skills,
                                                   block_mode);
 
-    // Inject the most recent plan file so the agent has it in context even
-    // when starting a fresh session after planning was done in a prior one.
-    std::string latest_plan_block;
-    {
-        std::string plan_content = load_latest_plan(session.directory);
-        if (!plan_content.empty()) {
-            latest_plan_block = "\n\n# Most recent plan (.haicode/plans/)\n\n"
-                              + plan_content;
-        }
-    }
-
     // Plan-mode block: appended only when the session is in Plan mode. Tells
     // the model it must research and propose_plan rather than modify files.
     // The engine separately filters out state-modifying tools when this block
@@ -1979,7 +2018,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     std::string system = render_prompt(prompt_tmpl, model_id, os_info, session.directory, max_steps)
                        + agents_md_block
                        + skills_block
-                       + latest_plan_block
                        + instructions_block
                        + plan_mode_block
                        + chat_mode_block;
@@ -2108,7 +2146,6 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // refills it to max_steps, so it can move up as well as down.
         system = render_prompt(prompt_tmpl, model_id, os_info, session.directory,
                                steps_left) + agents_md_block + skills_block
-                              + latest_plan_block
                               + instructions_block + plan_mode_block + chat_mode_block;
         // steps_left changes each step (and resets on renewal) → re-render the
         // budget text too (empty outside the final stretch).
@@ -2131,6 +2168,25 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         step_status.offline = offline_mode();
 
         auto messages = load_context_messages(session_id);
+
+        // Active plan (.haicode/plans/): rides the history as a status
+        // update, never the system prompt — a propose_plan in Build mode
+        // (or a plan retiring) would otherwise rewrite the cached prefix on
+        // the next turn. When this conversation proposed the plan, its full
+        // text is already in context (the propose_plan call), so the update
+        // only names it; a plan from another session is sent in full.
+        {
+            ActivePlan plan = load_latest_plan(session.directory);
+            step_status.plan_key = plan_state_key(plan);
+            if (step_status.plan_key.empty())
+                step_status.plan.clear();
+            else if (plan_proposed_in_context(messages, plan.path))
+                step_status.plan = "# Active plan\n\nThe plan proposed above "
+                    "via propose_plan (" + plan.path + ") is the active plan.";
+            else
+                step_status.plan = "# Active plan (" + plan.path + ")\n\n"
+                                 + plan.content;
+        }
 
         // Vision fallback: when the primary is text-only and a fallback is
         // configured, describe any not-yet-described attachments (once,

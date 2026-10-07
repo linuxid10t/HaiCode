@@ -1420,6 +1420,24 @@ static bool test_status_update_diffing() {
     auto u6 = next_status_update(st, u5);
     CHECK(u6.value("text", "").find("Offline mode is now off") != std::string::npos,
           "leaving offline mode is stated explicitly");
+
+    // Active plan: sent when its key changes, compared by key only.
+    StepStatus pl = st;
+    pl.plan = "# Active plan (/p/plan_1.md)\n\nBODY\n";
+    pl.plan_key = "plan_1.md#00";
+    auto u7 = next_status_update(pl, u6);
+    CHECK(u7.value("text", "").find("BODY") != std::string::npos, "plan sent");
+    CHECK(u7.value("plan", "") == "plan_1.md#00", "plan key persisted");
+    CHECK(u7.dump().find("BODY") == u7.dump().rfind("BODY"),
+          "only the key is stored besides the text");
+    pl.plan = "# Active plan\n\nshort reference";
+    CHECK(next_status_update(pl, u7).is_null(),
+          "same key, different wording: no update");
+    auto u8 = next_status_update(st, u7);
+    CHECK(u8.value("text", "").find("No plan is active any more") != std::string::npos,
+          "a retired plan is stated explicitly");
+    CHECK(!u8.contains("plan"), "no key once no plan is active");
+    CHECK(next_status_update(st, u8).is_null(), "no plan stays quiet");
     std::cout << "[OK] status update diffing\n";
     return true;
 }
@@ -1437,7 +1455,7 @@ static bool test_status_replay_is_append_only() {
     std::vector<SessionMessage> rows = {
         row(1, "user_prompted", {{"text", "do it"}})};
     auto status1 = haicode::next_status_update(
-        {"", "# Active todos\n\n- [ ] A\n", true, false}, nullptr);
+        {"", "# Active todos\n\n- [ ] A\n", true, false, "", ""}, nullptr);
     auto req1 = builder.assemble_messages(rows);
     haicode::ContextBuilder::append_status_block(req1, status1.value("text", ""));
     CHECK(req1.size() == 1 && req1[0]["content"].is_array()
@@ -1454,7 +1472,7 @@ static bool test_status_replay_is_append_only() {
     CHECK(haicode::last_status_update(rows) == status1,
           "last persisted update is found");
     auto status2 = haicode::next_status_update(
-        {"", "# Active todos\n\n- [x] A\n", true, false}, status1);
+        {"", "# Active todos\n\n- [x] A\n", true, false, "", ""}, status1);
     auto req2 = builder.assemble_messages(rows);
     haicode::ContextBuilder::append_status_block(req2, status2.value("text", ""));
     CHECK(req2.size() == 3, "prompt, assistant, tool results");

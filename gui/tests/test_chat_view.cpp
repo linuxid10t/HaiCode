@@ -9,6 +9,8 @@
 
 #include <Application.h>
 #include <Font.h>
+#include <ScrollBar.h>
+#include <ScrollView.h>
 #include <TextView.h>
 #include <Window.h>
 
@@ -280,6 +282,119 @@ main()
             std::string why;
             CHECK(Same(Snap(live), Fresh(fresh, steps, 60), &why), why);
             if (failures) break;
+        }
+    }
+
+    // [Copy] feedback: the click must not move the view, the "✓" swaps in
+    // place, and clearing it (copying another entry) restores exactly the
+    // bytes and styles a fresh render shows.
+    {
+        std::vector<Step> steps;
+        for (int i = 0; i < 40; ++i) {
+            steps.push_back({Step::User, "question " + std::to_string(i)});
+            steps.push_back({Step::Delta, "Answer **" + std::to_string(i)
+                                          + "** with a few words of text."});
+            steps.push_back({Step::End, ""});
+        }
+        Snapshot want = Fresh(fresh, steps, 60);
+        live.Clear();
+        live.SetMarkdownLayout(60, false);
+        live.BeginBatch();
+        for (const auto& s : steps) Apply(live, s);
+        live.EndBatch();
+
+        // Feedback slots: the 3 bytes after "[Copy] ".
+        std::vector<int32> slots;
+        for (size_t p = want.text.find("[Copy] "); p != std::string::npos;
+             p = want.text.find("[Copy] ", p + 1))
+            slots.push_back((int32)p + 7);
+        CHECK(slots.size() >= 4, "copy controls rendered");
+
+        BScrollBar* vsb = live.ScrollContainer()->ScrollBar(B_VERTICAL);
+        float lo = 0, hi = 0;
+        if (vsb) vsb->GetRange(&lo, &hi);
+        CHECK(vsb && hi > 0, "transcript must be taller than the view");
+
+        // `live` with `slot` patched to fresh's bytes must equal fresh.
+        auto same_except = [&](int32 slot, std::string* why) {
+            Snapshot s = Snap(live);
+            if (s.text.size() != want.text.size()) {
+                *why = "length changed";
+                return false;
+            }
+            for (int32 b = slot; b < slot + 3; ++b) {
+                s.text[b] = want.text[b];
+                s.styles[b] = want.styles[b];
+            }
+            return Same(s, want, why);
+        };
+
+        for (float at : {0.0f, hi / 2}) {
+            if (!vsb || slots.size() < 4) break;
+            vsb->SetValue(at);
+            float before = vsb->Value();
+            int a = live.FindCopyAt(slots[0] - 2);  // inside "[Copy]"
+            int b = live.FindCopyAt(slots[1] - 2);
+            CHECK(a >= 0 && b >= 0 && a != b, "copy controls hit");
+            if (a < 0 || b < 0) break;
+
+            live.CopyEntry(a);
+            CHECK(vsb->Value() == before, "copy must not scroll the view");
+            Snapshot s = Snap(live);
+            CHECK(s.text.compare(slots[0], 3, "\xe2\x9c\x93") == 0,
+                  "feedback shown in the slot");
+            std::string why;
+            CHECK(same_except(slots[0], &why), why);
+
+            live.CopyEntry(b);  // clears a's feedback, shows b's
+            CHECK(vsb->Value() == before, "second copy must not scroll");
+            CHECK(same_except(slots[1], &why), why);
+            CHECK(Snap(live).text.compare(slots[1], 3, "\xe2\x9c\x93") == 0,
+                  "feedback moved to the second entry");
+        }
+    }
+
+    // Follow-the-bottom: live appends keep the view at the bottom only when
+    // it was there; scrolled up, streaming text/reasoning/tool/system lines
+    // leave the reading position alone; back at the bottom, following
+    // resumes; a new prompt always jumps to the bottom.
+    {
+        live.Clear();
+        live.SetMarkdownLayout(60, false);
+        BScrollBar* vsb = live.ScrollContainer()->ScrollBar(B_VERTICAL);
+        auto range_hi = [&]() {
+            float lo = 0, hi = 0;
+            vsb->GetRange(&lo, &hi);
+            return hi;
+        };
+        Apply(live, {Step::User, "q"});
+        for (int i = 0; i < 60; ++i)
+            Apply(live, {Step::Delta, "streamed line " + std::to_string(i) + "\n"});
+        CHECK(vsb && range_hi() > 0, "transcript must be taller than the view");
+        if (vsb) {
+            CHECK(vsb->Value() == range_hi(), "at the bottom: streaming follows");
+
+            vsb->SetValue(range_hi() / 3);
+            float reading = vsb->Value();
+            for (int i = 0; i < 20; ++i)
+                Apply(live, {Step::Delta, "more line " + std::to_string(i) + "\n"});
+            CHECK(vsb->Value() == reading, "scrolled up: streamed text must not scroll");
+            Apply(live, {Step::End, ""});
+            Apply(live, {Step::Reasoning, "thinking about it"});
+            Apply(live, {Step::Tool, "{\"path\":\"a.cpp\"}"});
+            Apply(live, {Step::Result, "contents"});
+            live.AppendSystem("build \xe2\x9c\x93");
+            CHECK(vsb->Value() == reading,
+                  "scrolled up: reasoning/tool/system appends must not scroll");
+
+            vsb->SetValue(range_hi());  // the user scrolls back down
+            for (int i = 0; i < 10; ++i)
+                Apply(live, {Step::Delta, "resumed " + std::to_string(i) + "\n"});
+            CHECK(vsb->Value() == range_hi(), "back at the bottom: following resumes");
+
+            vsb->SetValue(0);
+            Apply(live, {Step::User, "next question"});
+            CHECK(vsb->Value() == range_hi(), "a new prompt jumps to the bottom");
         }
     }
 

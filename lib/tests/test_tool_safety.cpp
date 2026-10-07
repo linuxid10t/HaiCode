@@ -13,6 +13,8 @@
 #include <thread>
 #include <chrono>
 #include <nlohmann/json.hpp>
+#include <atomic>
+#include <iterator>
 
 // Regression tests for the crash where invalid UTF-8 in tool output made
 // nlohmann's strict serializer throw inside WebExtractTool::execute, escaping
@@ -550,6 +552,203 @@ static bool engine_offline_note_rides_dynamic_block() {
     return true;
 }
 
+// ============================================================
+// Engine e2e: the active plan rides the history as a status update — a
+// propose_plan in Build mode (or a plan retiring) must not rewrite the
+// system prompt or any earlier request bytes
+// ============================================================
+
+class PlanE2EProvider : public haicode::Provider {
+public:
+    std::string id() const override { return "fake"; }
+    void cancel(const std::string& = "") override {}
+    std::vector<std::string> list_models(std::string&) override {
+        return {"fake-model"};
+    }
+    int get_model_context(const std::string&) const override { return 0; }
+    void stream(const haicode::LLMRequest& req,
+                haicode::StreamCallbacks cb, const std::string& = "") override {
+        last_system = req.system;
+        last_messages = req.messages;
+        if (propose_next) {
+            propose_next = false;
+            haicode::ToolCall tc;
+            tc.id = "pp1";
+            tc.name = "propose_plan";
+            tc.input = {{"plan", "## Context\n\nMY PLAN BODY\n"}};
+            ++calls;
+            cb.on_finish(haicode::FinishReason::ToolUse, {}, {tc});
+            return;
+        }
+        cb.on_text_delta("t", "ok");
+        ++calls;
+        cb.on_finish(haicode::FinishReason::EndTurn, {}, {});
+    }
+    std::atomic<int> calls{0};
+    bool propose_next = false;
+    std::string last_system;
+    std::vector<nlohmann::json> last_messages;
+
+    std::string tail_text() const {
+        if (last_messages.empty()) return {};
+        const auto& c = last_messages.back()["content"];
+        if (c.is_string()) return c.get<std::string>();
+        if (c.is_array() && !c.empty()) return c.back().value("text", "");
+        return {};
+    }
+    std::string dump() const {
+        std::string out;
+        for (const auto& m : last_messages) out += m.dump();
+        return out;
+    }
+};
+
+static size_t count_occurrences(const std::string& hay, const std::string& needle) {
+    size_t n = 0;
+    for (size_t pos = hay.find(needle); pos != std::string::npos;
+         pos = hay.find(needle, pos + needle.size()))
+        ++n;
+    return n;
+}
+
+// Rewrites every plan file's status header from active to implemented.
+static void retire_all_plans(const std::string& plans_dir) {
+    DIR* d = opendir(plans_dir.c_str());
+    if (!d) return;
+    struct dirent* ent;
+    while ((ent = readdir(d)) != nullptr) {
+        std::string n = ent->d_name;
+        if (n.size() < 4 || n.substr(n.size() - 3) != ".md") continue;
+        std::string path = plans_dir + "/" + n;
+        std::ifstream in(path);
+        std::string content((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+        in.close();
+        const std::string from = "haicode-status: active";
+        auto pos = content.find(from);
+        if (pos != std::string::npos)
+            content.replace(pos, from.size(), "haicode-status: implemented");
+        std::ofstream(path, std::ios::trunc) << content;
+    }
+    closedir(d);
+}
+
+static bool engine_active_plan_rides_history() {
+    char buf[] = "/tmp/hc_tts_plan_e2e_XXXXXX";
+    if (!mkdtemp(buf)) { CHECK(false, "mkdtemp"); return false; }
+    std::string tmp = buf;
+    haicode::set_offline_mode(false);
+
+    haicode::Database db(tmp + "/e2e.db");
+    db.migrate();
+    haicode::SessionStore store(db);
+    auto provider = std::make_shared<PlanE2EProvider>();
+    haicode::ProviderRegistry registry;
+    registry.register_provider(provider);
+    haicode::ToolRegistry tools;
+    haicode::register_builtin_tools(tools);
+    haicode::PermissionGate perms;
+    haicode::SessionEventBus bus;
+    haicode::AppConfig cfg;
+    cfg.model = "fake-model";
+    cfg.provider = "fake";
+    cfg.autoname_sessions = false;
+    cfg.default_mode = "build";
+
+    {
+        haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+        std::string sid = engine.create_session(tmp, "build",
+                                                "fake-model", "fake");
+
+        auto turn = [&](int want_calls) {
+            for (int i = 0; i < 200; ++i) {
+                if (provider->calls >= want_calls && !engine.is_running(sid))
+                    return true;
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+            return false;
+        };
+
+        // Turn 1: no plan anywhere.
+        engine.submit_prompt(sid, "hello");
+        CHECK(turn(1), "first turn completes");
+        const std::string sys1 = provider->last_system;
+        CHECK(provider->dump().find("Active plan") == std::string::npos,
+              "no plan: history carries no plan note");
+        auto prev = provider->last_messages;
+
+        // A plan written by another session appears: sent in full as a
+        // status update; system prompt untouched.
+        std::string plans_dir = tmp + "/.haicode/plans";
+        ::mkdir((tmp + "/.haicode").c_str(), 0755);
+        ::mkdir(plans_dir.c_str(), 0755);
+        std::ofstream(plans_dir + "/plan_20000101_000000_aaaa.md")
+            << "<!-- haicode-status: active -->\n## Context\n\nOTHER PLAN BODY\n";
+        engine.submit_prompt(sid, "next");
+        CHECK(turn(2), "second turn completes");
+        CHECK(provider->last_system == sys1,
+              "foreign plan must not enter the system prompt");
+        CHECK(is_prefix(prev, provider->last_messages),
+              "foreign plan: turn 1's request replays verbatim");
+        CHECK(provider->tail_text().find("OTHER PLAN BODY") != std::string::npos,
+              "foreign plan is sent in full at the request tail");
+        CHECK(provider->tail_text().find("haicode-status") == std::string::npos,
+              "status header stripped from the plan text");
+        prev = provider->last_messages;
+
+        // Turn 3: the model proposes a plan in Build mode (turn ends).
+        provider->propose_next = true;
+        engine.submit_prompt(sid, "plan it");
+        CHECK(turn(3), "proposing turn completes");
+        CHECK(provider->last_system == sys1, "proposing request: system stable");
+        CHECK(is_prefix(prev, provider->last_messages),
+              "proposing request extends the previous one");
+        prev = provider->last_messages;
+
+        // Turn 4: the proposed plan is now active. The system prompt and all
+        // earlier bytes are unchanged; the update only names the plan (its
+        // text is already in context via the propose_plan call).
+        engine.submit_prompt(sid, "go ahead");
+        CHECK(turn(4), "post-proposal turn completes");
+        CHECK(provider->last_system == sys1,
+              "proposed plan must not rewrite the system prompt");
+        CHECK(provider->last_system.find("MY PLAN BODY") == std::string::npos,
+              "plan text stays out of the system prompt");
+        CHECK(is_prefix(prev, provider->last_messages),
+              "post-proposal request extends the proposing request verbatim");
+        CHECK(provider->tail_text().find("proposed above via propose_plan")
+                  != std::string::npos,
+              "status update names the plan proposed in this conversation");
+        CHECK(count_occurrences(provider->dump(), "MY PLAN BODY") == 1,
+              "own plan text is not duplicated by the status update");
+        prev = provider->last_messages;
+
+        // Unchanged: no new plan note.
+        engine.submit_prompt(sid, "continue");
+        CHECK(turn(5), "unchanged turn completes");
+        CHECK(provider->tail_text() == "continue",
+              "unchanged plan state adds no status update");
+        CHECK(is_prefix(prev, provider->last_messages), "append-only");
+        prev = provider->last_messages;
+
+        // Plans retire: explicit "no plan" line, still append-only.
+        retire_all_plans(plans_dir);
+        engine.submit_prompt(sid, "done?");
+        CHECK(turn(6), "post-retire turn completes");
+        CHECK(provider->last_system == sys1,
+              "retiring a plan must not rewrite the system prompt");
+        CHECK(is_prefix(prev, provider->last_messages),
+              "post-retire request extends the previous one verbatim");
+        CHECK(provider->tail_text().find("No plan is active any more")
+                  != std::string::npos,
+              "retirement is stated explicitly");
+    }  // ~SessionEngine joins the loop threads
+
+    rm_rf_dir(tmp);
+    std::cout << "[OK] engine active plan rides the history, append-only\n";
+    return true;
+}
+
 static bool registry_plan_mode_blocks_write_allows_read() {
     haicode::ToolRegistry reg;
     haicode::register_builtin_tools(reg);
@@ -804,6 +1003,7 @@ int main() {
     ok &= registry_chat_mode_blocks_tools();
     ok &= registry_offline_mode_restricts_web_tools_only();
     ok &= engine_offline_note_rides_dynamic_block();
+    ok &= engine_active_plan_rides_history();
     ok &= registry_plan_mode_blocks_write_allows_read();
     ok &= registry_plan_mode_git_is_read_only();
 
