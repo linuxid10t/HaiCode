@@ -54,4 +54,19 @@ bool openai_is_reasoning_model(const std::string& model_id);
 std::string openai_map_effort(const std::string& model_id,
                               const std::string& ui_effort);
 
+// Maps a UI effort setting to the reasoning_effort sent to a llama.cpp
+// server, or "" when it must be omitted (empty/default UI setting). The
+// server turns "none" into enable_thinking=false and hands any other value
+// verbatim to the model's jinja chat template, which decides what it means:
+// DeepSeek V4 has a dedicated "max" mode, gpt-oss prints it as free text,
+// some templates raise on values they don't list. So "off" → "none", every
+// other level passes through unchanged, except for templates known to
+// reject or not be trained on it: Mistral Small 4 (none/high only — every
+// level → "high"), Tencent Hy3 (low/high only — minimal/low → "low", the
+// rest → "high"), and gpt-oss (low/medium/high — minimal → "low",
+// xhigh/max → "high"). A level an unlisted template rejects comes back as
+// the server's error naming the values it accepts.
+std::string llamacpp_map_effort(const std::string& model_id,
+                                const std::string& ui_effort);
+
 } // namespace haicode

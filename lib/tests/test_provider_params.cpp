@@ -441,6 +441,57 @@ static bool test_openai_body_flavor_effort() {
     CHECK(!gen3.contains("reasoning_effort"), "o-series off omits the param");
     CHECK(!gen3.contains("chat_template_kwargs"),
           "Generic never gets template kwargs");
+
+    // llama.cpp: reasoning_effort reaches the server (and the template via
+    // chat_template_kwargs). Regression: "high" was dropped, so Mistral
+    // Small 4 — whose template defaults to "none" — never reasoned.
+    LLMRequest ms4 = base_request("unsloth/Mistral-Small-4-119B-2603-GGUF:Q4_K_M");
+    for (const char* e : {"low", "medium", "high", "xhigh", "max"}) {
+        ms4.reasoning_effort = e;
+        json b = build_openai_body(ms4, ServerFlavor::LlamaCpp);
+        CHECK(b["reasoning_effort"] == "high",
+              "Mistral Small 4 on llama.cpp: every level maps to high");
+        CHECK(b["chat_template_kwargs"]["reasoning_effort"] == "high",
+              "llama.cpp effort mirrored into chat_template_kwargs");
+        CHECK(!b["chat_template_kwargs"].contains("enable_thinking"),
+              "a reasoning level does not touch enable_thinking");
+    }
+    ms4.reasoning_effort = "off";
+    json ms4off = build_openai_body(ms4, ServerFlavor::LlamaCpp);
+    CHECK(ms4off["reasoning_effort"] == "none", "llama.cpp off → none");
+    CHECK(ms4off["chat_template_kwargs"]["enable_thinking"] == false,
+          "llama.cpp off still sets enable_thinking:false (Qwen3 templates)");
+    CHECK(!ms4off["chat_template_kwargs"].contains("reasoning_effort"),
+          "\"none\" is never mirrored into template kwargs (templates reject it)");
+    ms4.reasoning_effort = "";
+    json ms4def = build_openai_body(ms4, ServerFlavor::LlamaCpp);
+    CHECK(!ms4def.contains("reasoning_effort")
+              && !ms4def.contains("chat_template_kwargs"),
+          "llama.cpp default effort sends nothing");
+    CHECK(llamacpp_map_effort("Mistral-Small-2603", "low") == "high",
+          "Mistral Small 4 matched by its 2603 release id");
+
+    // Unlisted templates get the level verbatim: DeepSeek V4's "max" mode
+    // must not be capped to high.
+    LLMRequest ds = base_request("DeepSeek-V4-Flash");
+    for (const char* e : {"minimal", "low", "medium", "high", "xhigh", "max"}) {
+        ds.reasoning_effort = e;
+        json b = build_openai_body(ds, ServerFlavor::LlamaCpp);
+        CHECK(b["reasoning_effort"] == e,
+              "llama.cpp passes unlisted models' levels through verbatim");
+        CHECK(b["chat_template_kwargs"]["reasoning_effort"] == e,
+              "verbatim level mirrored into chat_template_kwargs");
+    }
+    // gpt-oss: trained on low/medium/high only.
+    CHECK(llamacpp_map_effort("gpt-oss-120b", "minimal") == "low", "gpt-oss minimal → low");
+    CHECK(llamacpp_map_effort("gpt-oss-120b", "medium") == "medium", "gpt-oss medium kept");
+    CHECK(llamacpp_map_effort("gpt-oss-120b", "max") == "high", "gpt-oss max → high");
+    CHECK(llamacpp_map_effort("gpt-oss-120b", "xhigh") == "high", "gpt-oss xhigh → high");
+    // Tencent Hy3: template raises on anything but no_think/low/high.
+    CHECK(llamacpp_map_effort("tencent/Hy3-A20B", "minimal") == "low", "Hy3 minimal → low");
+    CHECK(llamacpp_map_effort("tencent/Hy3-A20B", "medium") == "high", "Hy3 medium → high");
+    CHECK(llamacpp_map_effort("tencent/Hy3-A20B", "max") == "high", "Hy3 max → high");
+    CHECK(llamacpp_map_effort("whatever", "bogus").empty(), "unknown UI value omitted");
     std::cout << "[OK] openai body: flavor x effort matrix\n";
     return true;
 }
