@@ -398,6 +398,49 @@ main()
         }
     }
 
+    // Expanding a collapsed block follows the same rule: at the bottom, an
+    // expansion that grows past the bottom edge scrolls to show it (and a
+    // collapse stays at the bottom); scrolled up, neither moves the view.
+    {
+        live.Clear();
+        live.SetMarkdownLayout(60, false);
+        BScrollBar* vsb = live.ScrollContainer()->ScrollBar(B_VERTICAL);
+        auto range_hi = [&]() {
+            float lo = 0, hi = 0;
+            vsb->GetRange(&lo, &hi);
+            return hi;
+        };
+        std::string body;
+        for (int i = 0; i < 40; ++i)
+            body += "body line " + std::to_string(i) + "\n";
+        Apply(live, {Step::User, "q"});                 // entry 0
+        for (int i = 0; i < 60; ++i)                    // entry 1
+            Apply(live, {Step::Delta, "streamed line " + std::to_string(i) + "\n"});
+        Apply(live, {Step::End, ""});
+        Apply(live, {Step::Tool, body});                // entry 2
+        Apply(live, {Step::Result, "contents"});        // entry 3, collapses 2
+        const int tool = 2;
+        CHECK(vsb && range_hi() > 0, "transcript must be taller than the view");
+        if (vsb) {
+            CHECK(vsb->Value() == range_hi(), "starts at the bottom");
+            float collapsed_hi = range_hi();
+            live.ToggleBlock(tool);  // expand
+            CHECK(range_hi() > collapsed_hi, "expansion grew the transcript");
+            CHECK(vsb->Value() == range_hi(),
+                  "at the bottom: expanding scrolls to the new bottom");
+            live.ToggleBlock(tool);  // collapse
+            CHECK(vsb->Value() == range_hi(), "at the bottom: collapsing stays there");
+
+            vsb->SetValue(range_hi() / 3);
+            float reading = vsb->Value();
+            live.ToggleBlock(tool);  // expand while scrolled up
+            CHECK(range_hi() > collapsed_hi, "expansion grew the transcript");
+            CHECK(vsb->Value() == reading, "scrolled up: expanding must not scroll");
+            live.ToggleBlock(tool);  // collapse while scrolled up
+            CHECK(vsb->Value() == reading, "scrolled up: collapsing must not scroll");
+        }
+    }
+
     // What a click would do (planned only — nothing is launched here).
     {
         char tmpl[] = "/tmp/haicode_linktest_XXXXXX";

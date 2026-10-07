@@ -125,7 +125,21 @@ public:
         : BListView("session_list", B_SINGLE_SELECTION_LIST), store_(store)
     {
         SetSelectionMessage(new BMessage(MSG_SELECT_SESSION));
-        SetFlags(Flags() | B_PULSE_NEEDED);
+        SetFlags(Flags() | B_PULSE_NEEDED | B_FRAME_EVENTS);
+    }
+
+    // Rows truncate their title/directory/time to the row width, so every
+    // row's pixels depend on the width — but a resize invalidates only the
+    // newly exposed strip. Widening then left the old "…"-truncated text in
+    // place with the rest of the row drawn after it. Repaint everything on a
+    // width change (height changes don't affect how a row is drawn).
+    void FrameResized(float width, float height) override
+    {
+        BListView::FrameResized(width, height);
+        if (width != last_width_) {
+            last_width_ = width;
+            Invalidate();
+        }
     }
 
     // Engine pointer rather than reference: HaiCodeApp swaps engines on
@@ -316,6 +330,7 @@ private:
     bigtime_t last_times_refresh_ = 0;
     bool times_due_ = false;
     int spinner_frame_ = 0;
+    float last_width_ = -1;
     std::unique_ptr<BMessageRunner> spinner_runner_;
 };
 
