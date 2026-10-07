@@ -57,6 +57,31 @@ static void build_legacy_db(const std::string& path) {
           " ('m2', 'ses_legacy', 'assistant_text', 2,"
           " '{\"role\":\"assistant\",\"text\":\"hi\"}',"
           " " + std::to_string(now) + ", " + std::to_string(now) + ")").c_str());
+    // Migration 3's project_used backfill inputs: Chat sessions classified
+    // by their transcripts (a local tool call = used; a Chat-only tool or no
+    // calls = chat-only). ses_legacy ('{}', no mode = Build) counts as used.
+    auto add_session = [&](const char* id, const char* model_json) {
+        exec(("INSERT INTO session (id, project_id, title, directory, agent,"
+              " model_json, time_created, time_updated) VALUES"
+              " ('" + std::string(id) + "', '/proj', '', '/proj', 'default', '"
+              + model_json + "', " + std::to_string(now) + ", "
+              + std::to_string(now) + ")").c_str());
+    };
+    auto add_assistant = [&](const char* mid, const char* sid,
+                             const char* tool) {
+        exec(("INSERT INTO session_message (id, session_id, type, seq, data_json,"
+              " time_created, time_updated) VALUES ('" + std::string(mid)
+              + "', '" + sid + "', 'assistant_text', 1,"
+              " '{\"role\":\"assistant\",\"text\":\"\",\"tool_calls\":"
+              "[{\"id\":\"c1\",\"name\":\"" + tool + "\",\"input\":{}}]}',"
+              " " + std::to_string(now) + ", " + std::to_string(now) + ")").c_str());
+    };
+    add_session("ses_chat_web", "{\"mode\":\"chat\"}");
+    add_assistant("w1", "ses_chat_web", "web_search");
+    add_session("ses_chat_read", "{\"mode\":\"chat\"}");
+    add_assistant("r1", "ses_chat_read", "read");
+    add_session("ses_chat_empty", "{\"mode\":\"chat\"}");
+    add_session("ses_plan", "{\"mode\":\"plan\"}");
     exec(("INSERT INTO permission (id, project_id, action, resource, time_created)"
           " VALUES ('p1', '/proj', 'bash', '*', " + std::to_string(now) + ")").c_str());
     sqlite3_close(raw);
@@ -72,7 +97,7 @@ static bool table_exists(haicode::Database& db, const std::string& name) {
 int main() {
     std::cout << "=== test_db_upgrade ===" << std::endl;
 
-    // --- Legacy database migrates 0 -> 2 with data intact ---
+    // --- Legacy database migrates 0 -> 3 with data intact ---
     {
         const std::string path = "/tmp/test_haicode_upgrade_legacy.db";
         build_legacy_db(path);
@@ -80,10 +105,10 @@ int main() {
         TEST_REQUIRE(db.user_version() == 0, "legacy starts at version 0");
         db.migrate();
 
-        TEST_REQUIRE(db.user_version() == 2, "migrated to version 2");
+        TEST_REQUIRE(db.user_version() == 3, "migrated to version 3");
         TEST_REQUIRE(!table_exists(db, "permission"),
                      "permission table dropped by migration 2");
-        std::cout << "[OK] legacy DB migrated to v2, permission dropped" << std::endl;
+        std::cout << "[OK] legacy DB migrated to v3, permission dropped" << std::endl;
 
         haicode::SessionStore store(db);
         auto sess = store.get("ses_legacy");
@@ -96,27 +121,45 @@ int main() {
         TEST_REQUIRE(msgs[0].seq == 1 && msgs[1].seq == 2, "seq order preserved");
         std::cout << "[OK] legacy rows intact, tok_last_input added" << std::endl;
 
-        // Idempotent: a second migrate() is a no-op at version 2.
+        // Migration 3: project_used backfilled from mode + transcript.
+        TEST_REQUIRE(sess->project_used, "no-mode (Build) session is used");
+        TEST_REQUIRE(store.get("ses_plan")->project_used, "Plan session is used");
+        TEST_REQUIRE(store.get("ses_chat_read")->project_used,
+                     "Chat session with a local tool call is used");
+        TEST_REQUIRE(!store.get("ses_chat_web")->project_used,
+                     "Chat session with only Chat tools is chat-only");
+        TEST_REQUIRE(!store.get("ses_chat_empty")->project_used,
+                     "Chat session with no calls is chat-only");
+        bool listed = false;
+        for (const auto& si : store.list())
+            if (si.id == "ses_chat_read") listed = si.project_used;
+        TEST_REQUIRE(listed, "list() reads project_used too");
+        std::cout << "[OK] project_used backfilled" << std::endl;
+
+        // Idempotent: a second migrate() is a no-op at version 3.
         db.migrate();
-        TEST_REQUIRE(db.user_version() == 2, "re-migrate stays at version 2");
+        TEST_REQUIRE(db.user_version() == 3, "re-migrate stays at version 3");
+        TEST_REQUIRE(!store.get("ses_chat_web")->project_used,
+                     "re-migrate keeps the backfill");
         TEST_REQUIRE(store.load_messages("ses_legacy").size() == 2,
                      "re-migrate preserves rows");
         std::cout << "[OK] migrate() idempotent" << std::endl;
     }
 
-    // --- Fresh database lands at version 2 without a permission table ---
+    // --- Fresh database lands at version 3 without a permission table ---
     {
         const std::string path = "/tmp/test_haicode_upgrade_fresh.db";
         std::remove(path.c_str());
         haicode::Database db(path);
         db.migrate();
-        TEST_REQUIRE(db.user_version() == 2, "fresh DB at version 2");
+        TEST_REQUIRE(db.user_version() == 3, "fresh DB at version 3");
         TEST_REQUIRE(!table_exists(db, "permission"), "no permission table");
         haicode::SessionStore store(db);
         auto s = store.create("/proj", "default", "{}");
         store.append_message(s.id, "user_prompted", "{\"role\":\"user\",\"text\":\"x\"}");
         TEST_REQUIRE(store.load_messages(s.id).size() == 1, "fresh round-trip");
-        std::cout << "[OK] fresh DB created at v2" << std::endl;
+        TEST_REQUIRE(!store.get(s.id)->project_used, "new session not yet used");
+        std::cout << "[OK] fresh DB created at v3" << std::endl;
     }
 
     // --- Failure surfacing ---

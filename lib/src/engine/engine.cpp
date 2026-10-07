@@ -2068,6 +2068,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
     // prompt size is input + cache_read + cache_write (cache reads/writes still
     // occupy the context window). Used to decide whether to compact.
     int prev_total_input = 0;
+    // Once per loop: the first step that runs in Build/Plan marks the
+    // session as having used its project directory (chat-only sessions
+    // hide it in the sidebar).
+    bool project_marked = false;
     while (steps_left > 0 && ceiling_left > 0) {
         if (interrupt_flag && interrupt_flag->load()) break;
 
@@ -2078,6 +2082,10 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
         // plan-mode system block below must reflect the flip on the next step,
         // not on the next turn.
         mode = get_mode(session_id);
+        if (mode != SessionMode::Chat && !project_marked) {
+            store_.mark_project_used(session_id);
+            project_marked = true;
+        }
 
         // Re-read model_id/provider_id (and inference params) from the session
         // each step. The user can change either via the dropdown mid-loop, and

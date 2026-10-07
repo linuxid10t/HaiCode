@@ -176,6 +176,8 @@ public:
     std::mutex& connection_mutex() { return conn_mu_; }
 
 private:
+    void backfill_project_used();  // migration 3
+
     sqlite3* db_ = nullptr;
     std::mutex conn_mu_;
 };
@@ -196,6 +198,11 @@ struct SessionInfo {
     int last_input_tokens = 0;
     int64_t time_created = 0;
     int64_t time_updated = 0;
+    // Whether a turn has ever run in Build or Plan mode, i.e. the session
+    // has worked in its project directory. False for a chat-only session,
+    // whose stored directory is never shown (set by mark_project_used;
+    // backfilled for pre-v3 databases by migration 3).
+    bool project_used = false;
 };
 
 // Which stored sessions a bulk cleanup targets. Every predicate left at its
@@ -268,6 +275,9 @@ public:
     // Overwrite just the per-request input seed (tok_last_input) — used after
     // compaction, where no provider report will arrive until the next step.
     void update_last_input_tokens(const std::string& session_id, int tokens);
+    // Record that a turn ran with project access (Build/Plan). Sticky and
+    // idempotent; does not bump time_updated (the row's own turn does).
+    void mark_project_used(const std::string& session_id);
     // Patch the "mode" field inside the session's model_json blob. No-op if the
     // session does not exist. mode_str should be "build" or "plan".
     void update_mode(const std::string& session_id, const std::string& mode_str);

@@ -497,10 +497,12 @@ static std::string dir_basename(const std::string& path) {
     return (pos == std::string::npos) ? p : p.substr(pos + 1);
 }
 
-// Whether a stored session is in Chat mode (no local access, so its directory
-// is meaningless to show). create_session always writes "mode"; a missing or
-// unparseable value is treated as not-chat.
-static bool session_is_chat(const haicode::SessionInfo& si) {
+// Whether a stored session is chat-only: in Chat mode now and no turn ever
+// ran in Build/Plan (project_used), so it has never touched its directory and
+// the sidebar shouldn't claim one. create_session always writes "mode"; a
+// missing or unparseable value is treated as not-chat.
+static bool session_is_chat_only(const haicode::SessionInfo& si) {
+    if (si.project_used) return false;
     auto mj = nlohmann::json::parse(si.model_json, nullptr, false);
     if (!mj.is_object()) return false;
     auto it = mj.find("mode");
@@ -1463,7 +1465,7 @@ MainWindow::_RefreshSessionList()
         std::string title = session_display_title(si);
         session_labels_.push_back(title);
         items.push_back(new SessionListItem(title, si.directory, si.id,
-            si.time_updated, session_is_chat(si)));
+            si.time_updated, session_is_chat_only(si)));
         session_ids_.push_back(si.id);
     }
     static_cast<SessionListView*>(session_list_)->ReplaceItems(items);
@@ -2551,7 +2553,7 @@ MainWindow::_HandleCleanupRequest(BMessage* msg)
         std::string title = si ? session_display_title(*si)
             : (sid.size() > 8 ? sid.substr(sid.size() - 8) : sid);
         text << "• " << title.c_str();
-        if (si) text << "\n  " << (session_is_chat(*si) ? "Chat only"
+        if (si) text << "\n  " << (session_is_chat_only(*si) ? "Chat only"
             : si->directory.empty() ? "No project directory"
             : si->directory.c_str());
         text << "\n";
@@ -3206,10 +3208,18 @@ MainWindow::_ApplyModeUi()
         cur_mode = engine_->get_mode(active_session_id_);
     _SetDirBtnVisible(cur_mode != haicode::SessionMode::Chat);
     _SetPermFieldVisible(cur_mode != haicode::SessionMode::Chat);
-    // The sidebar row hides the directory in Chat the same way.
-    if (session_list_ && !active_session_id_.empty())
+    // The sidebar row hides the directory the same way, but only for a
+    // session that never ran a Build/Plan turn (project_used is set by the
+    // loop thread, so re-read it rather than trusting the row).
+    if (session_list_ && !active_session_id_.empty()) {
+        bool chat_only = false;
+        if (cur_mode == haicode::SessionMode::Chat) {
+            auto si = store_.get(active_session_id_);
+            chat_only = si && !si->project_used;
+        }
         static_cast<SessionListView*>(session_list_)->SetChatOnly(
-            active_session_id_, cur_mode == haicode::SessionMode::Chat);
+            active_session_id_, chat_only);
+    }
 }
 
 std::string
