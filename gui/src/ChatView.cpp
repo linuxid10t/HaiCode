@@ -1044,10 +1044,10 @@ ChatView::ToggleBlock(int model_idx)
         && model_[model_idx].kind != ChatEntry::Reasoning
         && model_[model_idx].kind != ChatEntry::CompactionSummary) return;
     model_[model_idx].collapsed = !model_[model_idx].collapsed;
-    // Keep the user's scroll position: they clicked a header in view.
-    BScrollBar* vsb = scroll_->ScrollBar(B_VERTICAL);
-    float scroll_value = vsb ? vsb->Value() : 0;
+    // Same rule as live appends: a view that was showing the bottom keeps
+    // showing it, so an expansion that grows past the bottom edge scrolls
+    // into view; scrolled up, the user's reading position stays put.
+    ScrollAnchor anchor = _AnchorScroll();
     _ReplaceEntry(model_idx);
-    if (vsb)
-        vsb->SetValue(scroll_value);
+    _FollowScroll(anchor);
 }
