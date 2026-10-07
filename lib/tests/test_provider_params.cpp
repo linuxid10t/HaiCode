@@ -23,8 +23,11 @@ using namespace haicode;
 // ---- anthropic_map_effort / anthropic_model_caps ----
 
 static bool test_effort_off_maps_low() {
-    CHECK(anthropic_map_effort("claude-opus-5", "off") == "low",
-          "\"off\" must map to the lowest valid effort, never be sent verbatim");
+    // Models that can't turn thinking off keep it at the lowest effort.
+    CHECK(anthropic_map_effort("claude-opus-5-5", "off") == "low",
+          "\"off\" on Opus 5.5 maps to the lowest valid effort, never verbatim");
+    CHECK(anthropic_map_effort("claude-fable-5-1", "off") == "low",
+          "\"off\" on Fable maps to low");
     CHECK(anthropic_map_effort("claude-opus-5", "minimal") == "low",
           "\"minimal\" is not an Anthropic value; maps to low");
     CHECK(anthropic_map_effort("claude-sonnet-5-5", "low") == "low",
@@ -33,14 +36,52 @@ static bool test_effort_off_maps_low() {
           "xhigh passes through on 5.x");
     CHECK(anthropic_map_effort("claude-opus-5", "") == "",
           "empty effort omits the param");
-    std::cout << "[OK] effort off/minimal -> low, passthrough elsewhere\n";
+    // Where "off" disables thinking, effort is omitted (model default high
+    // is the most disabled/between_tools accepts).
+    CHECK(anthropic_map_effort("claude-opus-5", "off") == "",
+          "Opus 5 off: thinking disabled, no effort");
+    CHECK(anthropic_map_effort("claude-sonnet-5-5", "off") == "",
+          "Sonnet 5.5 off: between_tools, no effort");
+    CHECK(anthropic_map_effort("claude-opus-4-6", "off") == "",
+          "4.6 off: thinking disabled, no effort");
+    std::cout << "[OK] effort off/minimal mapping, passthrough elsewhere\n";
+    return true;
+}
+
+static bool test_thinking_off_switch() {
+    CHECK(anthropic_thinking_type("claude-opus-5", "high") == "adaptive",
+          "adaptive while effort is on");
+    CHECK(anthropic_thinking_type("claude-opus-5", "") == "adaptive",
+          "adaptive at the default effort");
+    CHECK(anthropic_thinking_type("claude-opus-5", "off") == "disabled",
+          "Opus 5 disables thinking");
+    CHECK(anthropic_thinking_type("claude-sonnet-5", "off") == "disabled",
+          "Sonnet 5 disables thinking");
+    CHECK(anthropic_thinking_type("claude-opus-4-8", "off") == "disabled"
+          && anthropic_thinking_type("claude-opus-4-7", "off") == "disabled"
+          && anthropic_thinking_type("claude-sonnet-4-6", "off") == "disabled",
+          "4.6-4.8 disable thinking");
+    CHECK(anthropic_thinking_type("claude-sonnet-5-5", "off") == "between_tools",
+          "Sonnet 5.5 rejects disabled; between_tools is its off switch");
+    CHECK(anthropic_thinking_type("claude-opus-5-5", "off") == "adaptive"
+          && anthropic_thinking_type("claude-fable-5-1", "off") == "adaptive"
+          && anthropic_thinking_type("claude-mythos-5-1", "off") == "adaptive",
+          "models rejecting every off switch stay adaptive");
+    CHECK(anthropic_thinking_type("claude-opus-4-5", "off") == ""
+          && anthropic_thinking_type("claude-opus-4-5", "high") == ""
+          && anthropic_thinking_type("claude-3-5-haiku", "off") == ""
+          && anthropic_thinking_type("totally-unknown", "high") == "",
+          "budgeted/none/unknown models never get a thinking param");
+    std::cout << "[OK] thinking off switch per model\n";
     return true;
 }
 
 static bool test_effort_unsupported_models() {
-    // 4.5/3-7 (budgeted) and 3-5 (none) have no effort support at all.
-    CHECK(anthropic_map_effort("claude-opus-4-5", "high") == "",
-          "4.5 must not receive output_config");
+    // Sonnet/Haiku 4.5, 3-7 (budgeted) and 3-5 (none) have no effort
+    // support at all.
+    CHECK(anthropic_map_effort("claude-sonnet-4-5", "high") == ""
+          && anthropic_map_effort("claude-haiku-4-5", "high") == "",
+          "Sonnet/Haiku 4.5 must not receive output_config");
     CHECK(anthropic_map_effort("claude-3-7-sonnet", "low") == "",
           "3-7 must not receive output_config");
     CHECK(anthropic_map_effort("claude-3-5-haiku", "low") == "",
@@ -58,6 +99,19 @@ static bool test_effort_level_stepdown() {
           "xhigh steps down to high on 4.6");
     CHECK(anthropic_map_effort("claude-opus-4-6", "max") == "max",
           "max is valid on 4.6");
+    // Opus 4.5 has low/medium/high only.
+    CHECK(anthropic_map_effort("claude-opus-4-5", "high") == "high",
+          "Opus 4.5 takes effort");
+    CHECK(anthropic_map_effort("claude-opus-4-5", "max") == "high"
+          && anthropic_map_effort("claude-opus-4-5", "xhigh") == "high",
+          "xhigh/max step down to high on Opus 4.5");
+    CHECK(anthropic_map_effort("claude-opus-4-5", "off") == "low",
+          "Opus 4.5 off: no thinking anyway, lowest effort");
+    // 4.7/4.8 (regression: absent from the table, so effort and thinking
+    // were both dropped and the model ran without thinking).
+    CHECK(anthropic_map_effort("claude-opus-4-7", "xhigh") == "xhigh"
+          && anthropic_map_effort("claude-opus-4-8", "max") == "max",
+          "4.7/4.8 take every effort level");
     // Dated variants resolve through the prefix rule.
     CHECK(anthropic_map_effort("claude-sonnet-5-20250929", "xhigh") == "xhigh",
           "dated 5.x ids keep xhigh");
@@ -74,6 +128,9 @@ static bool test_thinking_modes() {
           "mythos-5.1 is adaptive");
     CHECK(anthropic_model_caps("claude-opus-4-6").thinking == ThinkingMode::Adaptive,
           "4.6 is adaptive");
+    CHECK(anthropic_model_caps("claude-opus-4-7").thinking == ThinkingMode::Adaptive
+          && anthropic_model_caps("claude-opus-4-8").thinking == ThinkingMode::Adaptive,
+          "4.7/4.8 are adaptive");
     CHECK(anthropic_model_caps("claude-opus-4-5").thinking == ThinkingMode::Budgeted,
           "4.5 is budgeted (adaptive would 400)");
     CHECK(anthropic_model_caps("claude-3-7-sonnet").thinking == ThinkingMode::Budgeted,
@@ -99,7 +156,7 @@ static LLMRequest base_request(const std::string& model) {
 }
 
 static bool test_body_adaptive_thinking() {
-    LLMRequest req = base_request("claude-opus-5");
+    LLMRequest req = base_request("claude-opus-5-5");
     req.reasoning_effort = "off";
     req.temperature = 0.7;
     req.top_p = 0.9;
@@ -113,10 +170,41 @@ static bool test_body_adaptive_thinking() {
           "5.x rejects non-default sampling params; omit temperature");
     CHECK(!body.contains("top_p"), "omit top_p on 5.x");
     CHECK(body["output_config"]["effort"] == "low",
-          "\"off\" lands on effort low, never sent verbatim");
+          "Opus 5.5 can't disable thinking: \"off\" lands on effort low");
     CHECK(body["max_tokens"] == kDefaultMaxTokens,
           "max_tokens fallback intact");
+
+    // Regression: Opus 4.7 was missing from the caps table and got no
+    // thinking config (= no thinking on 4.7/4.8) and no effort.
+    LLMRequest o47 = base_request("claude-opus-4-7");
+    o47.reasoning_effort = "xhigh";
+    json b47 = build_anthropic_body(o47);
+    CHECK(b47["thinking"]["type"] == "adaptive"
+          && b47["output_config"]["effort"] == "xhigh",
+          "Opus 4.7 gets adaptive thinking + effort");
     std::cout << "[OK] adaptive body: thinking+summarized, no sampling, off->low\n";
+    return true;
+}
+
+static bool test_body_thinking_off() {
+    LLMRequest req = base_request("claude-opus-5");
+    req.reasoning_effort = "off";
+    req.temperature = 0.7;
+    json body = build_anthropic_body(req);
+    CHECK(body["thinking"] == json({{"type", "disabled"}}),
+          "Opus 5 off sends thinking disabled (no display)");
+    CHECK(!body.contains("output_config"),
+          "no effort with disabled thinking (xhigh/max would 400)");
+    CHECK(!body.contains("temperature"),
+          "sampling still omitted on adaptive-capable models");
+
+    LLMRequest s55 = base_request("claude-sonnet-5-5");
+    s55.reasoning_effort = "off";
+    json b55 = build_anthropic_body(s55);
+    CHECK(b55["thinking"] == json({{"type", "between_tools"}}),
+          "Sonnet 5.5 off sends between_tools with no other field");
+    CHECK(!b55.contains("output_config"), "no effort with between_tools");
+    std::cout << "[OK] off disables thinking where the model allows it\n";
     return true;
 }
 
@@ -127,7 +215,12 @@ static bool test_body_budgeted_and_none() {
     json body = build_anthropic_body(req);
     CHECK(!body.contains("thinking"), "4.5 gets no auto thinking config");
     CHECK(body.contains("temperature"), "4.5 still accepts temperature");
-    CHECK(!body.contains("output_config"), "4.5 gets no effort param");
+    CHECK(body["output_config"]["effort"] == "high", "Opus 4.5 takes effort");
+
+    LLMRequest s45 = base_request("claude-sonnet-4-5");
+    s45.reasoning_effort = "high";
+    CHECK(!build_anthropic_body(s45).contains("output_config"),
+          "Sonnet 4.5 gets no effort param (rejected)");
 
     LLMRequest old = base_request("claude-3-5-haiku");
     old.temperature = 0.5;
@@ -632,10 +725,12 @@ static bool test_anthropic_models_parse() {
 int main() {
     bool ok = true;
     ok = test_effort_off_maps_low() && ok;
+    ok = test_thinking_off_switch() && ok;
     ok = test_effort_unsupported_models() && ok;
     ok = test_effort_level_stepdown() && ok;
     ok = test_thinking_modes() && ok;
     ok = test_body_adaptive_thinking() && ok;
+    ok = test_body_thinking_off() && ok;
     ok = test_body_budgeted_and_none() && ok;
     ok = test_thinking_block_fragments() && ok;
     ok = test_replay_thinking_before_tool_use() && ok;
