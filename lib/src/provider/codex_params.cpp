@@ -14,6 +14,62 @@ bool codex_model_reasons(const std::string& model_id) {
     return lower.find("codex") != std::string::npos;
 }
 
+std::vector<std::string> parse_codex_reasoning_levels(const nlohmann::json& model) {
+    std::vector<std::string> out;
+    if (!model.is_object()) return out;
+    auto it = model.find("supported_reasoning_levels");
+    if (it == model.end() || !it->is_array()) return out;
+    for (auto& lvl : *it) {
+        std::string e;
+        if (lvl.is_string()) e = lvl.get<std::string>();
+        else if (lvl.is_object() && lvl.contains("effort")
+                 && lvl["effort"].is_string())
+            e = lvl["effort"].get<std::string>();
+        if (!e.empty()) out.push_back(e);
+    }
+    return out;
+}
+
+namespace {
+// OpenAI effort levels, lowest first.
+const char* const kCodexEfforts[] = {"none", "minimal", "low", "medium",
+                                     "high", "xhigh"};
+int codex_effort_rank(const std::string& e) {
+    for (int i = 0; i < 6; ++i)
+        if (e == kCodexEfforts[i]) return i;
+    return -1;
+}
+} // namespace
+
+std::string codex_map_effort(const std::string& model_id,
+                             const std::string& ui_effort,
+                             const std::vector<std::string>& supported) {
+    std::string want = ui_effort;
+    if (want == "off") want = "none";
+    else if (want == "max") want = "xhigh";
+    const int rank = codex_effort_rank(want);
+    if (rank < 0) return "";  // empty/default or unknown: omit
+
+    std::vector<int> have;
+    for (auto& s : supported)
+        if (int r = codex_effort_rank(s); r >= 0) have.push_back(r);
+    if (have.empty()) {
+        if (!codex_model_reasons(model_id)) return "";
+        return want == "none" ? "low" : want;
+    }
+    if (std::find(have.begin(), have.end(), rank) != have.end()) return want;
+    // Nearest supported level: the highest below, else the lowest above.
+    // A reasoning request never falls to "none" (that would turn it off).
+    int below = -1, above = -1;
+    for (int r : have) {
+        if (r == 0 && rank > 0) continue;
+        if (r < rank && r > below) below = r;
+        if (r > rank && (above < 0 || r < above)) above = r;
+    }
+    int pick = below >= 0 ? below : above;
+    return pick >= 0 ? kCodexEfforts[pick] : "";
+}
+
 nlohmann::json codex_reasoning_item_for_replay(const nlohmann::json& item) {
     if (!item.is_object() || item.value("type", "") != "reasoning")
         return nullptr;
@@ -186,7 +242,8 @@ std::vector<nlohmann::json> translate_to_responses_items(
     return out;
 }
 
-nlohmann::json build_codex_body(const LLMRequest& request) {
+nlohmann::json build_codex_body(const LLMRequest& request,
+                                const std::vector<std::string>& supported_efforts) {
     nlohmann::json body;
     body["model"]  = request.model_id;
     body["stream"] = true;
@@ -205,10 +262,12 @@ nlohmann::json build_codex_body(const LLMRequest& request) {
     // Temperature is ignored by this backend (verified by third-party
     // contract docs); omit rather than send a field it may reject.
 
-    // "off" is not a valid Responses effort value — omit entirely.
-    if (!request.reasoning_effort.empty()
-            && request.reasoning_effort != "off")
-        body["reasoning"] = {{"effort", request.reasoning_effort}};
+    // UI effort → a level this model accepts ("off" → "none", "max" →
+    // "xhigh", unsupported levels to the nearest supported one).
+    const std::string effort = codex_map_effort(
+        request.model_id, request.reasoning_effort, supported_efforts);
+    if (!effort.empty())
+        body["reasoning"] = {{"effort", effort}};
 
     // store:false means the server keeps nothing between steps: without the
     // encrypted reasoning content the model re-derives its reasoning from

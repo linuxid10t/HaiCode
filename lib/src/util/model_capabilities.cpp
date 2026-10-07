@@ -28,35 +28,54 @@ struct CapsEntry {
     const char* prefix;
     uint8_t effort_mask;   // 0 = no effort support
     ThinkingMode thinking;
+    ThinkingOff off;
 };
+
+constexpr uint8_t kEffortBasic = kEffortLow | kEffortMedium | kEffortHigh;
+constexpr ThinkingOff kLow = ThinkingOff::LowestEffort;
+constexpr ThinkingOff kDisable = ThinkingOff::Disabled;
 
 // Verified against the platform docs' per-model thinking and effort tables:
 //   - adaptive thinking: 4.6+, 5.x, Fable/Mythos (incl. 5.5/5.1), Mythos Preview
 //   - budgeted (type:"enabled"): 3-7 series and 4.5 series; adaptive is a
 //     400 there, so we never auto-send a thinking param
 //   - 3-5 series: no thinking support at all
-//   - effort: low/medium/high on every effort-capable model; xhigh/max
-//     availability per the effort page's level table (max also on 4.6).
+//   - effort: low/medium/high on every effort-capable model (Opus 4.5 has
+//     only those; Sonnet/Haiku 4.5 reject it); xhigh arrived with Opus 4.7,
+//     max with 4.6
+//   - turning thinking off: {type:"disabled"} on 4.6/4.7/4.8, Sonnet 5 and
+//     Opus 5 (Opus 5 only at effort high or below — the default);
+//     Sonnet 5.5 rejects it and takes {type:"between_tools"} instead (also
+//     only at high or below); Opus 5.5 and Fable/Mythos reject every off
+//     switch, so effort is the only control there
+//   - omitting `thinking` runs WITHOUT thinking on 4.6/4.7/4.8, so adaptive
+//     models always get an explicit config
 static const CapsEntry kAnthropicCaps[] = {
     // 5.x — adaptive thinking, all five effort levels.
-    {"claude-opus-5",      kEffortAll, ThinkingMode::Adaptive},
-    {"claude-sonnet-5",    kEffortAll, ThinkingMode::Adaptive},
-    {"claude-fable-5",     kEffortAll, ThinkingMode::Adaptive},
-    {"claude-mythos-5",    kEffortAll, ThinkingMode::Adaptive},
-    {"claude-mythos",      kEffortAll, ThinkingMode::Adaptive},  // Mythos Preview
+    {"claude-opus-5",      kEffortAll, ThinkingMode::Adaptive, kDisable},
+    {"claude-opus-5-5",    kEffortAll, ThinkingMode::Adaptive, kLow},
+    {"claude-sonnet-5",    kEffortAll, ThinkingMode::Adaptive, kDisable},
+    {"claude-sonnet-5-5",  kEffortAll, ThinkingMode::Adaptive,
+                           ThinkingOff::BetweenTools},
+    {"claude-fable-5",     kEffortAll, ThinkingMode::Adaptive, kLow},
+    {"claude-mythos-5",    kEffortAll, ThinkingMode::Adaptive, kLow},
+    {"claude-mythos",      kEffortAll, ThinkingMode::Adaptive, kLow},  // Mythos Preview
+    // 4.7/4.8 — adaptive, all five effort levels.
+    {"claude-opus-4-8",    kEffortAll, ThinkingMode::Adaptive, kDisable},
+    {"claude-opus-4-7",    kEffortAll, ThinkingMode::Adaptive, kDisable},
     // 4.6 — adaptive, effort incl. max (no xhigh).
-    {"claude-opus-4-6",    kEffortAll & ~kEffortXHigh, ThinkingMode::Adaptive},
-    {"claude-sonnet-4-6",  kEffortAll & ~kEffortXHigh, ThinkingMode::Adaptive},
-    // 4.5 — budgeted thinking; adaptive is rejected, effort unsupported.
-    {"claude-opus-4-5",    0,          ThinkingMode::Budgeted},
-    {"claude-sonnet-4-5",  0,          ThinkingMode::Budgeted},
-    {"claude-haiku-4-5",   0,          ThinkingMode::Budgeted},
+    {"claude-opus-4-6",    kEffortAll & ~kEffortXHigh, ThinkingMode::Adaptive, kDisable},
+    {"claude-sonnet-4-6",  kEffortAll & ~kEffortXHigh, ThinkingMode::Adaptive, kDisable},
+    // 4.5 — budgeted thinking; adaptive is rejected. Effort on Opus only.
+    {"claude-opus-4-5",    kEffortBasic, ThinkingMode::Budgeted, kLow},
+    {"claude-sonnet-4-5",  0,            ThinkingMode::Budgeted, kLow},
+    {"claude-haiku-4-5",   0,            ThinkingMode::Budgeted, kLow},
     // 3-7 — budgeted thinking.
-    {"claude-3-7-sonnet",  0,          ThinkingMode::Budgeted},
-    {"claude-3-7-haiku",   0,          ThinkingMode::Budgeted},
+    {"claude-3-7-sonnet",  0,          ThinkingMode::Budgeted, kLow},
+    {"claude-3-7-haiku",   0,          ThinkingMode::Budgeted, kLow},
     // 3-5 — no thinking.
-    {"claude-3-5-sonnet",  0,          ThinkingMode::None},
-    {"claude-3-5-haiku",   0,          ThinkingMode::None},
+    {"claude-3-5-sonnet",  0,          ThinkingMode::None, kLow},
+    {"claude-3-5-haiku",   0,          ThinkingMode::None, kLow},
 };
 
 } // namespace
@@ -78,8 +97,20 @@ AnthropicModelCaps anthropic_model_caps(const std::string& model_id) {
         caps.supports_effort = best->effort_mask != 0;
         caps.effort_mask = best->effort_mask;
         caps.thinking = best->thinking;
+        caps.off = best->off;
     }
     return caps;
+}
+
+std::string anthropic_thinking_type(const std::string& model_id,
+                                    const std::string& ui_effort) {
+    AnthropicModelCaps caps = anthropic_model_caps(model_id);
+    if (caps.thinking != ThinkingMode::Adaptive) return "";
+    if (ui_effort == "off") {
+        if (caps.off == ThinkingOff::Disabled) return "disabled";
+        if (caps.off == ThinkingOff::BetweenTools) return "between_tools";
+    }
+    return "adaptive";
 }
 
 std::string anthropic_map_effort(const std::string& model_id,
@@ -88,9 +119,14 @@ std::string anthropic_map_effort(const std::string& model_id,
     AnthropicModelCaps caps = anthropic_model_caps(model_id);
     if (!caps.supports_effort) return "";
 
-    // "off"/"minimal" are not Anthropic values; "off" lands on the lowest
-    // valid effort so thinking-heavy defaults are still reined in. ("off"
-    // must not be sent verbatim — the API rejects it.)
+    // "off"/"minimal" are not Anthropic values ("off" must never be sent
+    // verbatim — the API rejects it). Where "off" disables thinking, effort
+    // is omitted: the model default (high) is the most a disabled or
+    // between_tools config accepts. Elsewhere "off" lands on the lowest
+    // valid effort so thinking-heavy defaults are still reined in.
+    if (ui_effort == "off" && caps.thinking == ThinkingMode::Adaptive
+            && caps.off != ThinkingOff::LowestEffort)
+        return "";
     if (ui_effort == "off" || ui_effort == "minimal") return "low";
 
     uint8_t want = 0;
@@ -127,7 +163,7 @@ std::string openai_map_effort(const std::string& model_id,
     if (ui_effort == "minimal" || ui_effort == "low" || ui_effort == "medium"
             || ui_effort == "high" || ui_effort == "xhigh")
         return ui_effort;
-    // "max" is Responses-API only; chat completions caps at xhigh.
+    // OpenAI has no "max"; xhigh is its top level.
     if (ui_effort == "max") return "xhigh";
     return "";
 }

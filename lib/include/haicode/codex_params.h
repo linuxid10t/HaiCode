@@ -19,6 +19,24 @@ inline constexpr const char* kOpenAIReasoningBlock = "openai_reasoning";
 // non-reasoning models reject.
 bool codex_model_reasons(const std::string& model_id);
 
+// Reasoning-effort levels a Codex catalog entry lists for its model
+// (`supported_reasoning_levels: [{effort, description}]`, entries may also be
+// bare strings). Empty when the entry carries no list.
+std::vector<std::string> parse_codex_reasoning_levels(const nlohmann::json& model);
+
+// Maps a UI effort setting to the Responses `reasoning.effort` value, or ""
+// to omit the param. "off" → "none" (reasoning disabled) and "max" → "xhigh"
+// (OpenAI's top level); other levels pass through. With the model's
+// `supported` levels from the catalog, a level the model lacks moves to the
+// nearest one it has — down first, then up, and a reasoning level never
+// lands on "none" — so "off" on a model without "none" becomes its lowest
+// level. Without a catalog list, "off" sends "low" (accepted by every
+// reasoning model) and non-reasoning models (codex_model_reasons false) get
+// nothing.
+std::string codex_map_effort(const std::string& model_id,
+                             const std::string& ui_effort,
+                             const std::vector<std::string>& supported = {});
+
 // Reduces a streamed `response.output_item.done` reasoning item to the shape
 // that can be sent back on a store:false request: {type, summary,
 // encrypted_content}. The server-side `id` is dropped (items are not
@@ -46,6 +64,9 @@ std::vector<nlohmann::json> translate_to_responses_items(
 //     step of a session to the same prompt cache;
 //   - reasoning models get `include: ["reasoning.encrypted_content"]` so
 //     their reasoning can be replayed on the next step (store:false).
-nlohmann::json build_codex_body(const LLMRequest& request);
+// `supported_efforts` is the model's catalog level list (codex_map_effort).
+nlohmann::json build_codex_body(
+    const LLMRequest& request,
+    const std::vector<std::string>& supported_efforts = {});
 
 } // namespace haicode

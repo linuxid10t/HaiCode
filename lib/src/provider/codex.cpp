@@ -78,7 +78,8 @@ public:
         } pop{this, stream_token, flag};
 
         // ---- Build request body (cache layout: see codex_params.h) ----
-        const nlohmann::json body = build_codex_body(request);
+        const nlohmann::json body =
+            build_codex_body(request, peek_reasoning_levels(request.model_id));
 
         // replace handler: see anthropic.cpp — degrade, never throw, on any
         // stray invalid UTF-8 byte.
@@ -355,6 +356,15 @@ public:
     }
 
 private:
+    // Effort levels the catalog lists for a model (empty if unknown — the
+    // catalog is loaded by list_models or the first get_model_context).
+    std::vector<std::string> peek_reasoning_levels(const std::string& model_id) const {
+        std::lock_guard<std::mutex> lock(context_cache_mu_);
+        auto it = effort_cache_.find(model_id);
+        return it != effort_cache_.end() ? it->second
+                                         : std::vector<std::string>{};
+    }
+
     std::vector<std::string> fetch_catalog(std::string& error,
                                            long timeout_s) const {
         error.clear();
@@ -433,6 +443,13 @@ private:
                         context_cache_[mid] = ctx;
                     }
                 }
+                // ...and the effort levels each model accepts, so the
+                // effort menu maps onto values the backend won't reject.
+                if (auto levels = parse_codex_reasoning_levels(m);
+                        !levels.empty()) {
+                    std::lock_guard<std::mutex> lock(context_cache_mu_);
+                    effort_cache_[mid] = std::move(levels);
+                }
                 result.push_back(mid);
             }
         }
@@ -451,6 +468,7 @@ private:
     // window), so the cache is mutex-guarded.
     mutable std::mutex context_cache_mu_;
     mutable std::map<std::string, int> context_cache_;
+    mutable std::map<std::string, std::vector<std::string>> effort_cache_;
     // Lazy catalog load state for get_model_context (guarded by
     // catalog_fetch_mu_, except catalog_loaded_ which list_models may set
     // from another thread).

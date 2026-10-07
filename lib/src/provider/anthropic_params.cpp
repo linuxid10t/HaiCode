@@ -27,20 +27,28 @@ nlohmann::json build_anthropic_body(const LLMRequest& request) {
             body["top_p"] = *request.top_p;
     }
 
-    // Capability-mapped effort. "off" maps to "low" (the lowest valid
-    // value); models without effort support omit the param entirely.
+    // Capability-mapped effort. "off" either disables thinking (below) and
+    // omits effort, or — where thinking can't be disabled — maps to "low";
+    // models without effort support omit the param entirely.
     const std::string effort = anthropic_map_effort(request.model_id,
                                                     request.reasoning_effort);
     if (!effort.empty())
         body["output_config"] = {{"effort", effort}};
 
-    // Adaptive thinking with a visible summary: current models default to
-    // display:"omitted", which would leave the reasoning panel empty.
-    // Budgeted models get no auto config (HaiCode never sends
-    // budget_tokens), and thinking-disabled is never sent — several
-    // current models reject it with 400.
-    if (caps.thinking == ThinkingMode::Adaptive)
+    // Adaptive models always get an explicit thinking config: omitting it
+    // runs 4.6–4.8 without thinking. Adaptive carries display:"summarized"
+    // (current models default to "omitted", which would leave the reasoning
+    // panel empty). Effort "off" sends the model's off switch — "disabled",
+    // or "between_tools" on Sonnet 5.5, which takes no other field — and
+    // models that reject both (Opus 5.5, Fable/Mythos) stay adaptive at
+    // effort low. Budgeted models get no auto config (HaiCode never sends
+    // budget_tokens), so they don't think at all.
+    const std::string thinking = anthropic_thinking_type(
+        request.model_id, request.reasoning_effort);
+    if (thinking == "adaptive")
         body["thinking"] = {{"type", "adaptive"}, {"display", "summarized"}};
+    else if (!thinking.empty())
+        body["thinking"] = {{"type", thinking}};
 
     // System — the byte-stable body only, with a cache breakpoint. Any
     // per-request dynamic text (`system_dynamic`) must NOT live here: the

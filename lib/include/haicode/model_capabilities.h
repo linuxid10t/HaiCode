@@ -22,10 +22,18 @@ constexpr uint8_t kEffortXHigh  = 1 << 3;
 constexpr uint8_t kEffortMax    = 1 << 4;
 constexpr uint8_t kEffortAll    = 0x1F;
 
+// How a UI effort of "off" is honored on an adaptive-thinking model.
+enum class ThinkingOff {
+    LowestEffort,  // thinking can't be disabled (400): "off" → effort "low"
+    Disabled,      // {type:"disabled"} accepted (at the default effort)
+    BetweenTools,  // Sonnet 5.5: {type:"between_tools"} is the off switch
+};
+
 struct AnthropicModelCaps {
     bool supports_effort = false;
     uint8_t effort_mask = 0;
     ThinkingMode thinking = ThinkingMode::None;
+    ThinkingOff off = ThinkingOff::LowestEffort;
 };
 
 // Longest-prefix (case-insensitive) capability lookup for Anthropic model
@@ -36,11 +44,22 @@ AnthropicModelCaps anthropic_model_caps(const std::string& model_id);
 // Maps a UI effort setting ("off"/"minimal"/"low"/"medium"/"high"/"xhigh"/
 // "max") to the value actually sent in output_config.effort for this model,
 // or "" when the param must be omitted (model without effort support, or
-// empty/default UI setting). "off" is not a valid API value: it maps to
-// "low", the lowest valid effort. Unsupported high levels step down to the
-// nearest valid one.
+// empty/default UI setting). "off" is not a valid API value: where the model
+// can disable thinking (see anthropic_thinking_type) it omits effort — the
+// model default (high) is within what a disabled/between_tools config
+// accepts — and otherwise maps to "low", the lowest valid effort.
+// Unsupported high levels step down to the nearest valid one.
 std::string anthropic_map_effort(const std::string& model_id,
                                  const std::string& ui_effort);
+
+// The `thinking.type` to send for this model and UI effort, or "" to omit
+// the param: "adaptive" on adaptive models, except that "off" sends
+// "disabled" (4.6–4.8, Sonnet 5, Opus 5) or "between_tools" (Sonnet 5.5)
+// where the model accepts it. Models that reject any off switch (Opus 5.5,
+// Fable/Mythos) stay adaptive at effort "low". Budgeted and no-thinking
+// models never get a thinking param — they don't think without one.
+std::string anthropic_thinking_type(const std::string& model_id,
+                                    const std::string& ui_effort);
 
 // True for OpenAI reasoning-model families (o1*/o3*/o4*/gpt-5*) that
 // require max_completion_tokens instead of max_tokens and reject

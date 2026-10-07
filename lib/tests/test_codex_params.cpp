@@ -239,6 +239,58 @@ static bool test_assemble_replay_gating() {
     return true;
 }
 
+static bool test_effort_mapping() {
+    // Catalog parse: objects with `effort`, bare strings, junk skipped.
+    json entry = {{"slug", "gpt-5.5-codex"}, {"supported_reasoning_levels",
+        json::array({{{"effort", "low"}, {"description", "fast"}},
+                     "medium", {{"effort", "high"}}, {{"effort", "xhigh"}},
+                     42, json::object()})}};
+    auto levels = parse_codex_reasoning_levels(entry);
+    CHECK((levels == std::vector<std::string>{"low", "medium", "high", "xhigh"}),
+          "catalog levels parsed");
+    CHECK(parse_codex_reasoning_levels(json{{"slug", "x"}}).empty(),
+          "no list → empty");
+
+    const std::string m = "gpt-5.5-codex";
+    // With a catalog list.
+    CHECK(codex_map_effort(m, "high", levels) == "high", "supported passes");
+    CHECK(codex_map_effort(m, "max", levels) == "xhigh",
+          "max → xhigh (regression: sent verbatim, not an OpenAI level)");
+    CHECK(codex_map_effort(m, "off", levels) == "low",
+          "off without none → the lowest supported level");
+    std::vector<std::string> with_none = {"none", "low", "medium", "high"};
+    CHECK(codex_map_effort(m, "off", with_none) == "none",
+          "off → none when the model has it (regression: omitted = default)");
+    CHECK(codex_map_effort(m, "xhigh", with_none) == "high"
+          && codex_map_effort(m, "max", with_none) == "high",
+          "unsupported top levels step down");
+    CHECK(codex_map_effort(m, "minimal", with_none) == "low",
+          "a reasoning level never falls to none");
+    CHECK(codex_map_effort(m, "", levels) == ""
+          && codex_map_effort(m, "bogus", levels) == "",
+          "default/unknown omitted");
+    // Without a catalog list.
+    CHECK(codex_map_effort(m, "off") == "low", "off → low fallback");
+    CHECK(codex_map_effort(m, "max") == "xhigh", "max → xhigh fallback");
+    CHECK(codex_map_effort(m, "medium") == "medium", "levels pass through");
+    CHECK(codex_map_effort("gpt-4.1", "high") == "",
+          "non-reasoning models get no effort");
+
+    // Body: reasoning.effort follows the mapping.
+    LLMRequest req = base_request({}, "");
+    req.reasoning_effort = "max";
+    CHECK(build_codex_body(req, levels)["reasoning"]["effort"] == "xhigh",
+          "body carries the mapped effort");
+    req.reasoning_effort = "off";
+    CHECK(build_codex_body(req, with_none)["reasoning"]["effort"] == "none",
+          "body: off → none");
+    req.reasoning_effort = "";
+    CHECK(!build_codex_body(req, levels).contains("reasoning"),
+          "default effort omits reasoning");
+    std::cout << "[OK] effort mapped to the model's catalog levels\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok = test_dynamic_tail_keeps_prefix_stable() && ok;
@@ -247,6 +299,7 @@ int main() {
     ok = test_translate_reasoning_order() && ok;
     ok = test_assemble_replay_gating() && ok;
     ok = test_usage_reasoning_not_double_billed() && ok;
+    ok = test_effort_mapping() && ok;
     if (!ok) return 1;
     std::cout << "All codex param tests passed\n";
     return 0;
