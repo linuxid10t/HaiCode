@@ -54,4 +54,15 @@ bool openai_is_reasoning_model(const std::string& model_id);
 std::string openai_map_effort(const std::string& model_id,
                               const std::string& ui_effort);
 
+// Maps a UI effort setting to the reasoning_effort sent to a llama.cpp
+// server, or "" when it must be omitted (empty/default UI setting). The
+// server turns "none" into enable_thinking=false and hands any other value
+// to the model's jinja chat template, so the value must be one the template
+// accepts: "off" → "none"; Mistral Small 4 (whose template raises on
+// anything but "none"/"high") gets "high" for every other level; other
+// models get low/medium/high ("minimal" → "low", "xhigh"/"max" → "high" —
+// gpt-oss templates know only those three, the rest ignore the variable).
+std::string llamacpp_map_effort(const std::string& model_id,
+                                const std::string& ui_effort);
+
 } // namespace haicode

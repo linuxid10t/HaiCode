@@ -12,9 +12,12 @@ namespace haicode {
 // Builds the /chat/completions streaming request body. Behavior matrix:
 //   - reasoning models (o1*/o3*/o4*/gpt-5*): max_completion_tokens instead of
 //     max_tokens, temperature/top_p omitted (400 unsupported_parameter);
-//   - flavored local servers (vLLM/llama.cpp/LM Studio/Ollama): effort "off"
+//   - llama.cpp: llamacpp_map_effort's value as reasoning_effort, mirrored
+//     into chat_template_kwargs (plus enable_thinking:false for "off"), so
+//     templates gated on it (Mistral Small 4: "high") actually reason;
+//   - other flavored local servers (vLLM/LM Studio/Ollama): effort "off"
 //     becomes chat_template_kwargs {enable_thinking:false}; reasoning_effort
-//     is never sent (these servers don't use it);
+//     is never sent;
 //   - Generic/OpenRouter: capability-mapped reasoning_effort ("off" → "none"
 //     on gpt-5*, omitted on o-series; non-reasoning models omit it entirely);
 //   - llama.cpp: return_progress, so prompt prefill streams prompt_progress

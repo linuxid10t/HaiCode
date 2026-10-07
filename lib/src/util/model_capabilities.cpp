@@ -18,6 +18,12 @@ bool starts_with_ci(const std::string& s, const char* prefix) {
     return true;
 }
 
+bool contains_ci(const std::string& s, const char* needle) {
+    for (size_t i = 0; i < s.size(); ++i)
+        if (starts_with_ci(s.substr(i), needle)) return true;
+    return false;
+}
+
 struct CapsEntry {
     const char* prefix;
     uint8_t effort_mask;   // 0 = no effort support
@@ -123,6 +129,25 @@ std::string openai_map_effort(const std::string& model_id,
         return ui_effort;
     // "max" is Responses-API only; chat completions caps at xhigh.
     if (ui_effort == "max") return "xhigh";
+    return "";
+}
+
+std::string llamacpp_map_effort(const std::string& model_id,
+                                const std::string& ui_effort) {
+    if (ui_effort.empty()) return "";
+    if (ui_effort == "off") return "none";
+    // llama.cpp model ids are whatever the server was started with: an
+    // alias, a GGUF file name, or an -hf repo ("unsloth/Mistral-Small-4-
+    // 119B-2603-GGUF:Q4_K_M"), so match anywhere in the id. The template
+    // defaults to "none" (no reasoning) and raises on any value other than
+    // "none"/"high" — a 500 from the server.
+    if (contains_ci(model_id, "mistral-small-4")
+            || contains_ci(model_id, "mistral-small-2603"))
+        return "high";
+    if (ui_effort == "minimal" || ui_effort == "low") return "low";
+    if (ui_effort == "medium") return "medium";
+    if (ui_effort == "high" || ui_effort == "xhigh" || ui_effort == "max")
+        return "high";
     return "";
 }
 

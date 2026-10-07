@@ -441,6 +441,45 @@ static bool test_openai_body_flavor_effort() {
     CHECK(!gen3.contains("reasoning_effort"), "o-series off omits the param");
     CHECK(!gen3.contains("chat_template_kwargs"),
           "Generic never gets template kwargs");
+
+    // llama.cpp: reasoning_effort reaches the server (and the template via
+    // chat_template_kwargs). Regression: "high" was dropped, so Mistral
+    // Small 4 — whose template defaults to "none" — never reasoned.
+    LLMRequest ms4 = base_request("unsloth/Mistral-Small-4-119B-2603-GGUF:Q4_K_M");
+    for (const char* e : {"low", "medium", "high", "xhigh", "max"}) {
+        ms4.reasoning_effort = e;
+        json b = build_openai_body(ms4, ServerFlavor::LlamaCpp);
+        CHECK(b["reasoning_effort"] == "high",
+              "Mistral Small 4 on llama.cpp: every level maps to high");
+        CHECK(b["chat_template_kwargs"]["reasoning_effort"] == "high",
+              "llama.cpp effort mirrored into chat_template_kwargs");
+        CHECK(!b["chat_template_kwargs"].contains("enable_thinking"),
+              "a reasoning level does not touch enable_thinking");
+    }
+    ms4.reasoning_effort = "off";
+    json ms4off = build_openai_body(ms4, ServerFlavor::LlamaCpp);
+    CHECK(ms4off["reasoning_effort"] == "none", "llama.cpp off → none");
+    CHECK(ms4off["chat_template_kwargs"]["reasoning_effort"] == "none",
+          "llama.cpp off mirrored as none");
+    CHECK(ms4off["chat_template_kwargs"]["enable_thinking"] == false,
+          "llama.cpp off still sets enable_thinking:false (Qwen3 templates)");
+    ms4.reasoning_effort = "";
+    json ms4def = build_openai_body(ms4, ServerFlavor::LlamaCpp);
+    CHECK(!ms4def.contains("reasoning_effort")
+              && !ms4def.contains("chat_template_kwargs"),
+          "llama.cpp default effort sends nothing");
+    LLMRequest oss = base_request("gpt-oss-120b");
+    oss.reasoning_effort = "medium";
+    CHECK(build_openai_body(oss, ServerFlavor::LlamaCpp)["reasoning_effort"]
+              == "medium", "other llama.cpp models keep low/medium/high");
+    oss.reasoning_effort = "max";
+    CHECK(build_openai_body(oss, ServerFlavor::LlamaCpp)["reasoning_effort"]
+              == "high", "llama.cpp max/xhigh cap at high");
+    oss.reasoning_effort = "minimal";
+    CHECK(build_openai_body(oss, ServerFlavor::LlamaCpp)["reasoning_effort"]
+              == "low", "llama.cpp minimal → low");
+    CHECK(llamacpp_map_effort("Mistral-Small-2603", "low") == "high",
+          "Mistral Small 4 matched by its 2603 release id");
     std::cout << "[OK] openai body: flavor x effort matrix\n";
     return true;
 }
