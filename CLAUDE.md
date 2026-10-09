@@ -236,6 +236,7 @@ In the GUI, the provider dropdown is built dynamically via `MainWindow::RebuildP
 ## Project Metadata
 
 - `agents.md`: Contains system prompt instructions for agents (also `claude.md` as a fallback; both looked up case-insensitively, exact spelling preferred — see `find_project_instructions_file` in `lib/src/config/config.cpp`).
+- `docs/`: User-facing manual split out of `README.md` — `permissions.md`, `configuration.md`, `sessions.md`, `architecture.md`. `README.md` is a landing page (features, prerequisites, build/run, modes) that links into them. When a change alters user-visible behavior, update the relevant `docs/` file, not the README.
 
 ## Key constraints
 
