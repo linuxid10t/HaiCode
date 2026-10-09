@@ -29,7 +29,73 @@ namespace haicode {
 //               "tool_call_id":"..." }
 //
 // We convert on the fly, dropping any message we can't translate cleanly.
+//
+// Strict chat templates (Mistral/Devstral/Magistral, Gemma, Llama-3 …)
+// rendered by llama.cpp / LM Studio / vLLM / Ollama raise "conversation roles
+// must alternate" unless the user messages and the assistant messages WITHOUT
+// tool_calls alternate, starting with user — tool messages and tool-calling
+// assistant messages are skipped by that check. So after the main loop:
+// - text riding a tool-result turn (status updates, system_dynamic) is folded
+//   into the last tool message instead of becoming a "user" message, which
+//   the check would count as a second user turn after the prompt;
+// - enforce_alternation() inserts a short placeholder turn wherever two
+//   counted messages of one role would still meet: a turn that ended without
+//   a text reply (reasoning-only final step, propose_plan, interrupt, error)
+//   followed by the next prompt, a tool-result image follow-up, or the
+//   compaction summary (assistant) leading the conversation.
+// Both depend only on the message itself and those before it, so step N's
+// translation stays an exact prefix of step N+1's (prompt cache).
 // ---------------------------------------------------------------------------
+
+namespace {
+
+// Counted by the strict templates' alternation check.
+bool counts_for_alternation(const nlohmann::json& m) {
+    std::string role = m.value("role", "");
+    if (role == "user") return true;
+    if (role != "assistant") return false;
+    auto tc = m.find("tool_calls");
+    return tc == m.end() || !tc->is_array() || tc->empty();
+}
+
+void enforce_alternation(std::vector<nlohmann::json>& out, size_t first) {
+    std::vector<nlohmann::json> fixed(out.begin(), out.begin() + first);
+    fixed.reserve(out.size() + 2);
+    std::string last;  // role of the last counted message ("" = none yet)
+    for (size_t i = first; i < out.size(); ++i) {
+        auto& m = out[i];
+        if (counts_for_alternation(m)) {
+            std::string role = m.value("role", "");
+            if (role == last || (last.empty() && role == "assistant")) {
+                // Non-empty: Mistral templates also reject an assistant
+                // message with empty content and no tool calls.
+                if (role == "user")
+                    fixed.push_back({{"role", "assistant"},
+                                     {"content", kAlternationAssistantStub}});
+                else
+                    fixed.push_back({{"role", "user"},
+                                     {"content", kAlternationUserStub}});
+            }
+            last = role;
+        }
+        fixed.push_back(std::move(m));
+    }
+    out = std::move(fixed);
+}
+
+// Appends `text` to a tool message's string content. False when `m` is not a
+// tool message with string content (the caller then keeps a user message).
+bool fold_into_tool(nlohmann::json& m, const std::string& text) {
+    if (m.value("role", "") != "tool") return false;
+    auto& c = m["content"];
+    if (!c.is_string()) return false;
+    std::string& s = c.get_ref<std::string&>();
+    if (!s.empty()) s += "\n\n";
+    s += text;
+    return true;
+}
+
+}  // namespace
 
 std::vector<nlohmann::json> translate_messages(
     const std::string& system,
@@ -43,6 +109,7 @@ std::vector<nlohmann::json> translate_messages(
     // lead the conversation and stay byte-identical across turns.
     if (!system.empty())
         out.push_back({ {"role", "system"}, {"content", system} });
+    const size_t first = out.size();
 
     for (auto& m : src) {
         std::string role = m.value("role", "");
@@ -101,10 +168,11 @@ std::vector<nlohmann::json> translate_messages(
                 // tool_result, image blocks; OpenAI can't carry all of
                 // these in one message. tool_result blocks become separate
                 // "tool" role messages; remaining text blocks concatenate
-                // into a single "user" message emitted AFTER the tool
-                // messages (flow: assistant tool_calls → tool responses →
-                // user follow-up). Unknown block types warn but don't fail.
+                // into the last tool message when there is one (a status
+                // update riding the results), else into a single "user"
+                // message. Unknown block types warn but don't fail.
                 std::string user_text;
+                size_t last_tool = std::string::npos;  // index in `out`
                 nlohmann::json image_parts = nlohmann::json::array();
                 // Images inside tool_result content blocks — OpenAI "tool"
                 // messages can't carry them, so they are split into a
@@ -142,6 +210,7 @@ std::vector<nlohmann::json> translate_messages(
                         } else {
                             tr["content"] = "";
                         }
+                        last_tool = out.size();
                         out.push_back(tr);
                     } else if (btype == "text") {
                         // Newline-separate successive text blocks so a
@@ -193,6 +262,12 @@ std::vector<nlohmann::json> translate_messages(
                     }
                     out.push_back({{"role", "user"}, {"content", uc}});
                 }
+                // Text alongside tool results (a status update) folds into
+                // the last tool message — see the top of this file.
+                if (image_parts.empty() && !user_text.empty()
+                        && last_tool != std::string::npos
+                        && fold_into_tool(out[last_tool], user_text))
+                    user_text.clear();
                 if (!image_parts.empty()) {
                     // Mixed content must stay an array (text + image_url
                     // parts); a bare string would collapse the images away.
@@ -220,24 +295,31 @@ std::vector<nlohmann::json> translate_messages(
     // Alternation rules require care:
     // - last message user   → append the dynamic text to its content. Two
     //   consecutive "user" messages break templates that enforce strict
-    //   role alternation (Llama-3.x, Gemma).
-    // - last message tool/assistant (mid agent loop) → append as its own
-    //   final "user" message. tool → user is alternation-legal.
-    // - empty history       → separate "user" message right after system.
+    //   role alternation (Llama-3.x, Gemma, Mistral).
+    // - last message tool (mid agent loop) → fold into its content; a "user"
+    //   message there counts as a second user turn on Mistral templates.
+    // - otherwise (assistant / empty history) → its own final "user" message.
     if (!system_dynamic.empty()) {
-        if (!out.empty() && out.back().at("role") == "user") {
-            auto& content = out.back().at("content");
-            // String user content (always the case after translation) can
-            // absorb the tail inline. Array content would need block surgery;
-            // it never survives the loop above, but if it ever did, a
-            // separate message keeps it correct.
-            if (content.is_string()) {
-                content.get_ref<std::string&>() += "\n\n" + system_dynamic;
-                return out;
+        bool absorbed = false;
+        if (out.size() > first) {
+            auto& back = out.back();
+            if (back.at("role") == "user") {
+                auto& content = back.at("content");
+                // String user content (always the case after translation)
+                // can absorb the tail inline. Array content would need block
+                // surgery; a separate message keeps it correct.
+                if (content.is_string()) {
+                    content.get_ref<std::string&>() += "\n\n" + system_dynamic;
+                    absorbed = true;
+                }
+            } else {
+                absorbed = fold_into_tool(back, system_dynamic);
             }
         }
-        out.push_back({ {"role", "user"}, {"content", system_dynamic} });
+        if (!absorbed)
+            out.push_back({ {"role", "user"}, {"content", system_dynamic} });
     }
+    enforce_alternation(out, first);
     return out;
 }
 

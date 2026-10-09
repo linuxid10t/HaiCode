@@ -63,18 +63,16 @@ static bool test_message0_is_stable_system() {
 
 static bool test_dynamic_tail_after_tool_result() {
     // Mid agent-loop: history ends with a tool message. The dynamic tail
-    // must land AFTER it, as its own user message.
+    // folds into it — a separate user message would follow the prompt as a
+    // second counted user turn on Mistral-style templates.
     auto out = run("DYN-TEXT");
-    // order: [0] system, [1] user, [2] assistant w/ tool_calls, [3] tool,
-    // [4] dynamic user tail
-    CHECK(out.size() == 5, "expect system + user + assistant + tool + tail");
-    CHECK(out[out.size() - 1].at("role") == "user",
-          "last message must be user (the dynamic tail)");
-    CHECK(out[out.size() - 1].at("content") == "DYN-TEXT",
-          "dynamic tail content must be verbatim");
-    CHECK(out[out.size() - 2].at("role") == "tool",
-          "message before the tail must be the tool result");
-    std::cout << "[OK] dynamic tail placed after tool result as user message\n";
+    // order: [0] system, [1] user, [2] assistant w/ tool_calls, [3] tool
+    CHECK(out.size() == 4, "expect system + user + assistant + tool");
+    CHECK(out.back().at("role") == "tool",
+          "last message must be the tool result carrying the tail");
+    CHECK(out.back().at("content") == "int x = 1;\n\nDYN-TEXT",
+          "dynamic tail must be appended verbatim to the tool content");
+    std::cout << "[OK] dynamic tail folded into the trailing tool result\n";
     return true;
 }
 
@@ -106,7 +104,7 @@ static bool test_no_system() {
     std::vector<json> src = make_history_tool_tail();
     auto out = haicode::translate_messages("", "DYN", src);
     CHECK(out[0].at("role") != "system", "no system message when system is empty");
-    CHECK(out[out.size() - 1].at("content") == "DYN",
+    CHECK(out.back().at("content") == "int x = 1;\n\nDYN",
           "tail must still be last");
     std::cout << "[OK] empty system handled\n";
     return true;
@@ -207,6 +205,178 @@ static bool test_text_only_stays_string() {
     return true;
 }
 
+// The alternation check of strict chat templates (Mistral/Devstral, Gemma,
+// Llama-3): user messages and assistant messages WITHOUT tool_calls must
+// alternate starting with user; tool messages and tool-calling assistant
+// messages are skipped. Mirrors the template's pre-pass that raised
+// "After the optional system message, conversation roles must alternate".
+static bool alternates(const std::vector<json>& out, std::string* why) {
+    size_t i = (!out.empty() && out[0].at("role") == "system") ? 1 : 0;
+    size_t idx = 0;
+    for (; i < out.size(); ++i) {
+        const auto& m = out[i];
+        std::string role = m.at("role");
+        if (role == "system") { *why = "system after message 0"; return false; }
+        if (role == "tool") continue;
+        if (role == "assistant" && m.contains("tool_calls")
+                && !m["tool_calls"].empty())
+            continue;
+        if ((role == "user") != (idx % 2 == 0)) {
+            *why = "message " + std::to_string(i) + " (" + role + ")";
+            return false;
+        }
+        if (role == "assistant" && m["content"].is_string()
+                && m["content"].get<std::string>().empty()) {
+            *why = "empty assistant message " + std::to_string(i);
+            return false;
+        }
+        ++idx;
+    }
+    return true;
+}
+
+static json tool_use(const std::string& id) {
+    return {{"type", "tool_use"}, {"id", id}, {"name", "read"},
+            {"input", json{{"path", "README.md"}}}};
+}
+static json tool_result(const std::string& id) {
+    return {{"type", "tool_result"}, {"tool_use_id", id}, {"content", "# Title"}};
+}
+
+static bool test_turn_without_reply_then_prompt() {
+    // The reported failure (llama.cpp + Mistral Small 4): the turn's last
+    // step returned only reasoning, so no assistant row was stored and the
+    // next prompt followed the tool result directly → HTTP 500 from the
+    // template. A placeholder reply now closes the turn.
+    std::vector<json> src = {
+        json{{"role", "user"}, {"content", "plan the README split"}},
+        json{{"role", "assistant"}, {"content", json::array({
+            json{{"type", "text"}, {"text", "I will read it."}},
+            tool_use("call_0")})}},
+        json{{"role", "user"}, {"content", json::array({tool_result("call_0")})}},
+        json{{"role", "user"}, {"content", "?"}},
+    };
+    auto out = haicode::translate_messages("SYS", "", src);
+    std::string why;
+    CHECK(alternates(out, &why), "roles must alternate: " + why);
+    CHECK(out.size() == 6, "system, user, assistant+calls, tool, stub, user");
+    CHECK(out[4].at("role") == "assistant"
+          && out[4].at("content") == haicode::kAlternationAssistantStub,
+          "placeholder reply closes the turn that ended on a tool result");
+    CHECK(out[5].at("content") == "?", "next prompt verbatim");
+
+    // Two prompts in a row (a turn that failed before any output).
+    auto out2 = haicode::translate_messages("SYS", "", {
+        json{{"role", "user"}, {"content", "first"}},
+        json{{"role", "user"}, {"content", "second"}}});
+    CHECK(alternates(out2, &why), "user,user must alternate: " + why);
+    CHECK(out2.size() == 4 && out2[1].at("content") == "first"
+          && out2[3].at("content") == "second", "both prompts kept verbatim");
+    std::cout << "[OK] turn ending without a text reply gets a placeholder\n";
+    return true;
+}
+
+static bool test_status_after_tool_result_folds() {
+    // A status update rides the tool-result turn (ContextBuilder's
+    // append_status_block). It folds into the last tool message instead of
+    // becoming a user message, so the following tool-calling step and the
+    // final reply still alternate with the prompt.
+    std::vector<json> src = {
+        json{{"role", "user"}, {"content", "go"}},
+        json{{"role", "assistant"}, {"content", json::array({
+            tool_use("a"), tool_use("b")})}},
+        json{{"role", "user"}, {"content", json::array({
+            tool_result("a"), tool_result("b"),
+            json{{"type", "text"}, {"text", "[status] todos: 1/3"}}})}},
+        json{{"role", "assistant"}, {"content", "done"}},
+    };
+    auto out = haicode::translate_messages("SYS", "", src);
+    std::string why;
+    CHECK(alternates(out, &why), "roles must alternate: " + why);
+    CHECK(out.size() == 6, "system, user, assistant, tool, tool, assistant");
+    CHECK(out[3].at("content") == "# Title", "first result untouched");
+    CHECK(out[4].at("role") == "tool"
+          && out[4].at("content") == "# Title\n\n[status] todos: 1/3",
+          "status folds into the LAST tool message");
+    std::cout << "[OK] status text after tool results folds into the tool message\n";
+    return true;
+}
+
+static bool test_leading_compaction_summary() {
+    // After a compaction the context starts with the summary as an
+    // assistant turn — Mistral templates require user first.
+    std::vector<json> src = {
+        json{{"role", "assistant"}, {"content", "Summary of the prior conversation: ..."}},
+        json{{"role", "user"}, {"content", "next"}},
+    };
+    auto out = haicode::translate_messages("SYS", "", src);
+    std::string why;
+    CHECK(alternates(out, &why), "roles must alternate: " + why);
+    CHECK(out.size() == 4 && out[1].at("role") == "user"
+          && out[1].at("content") == haicode::kAlternationUserStub,
+          "a stub user turn leads");
+    std::cout << "[OK] leading assistant gets a stub user turn\n";
+    return true;
+}
+
+static bool test_tool_image_followup_alternates() {
+    // Tool-result images can't ride a tool message; their follow-up user
+    // message is preceded by a placeholder reply.
+    json img = {{"type", "image"}, {"source", {{"type", "base64"},
+                {"media_type", "image/png"}, {"data", "QUJD"}}}};
+    std::vector<json> src = {
+        json{{"role", "user"}, {"content", "screenshot please"}},
+        json{{"role", "assistant"}, {"content", json::array({tool_use("s")})}},
+        json{{"role", "user"}, {"content", json::array({
+            json{{"type", "tool_result"}, {"tool_use_id", "s"},
+                 {"content", json::array({
+                     json{{"type", "text"}, {"text", "800x600"}}, img})}},
+            json{{"type", "text"}, {"text", "[status] offline"}}})}},
+        json{{"role", "assistant"}, {"content", "I see a window."}},
+    };
+    auto out = haicode::translate_messages("SYS", "", src);
+    std::string why;
+    CHECK(alternates(out, &why), "roles must alternate: " + why);
+    CHECK(out[3].at("role") == "tool"
+          && out[3].at("content") == "800x600\n\n[status] offline",
+          "status folds into the tool text");
+    CHECK(out[5].at("role") == "user" && out[5].at("content").is_array(),
+          "image follow-up stays a user message after a placeholder");
+    std::cout << "[OK] tool image follow-up alternates\n";
+    return true;
+}
+
+static bool test_alternation_fix_is_prefix_stable() {
+    // Each request must be an exact prefix of the next (llama.cpp KV cache):
+    // the fixes depend only on a message and those before it.
+    std::vector<json> full = {
+        json{{"role", "assistant"}, {"content", "Summary ..."}},
+        json{{"role", "user"}, {"content", "one"}},
+        json{{"role", "assistant"}, {"content", json::array({tool_use("x")})}},
+        json{{"role", "user"}, {"content", json::array({tool_result("x"),
+            json{{"type", "text"}, {"text", "[status]"}}})}},
+        json{{"role", "user"}, {"content", "two"}},
+        json{{"role", "assistant"}, {"content", json::array({tool_use("y")})}},
+        json{{"role", "user"}, {"content", json::array({tool_result("y")})}},
+        json{{"role", "assistant"}, {"content", "answer"}},
+        json{{"role", "user"}, {"content", "three"}},
+    };
+    std::vector<json> prev;
+    for (size_t n = 1; n <= full.size(); ++n) {
+        std::vector<json> src(full.begin(), full.begin() + n);
+        auto out = haicode::translate_messages("SYS", "", src);
+        std::string why;
+        CHECK(alternates(out, &why), "prefix " + std::to_string(n) + ": " + why);
+        CHECK(out.size() >= prev.size(), "never shrinks");
+        for (size_t i = 0; i < prev.size(); ++i)
+            CHECK(out[i] == prev[i], "request " + std::to_string(n - 1)
+                  + " must be a prefix of request " + std::to_string(n));
+        prev = out;
+    }
+    std::cout << "[OK] alternation fixes keep requests prefix-stable\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok &= test_message0_is_stable_system();
@@ -218,6 +388,11 @@ int main() {
     ok &= test_image_only_no_text_block();
     ok &= test_text_attachment_blocks_join_with_newline();
     ok &= test_text_only_stays_string();
+    ok &= test_turn_without_reply_then_prompt();
+    ok &= test_status_after_tool_result_folds();
+    ok &= test_leading_compaction_summary();
+    ok &= test_tool_image_followup_alternates();
+    ok &= test_alternation_fix_is_prefix_stable();
     std::cout << (ok ? "ALL PASS\n" : "FAILURES\n");
     return ok ? 0 : 1;
 }
