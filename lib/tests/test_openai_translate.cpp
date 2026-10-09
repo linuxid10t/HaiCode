@@ -313,9 +313,52 @@ static bool test_leading_compaction_summary() {
     std::string why;
     CHECK(alternates(out, &why), "roles must alternate: " + why);
     CHECK(out.size() == 4 && out[1].at("role") == "user"
-          && out[1].at("content") == haicode::kAlternationUserStub,
-          "a stub user turn leads");
+          && out[1].at("content") == haicode::kAlternationLeadStub,
+          "a stub user turn introducing the summary leads");
     std::cout << "[OK] leading assistant gets a stub user turn\n";
+    return true;
+}
+
+static bool test_consecutive_assistants_get_user_stub() {
+    // Two plain assistant turns in a row get the generic user stub between
+    // them (the lead-in wording is only for an assistant heading the list).
+    auto out = haicode::translate_messages("SYS", "", {
+        json{{"role", "user"}, {"content", "q"}},
+        json{{"role", "assistant"}, {"content", "a1"}},
+        json{{"role", "assistant"}, {"content", "a2"}}});
+    std::string why;
+    CHECK(alternates(out, &why), "roles must alternate: " + why);
+    CHECK(out.size() == 5 && out[3].at("role") == "user"
+          && out[3].at("content") == haicode::kAlternationUserStub,
+          "generic user stub between the two replies");
+    std::cout << "[OK] consecutive assistants get the generic user stub\n";
+    return true;
+}
+
+static bool test_empty_assistant_dropped() {
+    // Mistral templates raise on an assistant message with neither content
+    // nor tool_calls. It is dropped BEFORE the parity check: dropping it
+    // leaves user,user, which then gets the placeholder reply.
+    for (const json& empty : {json(""), json::array(), json(nullptr)}) {
+        auto out = haicode::translate_messages("SYS", "", {
+            json{{"role", "user"}, {"content", "one"}},
+            json{{"role", "assistant"}, {"content", empty}},
+            json{{"role", "user"}, {"content", "two"}}});
+        std::string why;
+        CHECK(alternates(out, &why), "roles must alternate: " + why);
+        CHECK(out.size() == 4
+              && out[2].at("content") == haicode::kAlternationAssistantStub,
+              "empty reply replaced by the placeholder, content " + empty.dump());
+    }
+    // A tool-calling assistant with empty content is legal and kept.
+    auto out = haicode::translate_messages("SYS", "", {
+        json{{"role", "user"}, {"content", "go"}},
+        json{{"role", "assistant"}, {"content", json::array({tool_use("t")})}},
+        json{{"role", "user"}, {"content", json::array({tool_result("t")})}}});
+    CHECK(out.size() == 4 && out[2].at("role") == "assistant"
+          && out[2].at("content") == "" && out[2].contains("tool_calls"),
+          "tool-calling assistant with empty content is kept");
+    std::cout << "[OK] empty assistant without tool_calls is dropped\n";
     return true;
 }
 
@@ -391,6 +434,8 @@ int main() {
     ok &= test_turn_without_reply_then_prompt();
     ok &= test_status_after_tool_result_folds();
     ok &= test_leading_compaction_summary();
+    ok &= test_consecutive_assistants_get_user_stub();
+    ok &= test_empty_assistant_dropped();
     ok &= test_tool_image_followup_alternates();
     ok &= test_alternation_fix_is_prefix_stable();
     std::cout << (ok ? "ALL PASS\n" : "FAILURES\n");

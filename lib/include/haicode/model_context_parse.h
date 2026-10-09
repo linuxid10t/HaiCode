@@ -32,9 +32,12 @@ int parse_lmstudio_native_models(const nlohmann::json& j,
                                  const std::string& model_id);
 
 // Placeholder turns translate_messages inserts where two user (or two plain
-// assistant) messages would otherwise meet, or before a leading assistant.
+// assistant) messages would otherwise meet, and before a leading assistant
+// (in practice the compaction summary heading the context).
 inline constexpr const char* kAlternationAssistantStub = "(no reply)";
 inline constexpr const char* kAlternationUserStub      = "Continue.";
+inline constexpr const char* kAlternationLeadStub =
+    "(A summary of the earlier conversation follows.)";
 
 // Translate Anthropic-shaped messages (see openai.cpp block comment) to the
 // OpenAI chat format. The stable `system` prompt becomes message[0] (the

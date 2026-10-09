@@ -38,7 +38,9 @@ namespace haicode {
 // - text riding a tool-result turn (status updates, system_dynamic) is folded
 //   into the last tool message instead of becoming a "user" message, which
 //   the check would count as a second user turn after the prompt;
-// - enforce_alternation() inserts a short placeholder turn wherever two
+// - enforce_alternation() drops assistant messages with neither content nor
+//   tool_calls (Mistral templates raise on them separately; nothing in
+//   HaiCode emits one today) and inserts a short placeholder turn wherever two
 //   counted messages of one role would still meet: a turn that ended without
 //   a text reply (reasoning-only final step, propose_plan, interrupt, error)
 //   followed by the next prompt, a tool-result image follow-up, or the
@@ -58,15 +60,35 @@ bool counts_for_alternation(const nlohmann::json& m) {
     return tc == m.end() || !tc->is_array() || tc->empty();
 }
 
+// An assistant message with no tool calls and no content (null, "" or []).
+bool is_empty_plain_assistant(const nlohmann::json& m) {
+    if (m.value("role", "") != "assistant" || !counts_for_alternation(m))
+        return false;
+    auto c = m.find("content");
+    // json::empty() is false for every string, so test strings directly.
+    return c == m.end() || c->is_null()
+        || (c->is_string() && c->get_ref<const std::string&>().empty())
+        || (c->is_array() && c->empty());
+}
+
 void enforce_alternation(std::vector<nlohmann::json>& out, size_t first) {
     std::vector<nlohmann::json> fixed(out.begin(), out.begin() + first);
     fixed.reserve(out.size() + 2);
     std::string last;  // role of the last counted message ("" = none yet)
     for (size_t i = first; i < out.size(); ++i) {
         auto& m = out[i];
+        // Dropped before the parity check so it can't open a gap of its own.
+        if (is_empty_plain_assistant(m)) {
+            fprintf(stderr, "openai: dropping empty assistant message "
+                    "without tool_calls\n");
+            continue;
+        }
         if (counts_for_alternation(m)) {
             std::string role = m.value("role", "");
-            if (role == last || (last.empty() && role == "assistant")) {
+            if (last.empty() && role == "assistant") {
+                fixed.push_back({{"role", "user"},
+                                 {"content", kAlternationLeadStub}});
+            } else if (role == last) {
                 // Non-empty: Mistral templates also reject an assistant
                 // message with empty content and no tool calls.
                 if (role == "user")
