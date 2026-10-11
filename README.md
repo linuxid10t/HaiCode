@@ -4,7 +4,10 @@ A native coding-agent app for **Haiku R1** — a native GUI (BeAPI) frontend bac
 by a C++20 agentic loop. Talks to Anthropic and OpenAI-compatible providers, runs
 tools with per-action permissions, and persists every session to SQLite.
 
-> Status: early preview. Built and tested on Haiku R1~beta6 / development tip.
+> Status: preview. The 1.0 feature work is complete and 40 test binaries pass;
+> packaging, install, and the remaining GUI items are still open
+> ([release tasks](RELEASE_1.0_TASKS.md)). Built and tested on Haiku R1~beta6 /
+> development tip.
 
 ## Features
 
@@ -86,8 +89,8 @@ export OPENAI_API_KEY=sk-...        # for the default OpenAI provider
 # Configure (only needed once)
 cmake -B build -S .
 
-# Build everything
-make -C build -j4
+# Build everything (one job per available CPU)
+make -C build -j$(nproc)
 
 # Run the test suite
 ctest --test-dir build --output-on-failure
@@ -98,6 +101,12 @@ make -C build test_db
 ```
 
 The build type defaults to `RelWithDebInfo` when none is specified.
+
+`-j$(nproc)` sizes the job count to the CPUs actually available to the process
+instead of a hardcoded number. `nproc` ships with the base-image `coreutils`
+package; on an image without it, `sysinfo -cpu | grep -c 'CPU #'` gives the same
+number from the kernel (`make -C build -j$(sysinfo -cpu | grep -c 'CPU #')`).
+Avoid a bare `-j` — with no value GNU Make starts an unbounded number of jobs.
 
 ### Hybrid (x86_gcc2) systems
 
@@ -116,7 +125,7 @@ Activate the secondary arch first:
 setarch x86         # 32-bit (subdir: /boot/system/lib/x86)
 # or, for x86_64: ensure /boot/system/bin/x86_64 is on PATH
 cmake -B build -S .
-make -C build -j4
+make -C build -j$(nproc)
 ```
 
 CMake reads the compiler's target macros to derive the arch and prepends the

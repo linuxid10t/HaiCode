@@ -183,8 +183,13 @@ Set `build_command` in `<project_dir>/.haicode/config.json` to run a build after
 every successful `write` or `edit` tool call:
 
 ```json
-{ "build_command": "make -C build -j4 2>&1" }
+{ "build_command": "make -C build -j$(nproc) 2>&1" }
 ```
+
+The command runs through `/bin/sh -c`, so `$(nproc)` expands at run time and
+sizes the job count to the CPUs available (base-image `coreutils`; without it,
+`sysinfo -cpu | grep -c 'CPU #'`). A bare `-j` — including one from an empty
+substitution — means unbounded parallelism, so always supply a value.
 
 If the command exits non-zero, its output is appended to the tool result with a
 `[build_hook]` prefix and the result is marked failed, so the model sees compile

@@ -60,5 +60,5 @@ descending-timestamp sortable, so `list()` returns newest first.
   prompt when this repository is open.
 - [`MODEL_NUMBERS.md`](../MODEL_NUMBERS.md) — the sourced reference behind the
   model context-window, output-cap, and pricing tables.
-- [`RELEASE_1.0_TASKS.md`](../RELEASE_1.0_TASKS.md) — the remaining release
-  checklist.
+- [`RELEASE_1.0_TASKS.md`](../RELEASE_1.0_TASKS.md) — the ordered 1.0 release
+  checklist with per-task status and the code that proves it.

@@ -9,8 +9,8 @@ This file provides guidance to AI coding assistants (Claude Code, HaiCode itself
 # Configure (only needed once)
 cmake -B build -S .
 
-# Build everything
-make -C build -j4
+# Build everything (one job per available CPU)
+make -C build -j$(nproc)
 
 # Run the full test suite (registered with CTest)
 ctest --test-dir build --output-on-failure
@@ -27,6 +27,8 @@ make -C build test_config_write
 ```
 
 Build type defaults to `RelWithDebInfo` when none is given; all targets compile with `-Wall -Wextra` (keep new code warning-free). Missing `sqlite3`/`curl`/`libcrypto` libraries abort configure with the matching `pkgman install` hint instead of failing at link time.
+
+Job count comes from `nproc` (base-image `coreutils`) rather than a fixed number. Build commands run through `/bin/sh -c` (see the Build hook), so `$(nproc)` expands there too; an image without `nproc` can use `sysinfo -cpu | grep -c 'CPU #'`. Never a bare `-j` — GNU Make treats a valueless `-j` (including one from an empty substitution) as unbounded parallelism.
 
 **Hybrid (x86_gcc2) systems:** HaiCode requires a C++20 compiler, so on a hybrid image it must be built under the secondary-arch toolchain (GCC 13), not the default gcc2. The root `CMakeLists.txt` enforces this: a `cxx_std_20` feature check aborts configure with an actionable message if the compiler can't do C++20, and a secondary-arch detection block reads the compiler's target macros (`__x86_64__` → `x86_64`, `__i386__` → `x86`) to prepend `/lib/<arch>` to the `find_library` HINTS (`HAIKU_DEVELOP_LIB_DIRS` / `HAIKU_LIB_DIRS`). On a pure single-arch system the `<arch>` subdirs don't exist and `find_library` falls through to the flat path. When adding a new `find_library`, use `HINTS ${HAIKU_DEVELOP_LIB_DIRS} ${HAIKU_LIB_DIRS}` rather than hardcoding the flat paths. Headers are single-location on hybrid builds, so `include_directories` is unaffected.
 
@@ -117,6 +119,11 @@ Build type defaults to `RelWithDebInfo` when none is given; all targets compile 
 | `test_chat_view` (gui) | ChatView markdown rendering against a fresh batch render of the same transcript (text AND per-byte font/color): replies streamed in random chunk sizes at two widths, a width change mid-stream then more streaming, reasoning/tool/result entries and a second table reply after it, `SetMarkdownLayout` flips while a table is the open streaming tail (in-place re-render resyncs the stream state), and joining mid-stream (batch replay ends inside a reply, live deltas continue); link ranges included in every comparison (a reply with links appended before a tool result whose collapse re-renders an earlier entry — later links must shift), link ranges cover exactly the label/URL bytes and `FindLinkAt` hits only them; `PlanMarkdownLink` (planned, nothing launched): doc opens at `:line`, `file://` URL, executable script and `.hpkg` only open their folder with the file to select, directory opens with nothing selected, missing file / `javascript:` / app schemes unusable, URL handler MIME `application/x-vnd.Be.URL.<scheme>`; `EditorLineFor` (StyledEdit 0-based, Pe/Koder/unknown 1-based); [Copy] on a scrolled 40-exchange transcript (top and mid-way): the scroll value never moves, the slot shows `✓`, and copying another entry restores the first slot to exactly a fresh render's bytes and styles; follow-the-bottom: streaming at the bottom stays there, scrolled up the value never moves through streamed text/reasoning/tool/result/system appends, scrolling back down resumes following, a new prompt jumps to the bottom; expanding a collapsed tool block at the bottom scrolls to the new bottom (collapsing stays there), scrolled up neither moves the view |
 | `test_config_trust` | Project-config trust boundary: untrusted project with a hostile config (provider redirect + allow-all + build hook + agent override + stolen search key) is stripped of every gated key while benign keys (model) still merge; end-to-end merge keeps the global `api_key`/`base_url` untouched; trusted project gets permissions/build hook/agents/search keys but NEVER providers; fingerprint: cosmetic reformat keeps trust, gated change re-strips, ungated/provider changes don't move it; `store_trust_record` roundtrip (realpath keying, replace-not-duplicate, unrelated keys/records preserved); trust summary names concrete powers (allow-all, build command) without leaking secret values; clean project never prompts |
 | `test_subprocess` | `util::run_subprocess` (cancellable runner behind bash/grep/diff/git/find/process/screenshot and the build hook): preset + mid-run interrupt kill `sleep 60` promptly; timeout fires at the deadline; a backgrounded child (`sleep 60 &`) returns promptly with exit 0 and its early output; 200 KB output → exit 0 + `truncated` + exactly the cap (regression: `pclose` SIGPIPE turned truncated successes into exit -1); `extra_env` reaches the child; exit codes pass through; no fds >= 3 inherited; BashTool via ToolRegistry: success + `[output truncated]`, timeout → failed result with timeout error |
+| `test_text_attachment` | Attachment block shapes: a text attachment becomes its own text block (`Attached file: <path>` + body) beside the user text in the Anthropic content array, mixed with an image block in submission order; malformed UTF-8 is sanitized before it reaches the provider; serialized history renders `[text attachment: <path>]` and `[image attachment: <path>]`; base64 roundtrip. Engine paths with a real store + `FakeProvider`: an absent/empty attachment file persists `[attachment unavailable: <path>]` in both the row output and the serialized history (never a silent drop), and an oversized text attachment is clamped to the cap plus the marker |
+| `test_codex_auth` | ChatGPT/Codex OAuth plumbing (pure helpers + real token file): `codex_b64url_encode`/`decode` roundtrip with no `+`/`/`/`=` padding and empty input; `codex_parse_account_id` on top-level `account_id`, namespaced claims, `organizations[]`, both present, and refusals (empty, not-a-JWT, unbase64able segment, email-only claims); authorize URL carries `client_id`, `response_type=code`, `code_challenge_method=S256` + challenge, `state`, `scope`, the `localhost:1455` callback, `originator=codex_cli_rs`, `id_token_add_organizations`, `codex_cli_simplified_flow`; token store roundtrip (access/refresh/account_id/expires_at), 0600 even when a pre-existing file was 0644 (Task 6), second save replaces rather than merges (absent refresh clears it), `codex_auth_signed_in` follows the store |
+| `test_propose_plan` | Plans directory lifecycle: the GUI never pre-creates `<project>/.haicode/plans` on opening a project; an empty plan is rejected and creates nothing; a real proposal creates the nested dirs on demand, writes exactly one plan whose first line is the `<!-- haicode-status: active -->` header; `discard_plan` rewrites that header so no active plan remains (engine treats retired plans as no longer injected) |
+| `snapshot_menu` (gui) | `SnapshotMenu` keeps a stable item set under background republish: a placeholder item survives loading → models → `B_PROCESSING`/`B_ABORT`/`B_INITIAL_ADD` transitions with its identity and label intact; labels, `model_item_id`, and per-item target are preserved; `Accept` takes the id from the item message and refuses a message whose `snapshot_provider` does not match; `Select` works for an empty value; a `(none)` provider entry round-trips; 1000 concurrent publishes on another thread while the menu is being read never corrupt or duplicate items; a live native `BPopUpMenu` refreshes from the disabled loading placeholder to the fetched models and selection through the popup carries the model id |
+| `session_list_item` (gui) | `SessionListItem` accessors and layout: title, project directory, and session id survive construction; `Modified:` label renders `YYYY-MM-DD HH:MM`; `SetModifiedTime` returns true only on an actual change and updates the label, epoch 0 renders `Modified: unknown`; item height is sized between two and three text lines |
 
 All tests use `/tmp` for scratch files and clean up after themselves.
 
@@ -133,7 +140,11 @@ The project has two layers:
 
 ### `lib/` — libhaicode (core, no GUI dependency)
 
-Pure C++20 + POSIX. Key types live in `lib/include/haicode/`:
+C++20 + POSIX **plus the Haiku API kits** — `libhaicode` links `libbe` and
+`libroot` (`target_link_libraries(haicode)` in `lib/CMakeLists.txt`), using BeAPI
+types for storage and paths (`BPath`, `find_directory`, `BEntry`, `BUrl`, BFS
+attribute access). It has no GUI dependency, but it is not a portable POSIX-only
+library. Key types live in `lib/include/haicode/`:
 
 | Header | What it defines |
 |--------|----------------|
@@ -212,7 +223,7 @@ In the GUI, the provider dropdown is built dynamically via `MainWindow::RebuildP
 
 **Slash-command skill invocation** (one-shot): a message starting with `/<id>` (e.g. `/caveman write a commit`) invokes a skill for that single turn — no Skills-tab toggle needed, enabled or not. `parse_skill_invocation` matches the first token against `list_skills(project_dir)` in tiers (exact id → filename stem; non-matches like `/boot/...` paths pass through untouched). `submit_prompt` resolves the body at submit time via `build_skills_block({id}, mode_label(get_mode(...)))` — the one-shot block carries the same `Location:` line and mode capability note as the session block — and stores it on the `user_prompted` row's `data_json` (`skill`, `skill_args`, `skill_block`; `skill_active` instead when the skill is already session-enabled — no duplicate body). The row's `text` keeps the verbatim command so transcript replay is unchanged. `ContextBuilder::assemble_messages` emits the framed body + args (never the raw command) identically in every turn (append-only history) — the framing scopes the instructions to that one message ("they do not apply to later turns"). Works with `mode_notice` (notice first) and the attachment content-array path (skill text block before the user text).
 
-**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Twenty built-in tools — see Tool Details below.
+**Tools** (`lib/src/tool/tools.cpp` + `lib/src/tool/web_tools.cpp`): Twenty-one built-in tools — 19 registered in `tools.cpp:2194-2212` plus `web_search`/`web_extract` in `web_tools.cpp:865-866`; see Tool Details below.
 
 ### `gui/` — BeAPI (Haiku native) frontend
 
@@ -325,6 +336,20 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 - Parent directory created with `mkdir()` walking (same pattern as WriteTool)
 - Returns the on-disk path so the engine can surface it via `PlanProposed` and end the turn
 
+### DiscardPlanTool (`discard_plan`)
+- Gate-gated `write` action (resource `<working_dir>/.haicode/plans/`) — unlike `propose_plan`/`todo_write`/`ask_user` it is not in the always-allowed set (`permission.cpp:756`), so an Ask/Deny rule can gate it
+- Finds the newest plan file whose first line carries `<!-- haicode-status: active -->` (lexicographic name order = chronological), rewrites that header to `<!-- haicode-status: <reason> -->`, and writes back through `atomic_write_file`
+- No plans directory → failure; no active plan → failure with an explanatory message, because the engine auto-retires a plan (status `implemented`) once all its todos complete — so calling this after finishing implementation is a no-op, not an error
+- Retired plans are no longer injected into the system prompt for later sessions
+- Available in Plan and Build mode (`tool_allowed_in_mode`, `permission.cpp:338`)
+
+### WriteAgentsMdTool (`write_agents_md`)
+- Gate-gated `write` action; `resource()` mirrors `execute()` so the gate sees the file actually written — an existing case variant (`AGENTS.md`) is the real destination, never shadowed by a lowercase sibling
+- Resolves the target with `find_project_instructions_file` (case-insensitive lookup) and updates that variant in place; creates `agents.md` only when no variant exists
+- Empty `content` is rejected; the write goes through `atomic_write_file`; output is `{path, bytes_written, note}`
+- Build mode only — not in the Plan allowlist
+- Takes effect from the next session: the loader appends `agents.md` (or `claude.md`) verbatim to the system prompt
+
 ### TodoWriteTool (`todo_write`)
 - Always allowed — `ToolRegistry::execute()` bypasses the permission gate (same as `propose_plan` and web tools)
 - Whole-list replace: the model sends the full todo list every call, never a delta; an empty array clears everything
@@ -412,14 +437,14 @@ All tools share a `MAX_OUTPUT = 100 KB` cap and a `sq()` helper for safe single-
 Set `build_command` in `<project_dir>/.haicode/config.json` to automatically run a build after every successful `write` or `edit` tool call:
 
 ```json
-{ "build_command": "make -C build -j4 2>&1" }
+{ "build_command": "make -C build -j$(nproc) 2>&1" }
 ```
 
 If the command exits non-zero, its output is appended to the tool result with a `[build_hook]` prefix and `result.success` is set to `false`, so the model sees compile errors immediately and can fix them in the same turn rather than discovering them steps later.
 
 After every run (success or failure) the engine publishes a `BuildHookResult` event (`lib/include/haicode/events.h`). Both frontends display a brief system line — `build ✓` or `build ✗ (exit N)` — so the user can see at a glance whether the hook ran and passed, even when it succeeded silently.
 
-The hook runs synchronously in the engine thread. Avoid commands that take more than ~30 seconds, as the engine is blocked for the duration. The agent detects the build system and sets this field automatically when starting work on a new project (CMake → `make -C build 2>&1`, plain Makefile → `make 2>&1`, npm → `npm run build 2>&1`, Cargo → `cargo build 2>&1`).
+The hook runs synchronously in the engine thread. Avoid commands that take more than ~30 seconds, as the engine is blocked for the duration. The agent detects the build system and sets this field automatically when starting work on a new project (CMake → `make -C build -j$(nproc) 2>&1`, plain Makefile → `make -j$(nproc) 2>&1`, npm → `npm run build 2>&1`, Cargo → `cargo build 2>&1`). npm and Cargo scale their own job counts; for make, take the count from `nproc` rather than hardcoding it, and never leave `-j` valueless.
 
 ## Plan mode
 

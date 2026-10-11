@@ -78,6 +78,12 @@ always prompts. Deny patterns match the whole command string, and literal
 (glob-free) targets stay exact-match. The bypass-prompts toggle still covers
 everything.
 
+Because the recommended build command scales jobs with `$(nproc)`, a `make*`
+Allow rule does not cover `make -C build -j$(nproc)` — the substitution makes
+the command unknowable at match time. Use a literal rule for the exact command,
+or a `*` pattern, or leave the build to the build hook (`build_command` runs
+from the engine, not through the `bash` tool, so it is not permission-gated).
+
 Matching logic lives in `bash_pattern_authorizes()`
 (`lib/src/permission/permission.cpp`).
 

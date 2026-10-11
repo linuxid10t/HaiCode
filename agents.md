@@ -9,13 +9,16 @@ tools with per-action permissions, and persists every session to SQLite.
 
 ```bash
 cmake -B build -S .            # only needed once
-make -C build -j4              # builds lib + gui + tests
-ctest --test-dir build         # runs all 36 test binaries
+make -C build -j$(nproc)       # builds lib + gui + tests (one job per CPU)
+ctest --test-dir build         # runs all 40 test binaries (37 lib + 3 gui)
 
 ./build/gui/haicode-gui [project_dir]
 ```
 
-Build hook for this project: `make -C build -j4 2>&1`. Header changes can
+Build hook for this project: `make -C build -j$(nproc) 2>&1` — `nproc`
+(base-image `coreutils`) sizes the job count to the CPUs available; an image
+without it can use `sysinfo -cpu | grep -c 'CPU #'`. A bare `-j` is unbounded,
+so always give a value. Header changes can
 require a multi-minute rebuild; use a sufficiently long tool timeout.
 
 # Plan mode

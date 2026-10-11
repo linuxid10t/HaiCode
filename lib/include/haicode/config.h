@@ -78,7 +78,8 @@ struct AppConfig {
     // Shell command to run after a successful write or edit tool call. If the
     // command exits non-zero, the output is appended to the tool result so the
     // model sees the build error immediately. Configured via "build_command" in
-    // project .haicode/config.json (e.g. "make -C build -j4 2>&1").
+    // project .haicode/config.json (e.g. "make -C build -j$(nproc) 2>&1"; the
+    // hook runs through sh, so the substitution expands).
     std::string build_command;
     // Initial mode for newly created sessions: "plan", "build", or "chat"
     // (anything else falls back to build at read time). Defaults to "plan"

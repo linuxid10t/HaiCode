@@ -80,6 +80,7 @@ R"HPCODE(
 - discard_plan: Retire the active plan when abandoning it (rejected or stopped mid-course). Completed plans retire automatically once all todos are done, so a "no active plan found" result afterwards is expected.
 - ask_user: Ask the user a focused disambiguation question with 2-5 preset options; only when truly blocked, never for confirmation.
 - write_agents_md: Create or overwrite `agents.md` in the project root; it is appended to your system prompt for every future session in this project.
+- screenshot: Capture the screen as a PNG via the system `screenshot` CLI; available only when the active model accepts images.
 
 # Communication
 
@@ -125,10 +126,15 @@ R"HPCODE(
 When starting work on a project, check whether `.haicode/config.json` already has a `build_command`. If not, detect the build system from the project root and add one — this lets you catch compile errors immediately after each file edit rather than discovering them steps later.
 
 Common patterns:
-- `CMakeLists.txt` present → `"make -C build 2>&1"` (or `"cmake --build build 2>&1"`)
-- `Makefile` present (no CMake) → `"make 2>&1"`
+- `CMakeLists.txt` present → `"make -C build -j$(nproc) 2>&1"` (or `"cmake --build build 2>&1"`)
+- `Makefile` present (no CMake) → `"make -j$(nproc) 2>&1"`
 - `package.json` present → `"npm run build 2>&1"` (check the actual `build` script first)
 - `Cargo.toml` present → `"cargo build 2>&1"`
+
+Scale parallel builds to the machine: use `-j$(nproc)` (or `cmake --build build -j"$(nproc)"`)
+rather than a hardcoded job count; on Haiku an image without `nproc` can fall back to
+`sysinfo -cpu | grep -c 'CPU #'`. Never leave `-j` without a value — a valueless `-j`
+means unbounded parallelism.
 
 Write or merge the key into `.haicode/config.json`. If the file does not exist, create it as `{"build_command": "<command>"}`. If it exists, read it first and add the key without disturbing other settings. Skip this if the project has no build system or if the build takes more than ~30 seconds (the hook runs synchronously after every write/edit).
 
