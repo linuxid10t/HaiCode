@@ -27,6 +27,11 @@ struct AgentConfig {
     std::string color;
 };
 
+// Build hook timeout bounds and the default ("build_timeout").
+inline constexpr int kDefaultBuildTimeoutSec = 300;
+inline constexpr int kMinBuildTimeoutSec = 10;
+inline constexpr int kMaxBuildTimeoutSec = 3600;
+
 struct AppConfig {
     std::string model;
     std::string provider;
@@ -81,6 +86,16 @@ struct AppConfig {
     // project .haicode/config.json (e.g. "make -C build -j$(nproc) 2>&1"; the
     // hook runs through sh, so the substitution expands).
     std::string build_command;
+    // Seconds the build hook may run before it is killed ("build_timeout";
+    // clamped to [kMinBuildTimeoutSec, kMaxBuildTimeoutSec]). A killed build
+    // leaves the write/edit applied but unverified, and the result says so.
+    int build_timeout = kDefaultBuildTimeoutSec;
+    // Globs for written/edited paths that do NOT run the build hook
+    // ("build_hook_skip"). A glob without '/' matches the file name, one with
+    // '/' the path relative to the project directory. Unset → the defaults in
+    // default_build_hook_skip() (docs, patches, .haicode/, .git/); an empty
+    // array runs the hook after every write/edit.
+    std::optional<std::vector<std::string>> build_hook_skip;
     // Initial mode for newly created sessions: "plan", "build", or "chat"
     // (anything else falls back to build at read time). Defaults to "plan"
     // so new sessions start in Plan mode unless overridden.
@@ -152,6 +167,15 @@ AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay);
 // Shared by the GUI's provider saves and global_scope_json so the two can't
 // drift.
 nlohmann::json providers_to_json(const std::map<std::string, ProviderConfig>& providers);
+
+// The build_hook_skip globs used when the config doesn't set the key.
+const std::vector<std::string>& default_build_hook_skip();
+
+// True when writing `path` should not run the build hook: it matches one of
+// `globs` (see AppConfig::build_hook_skip). `path` may be relative to
+// `project_dir`; a path outside the project matches only name globs.
+bool build_hook_skips_path(const std::string& path, const std::string& project_dir,
+                           const std::vector<std::string>& globs);
 
 // The set of top-level config keys the Settings window owns at GLOBAL scope.
 // Used together with global_scope_json() to sync a save onto the global file:

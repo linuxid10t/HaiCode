@@ -12,6 +12,7 @@
 #include <cstring>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <fnmatch.h>
 #include <unistd.h>
 #include <FindDirectory.h>
 #include <Path.h>
@@ -294,6 +295,21 @@ ConfigLayer load_layer(const std::string& path) {
             cfg.build_command = j["build_command"].get<std::string>();
             layer.present.insert("build_command");
         }
+        if (j.contains("build_timeout") && j["build_timeout"].is_number()) {
+            // Clamp as a double: a huge value must not overflow int first.
+            cfg.build_timeout = (int)std::clamp(j["build_timeout"].get<double>(),
+                                                (double)kMinBuildTimeoutSec,
+                                                (double)kMaxBuildTimeoutSec);
+            layer.present.insert("build_timeout");
+        }
+        if (j.contains("build_hook_skip") && j["build_hook_skip"].is_array()) {
+            std::vector<std::string> globs;
+            for (const auto& g : j["build_hook_skip"])
+                if (g.is_string() && !g.get<std::string>().empty())
+                    globs.push_back(g.get<std::string>());
+            cfg.build_hook_skip = std::move(globs);
+            layer.present.insert("build_hook_skip");
+        }
 
         // Default session mode: "plan", "chat", or "build". Unrecognized
         // values are ignored so the struct default stands.
@@ -404,6 +420,8 @@ AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay) {
     if (overlay.has("provider"))         result.provider         = ov.provider;
     if (overlay.has("agent"))            result.agent            = ov.agent;
     if (overlay.has("build_command"))    result.build_command    = ov.build_command;
+    if (overlay.has("build_timeout"))    result.build_timeout    = ov.build_timeout;
+    if (overlay.has("build_hook_skip"))  result.build_hook_skip  = ov.build_hook_skip;
     if (overlay.has("default_mode"))     result.default_mode     = ov.default_mode;
     if (overlay.has("thinking_display")) result.thinking_display = ov.thinking_display;
 
@@ -499,6 +517,42 @@ nlohmann::json providers_to_json(const std::map<std::string, ProviderConfig>& pr
     for (auto& [id, p] : providers)
         j[id] = {{"type", p.type}, {"api_key", p.api_key}, {"base_url", p.base_url}};
     return j;
+}
+
+const std::vector<std::string>& default_build_hook_skip() {
+    // Files no build reads: prose, patch files written for `git apply`, and
+    // HaiCode's / git's own metadata. A docs site whose build consumes
+    // markdown sets "build_hook_skip" to [] (or its own list).
+    static const std::vector<std::string> kSkip = {
+        "*.md", "*.markdown", "*.rst", "*.adoc", "*.patch", "*.diff",
+        ".haicode/*", ".git/*",
+    };
+    return kSkip;
+}
+
+bool build_hook_skips_path(const std::string& path, const std::string& project_dir,
+                           const std::vector<std::string>& globs) {
+    if (path.empty()) return false;
+    std::string base = project_dir;
+    while (base.size() > 1 && base.back() == '/') base.pop_back();
+    std::string rel;  // path relative to the project, "" when outside it
+    if (path[0] != '/') {
+        rel = path;
+        while (rel.rfind("./", 0) == 0) rel.erase(0, 2);
+    } else if (!base.empty() && path.size() > base.size()
+               && path.compare(0, base.size(), base) == 0
+               && path[base.size()] == '/') {
+        rel = path.substr(base.size() + 1);
+    }
+    std::string name = path.substr(path.find_last_of('/') + 1);
+    for (const auto& g : globs) {
+        if (g.find('/') == std::string::npos) {
+            if (fnmatch(g.c_str(), name.c_str(), 0) == 0) return true;
+        } else if (!rel.empty() && fnmatch(g.c_str(), rel.c_str(), 0) == 0) {
+            return true;  // no FNM_PATHNAME: ".haicode/*" covers subdirectories
+        }
+    }
+    return false;
 }
 
 const std::vector<std::string>& global_scope_keys() {

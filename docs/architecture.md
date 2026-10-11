@@ -52,9 +52,11 @@ descending-timestamp sortable, so `list()` returns newest first.
 ## Where the deep detail lives
 
 - [`CLAUDE.md`](../CLAUDE.md) — for agents working on this repository: build and
-  test commands, the full test-suite table, per-tool behavior, the permission
-  gate's implementation constraints, provider request-body rules, and the plan
-  mode flow.
+  test commands, the permission gate's implementation constraints, provider
+  request-body rules, and the plan mode flow.
+- [`testing.md`](testing.md) — what each test binary covers, and how to add one.
+- [`tools.md`](tools.md) — per-tool behavior: arguments, limits, timeouts,
+  permission actions, mode availability.
 - [`agents.md`](../agents.md) — the project's own agent-facing instructions
   (build hook, plan mode, conventions), which HaiCode injects into its system
   prompt when this repository is open.

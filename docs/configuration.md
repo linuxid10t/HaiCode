@@ -193,9 +193,36 @@ substitution — means unbounded parallelism, so always supply a value.
 
 If the command exits non-zero, its output is appended to the tool result with a
 `[build_hook]` prefix and the result is marked failed, so the model sees compile
-errors immediately. After every run the app shows a brief system line — `build ✓`
-or `build ✗ (exit N)`. The hook blocks the engine thread; keep it under ~30
-seconds.
+errors immediately. The appended text says the write or edit itself was applied,
+so the model fixes the build instead of retrying the change. After every run the
+app shows a brief system line — `build ✓`, `build ✗ (exit N)`, or
+`build ✗ (timed out after Ns)`. The hook blocks the engine thread; keep it under
+~30 seconds.
+
+Two optional keys tune the hook:
+
+```json
+{
+  "build_command": "make -C build -j$(nproc) 2>&1",
+  "build_timeout": 900,
+  "build_hook_skip": ["*.md", "docs/*", ".haicode/*"]
+}
+```
+
+- `build_timeout` — seconds a run may take before it is stopped (default 300,
+  allowed 10–3600). A stopped build leaves the change applied but unverified,
+  and the tool result says so. Raise it when a build from clean takes longer,
+  for example on a single-CPU machine.
+- `build_hook_skip` — written or edited paths that don't run the hook. A
+  pattern without `/` matches the file name; one with `/` matches the path
+  relative to the project. Unset, it skips `*.md`, `*.markdown`, `*.rst`,
+  `*.adoc`, `*.patch`, `*.diff`, `.haicode/*`, and `.git/*`; a list replaces
+  those defaults, and `[]` runs the hook after every write (a docs site whose
+  build reads markdown wants that).
+
+Neither key needs project trust, since neither runs anything; `build_command`
+does. Changes are picked up when the config reloads (saving Settings or
+switching directories), not in the middle of a turn.
 
 ## Other keys
 
@@ -204,6 +231,8 @@ seconds.
 | `provider` | global | — | Preferred provider id for new sessions. |
 | `model` | global | — | Default model id. |
 | `default_mode` | both | `"plan"` | Initial mode for new sessions: `plan`, `build`, `chat`. |
+| `build_timeout` | both | `300` | Build hook time limit in seconds (10–3600); see Build hook. |
+| `build_hook_skip` | both | docs, patches, `.haicode/`, `.git/` | Globs for written paths that don't run the build hook; see Build hook. |
 | `agent` / `agents` | project (gated) | — | Named agents: `model`, `system_prompt`, `max_steps`, `permissions`, `color`. |
 | `instructions` | both (append) | — | Extra system-prompt text appended per layer. |
 | `agents.md` | file, not JSON | — | `<project>/agents.md` (or `claude.md` fallback, case-insensitive) is read verbatim into the system prompt. |

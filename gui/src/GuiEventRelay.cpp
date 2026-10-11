@@ -296,6 +296,8 @@ GuiEventRelay::attach()
         msg.AddString("call_id", data.value("call_id", "").c_str());
         msg.AddBool("success",   data.value("success", false));
         msg.AddInt32("exit_code", data.value("exit_code", -1));
+        msg.AddBool("timed_out", data.value("timed_out", false));
+        msg.AddInt32("timeout_sec", data.value("timeout_sec", 0));
         main_window_.SendMessage(&msg);
     });
 

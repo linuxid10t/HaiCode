@@ -2933,12 +2933,21 @@ MainWindow::_HandleBuildHookResult(BMessage* msg)
     build_call_id_.clear();
     _UpdateStatusStrip();
     bool success = false;
+    bool timed_out = false;
     int32 exit_code = -1;
+    int32 timeout_sec = 0;
     msg->FindBool("success", &success);
+    msg->FindBool("timed_out", &timed_out);
     msg->FindInt32("exit_code", &exit_code);
+    msg->FindInt32("timeout_sec", &timeout_sec);
 
     if (success) {
         chat_view_->AppendSystem("build \xe2\x9c\x93");
+    } else if (timed_out) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "build \xe2\x9c\x97 (timed out after %ds)",
+                 (int)timeout_sec);
+        chat_view_->AppendSystem(buf);
     } else {
         char buf[48];
         snprintf(buf, sizeof(buf), "build \xe2\x9c\x97 (exit %d)", (int)exit_code);

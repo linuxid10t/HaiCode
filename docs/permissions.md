@@ -136,5 +136,5 @@ open menu sizes itself to its items.
 ## See also
 
 - Configuring `permissions` arrays: [Configuration](configuration.md)
-- Gate implementation and its test coverage: [`CLAUDE.md`](../CLAUDE.md)
+- Gate implementation: [`CLAUDE.md`](../CLAUDE.md); its test coverage: [Testing](testing.md)
   ("Key constraints", `test_config_permission`)

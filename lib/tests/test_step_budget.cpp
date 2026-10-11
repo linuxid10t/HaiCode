@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <optional>
 #include <thread>
 #include <vector>
 #include <sys/stat.h>
@@ -107,6 +108,10 @@ static bool test_critical_tier() {
           "critical tier should contain 'CRITICAL: only 2 step(s) left'");
     CHECK(out2.find("getting tight") == std::string::npos,
           "critical tier should NOT contain 'getting tight'");
+    CHECK(out2.find("renews the budget") != std::string::npos,
+          "critical tier must name the renewal route, not just 'answer now'");
+    CHECK(out2.find("Stop exploring. Produce your final answer now") == std::string::npos,
+          "critical tier must not tell the model to abandon pending work");
     auto out1 = haicode::render_dynamic_prompt("m", "os", "/tmp", 1, 50);
     CHECK(out1.find("CRITICAL: only 1 step(s) left") != std::string::npos,
           "steps_left=1 should contain 'CRITICAL: only 1 step(s) left'");
@@ -784,6 +789,111 @@ static bool test_build_hook_cwd_and_failure_e2e() {
     std::string rm = "rm -rf " + tmp;
     system(rm.c_str());
     std::cout << "[OK] e2e build hook runs in session dir, reports failure\n";
+    return true;
+}
+
+// Build hook tuning (build_timeout / build_hook_skip) and result wording.
+// A timed-out hook names the configured timeout and says the write itself
+// landed (a failed result must not read as "the write did not apply"), and
+// the BuildHookResult event flags the timeout so the GUI can say so. Writes
+// matching the skip globs (docs, .haicode/) run no hook at all; an empty
+// skip list runs it for every write.
+static bool test_build_hook_timeout_and_skip_e2e() {
+    std::string tmpl = "/tmp/hc_test_buildhook_tune_XXXXXX";
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    if (!mkdtemp(buf.data())) { CHECK(false, "mkdtemp failed"); return false; }
+    std::string tmp(buf.data());
+    std::string proj = tmp + "/proj";
+    mkdir(proj.c_str(), 0755);
+
+    struct Run { std::string out; int starts = 0; bool timed_out = false; int timeout_sec = 0; };
+    int n = 0;
+    auto run = [&](const std::string& path, const std::string& build,
+                   int timeout_sec,
+                   std::optional<std::vector<std::string>> skip) {
+        Run r;
+        haicode::Database db(tmp + "/run" + std::to_string(++n) + ".db");
+        db.migrate();
+        haicode::SessionStore store(db);
+        auto provider = std::make_shared<ToolCallProvider>();
+        provider->pending.id = "w";
+        provider->pending.name = "write";
+        provider->pending.input = {{"path", path}, {"content", "x"}};
+        haicode::ProviderRegistry registry;
+        registry.register_provider(provider);
+        haicode::ToolRegistry tools;
+        haicode::register_builtin_tools(tools);
+        haicode::PermissionGate perms;
+        perms.set_rules({{"*", "*", haicode::PermissionEffect::Allow}});
+        haicode::SessionEventBus bus;
+        haicode::AppConfig cfg;
+        cfg.model = "tc-model";
+        cfg.provider = "toolcall";
+        cfg.autoname_sessions = false;
+        cfg.default_mode = "build";
+        cfg.build_command = build;
+        cfg.build_timeout = timeout_sec;
+        cfg.build_hook_skip = skip;
+        bus.subscribe(haicode::events::EventType::BuildHookStarted,
+                      [&](const nlohmann::json&) { ++r.starts; });
+        bus.subscribe(haicode::events::EventType::BuildHookResult,
+                      [&](const nlohmann::json& d) {
+                          r.timed_out = d.value("timed_out", false);
+                          r.timeout_sec = d.value("timeout_sec", 0);
+                      });
+        std::string sid;
+        {
+            haicode::SessionEngine engine(store, registry, tools, perms, bus, cfg);
+            sid = engine.create_session(proj, "build", "tc-model", "toolcall");
+            engine.submit_prompt(sid, "write it");
+            if (!wait_for_rows(store, sid, 4)) r.out = "<turn did not complete>";
+        }
+        if (r.out.empty()) r.out = first_tool_result_output(store, sid);
+        return r;
+    };
+
+    // Timeout: 1 s against a 30 s build.
+    auto begin = std::chrono::steady_clock::now();
+    Run t = run(proj + "/main.c", "echo STARTED; sleep 30", 1, std::nullopt);
+    auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - begin).count();
+    CHECK(secs < 15, "build_timeout=1 must stop the hook, took " + std::to_string(secs) + "s");
+    CHECK(t.timed_out && t.timeout_sec == 1, "BuildHookResult must flag the timeout");
+    CHECK(t.out.find("The file was written") != std::string::npos
+          && t.out.find("did not finish within 1s") != std::string::npos
+          && t.out.find("unverified") != std::string::npos
+          && t.out.find("STARTED") != std::string::npos,
+          "timeout result must say the write landed, name the timeout, keep output: " + t.out);
+
+    // A failing build still says the write landed.
+    Run f = run(proj + "/main.c", "exit 2", 30, std::nullopt);
+    CHECK(f.out.find("The file was written, but the build failed (exit 2)") != std::string::npos,
+          "failure result must say the write landed: " + f.out);
+    CHECK(!f.timed_out, "a failed build is not a timeout");
+
+    // Default skip list: docs and .haicode/ never run the hook.
+    for (const std::string& p : {proj + "/README.md", std::string("docs/guide.md"),
+                                 proj + "/.haicode/plans/p.md", proj + "/fix.patch"}) {
+        Run k = run(p, "exit 2", 30, std::nullopt);
+        CHECK(k.starts == 0, "writing " + p + " must not run the hook");
+        CHECK(k.out.find("[build_hook]") == std::string::npos,
+              "skipped hook leaves no marker: " + k.out);
+    }
+    // CMakeLists.txt is a build input: not skipped.
+    Run c = run(proj + "/CMakeLists.txt", "exit 2", 30, std::nullopt);
+    CHECK(c.starts == 1, "CMakeLists.txt must run the hook");
+    // An empty list runs the hook for docs too; a custom list replaces the defaults.
+    Run e = run(proj + "/README.md", "exit 2", 30, std::vector<std::string>{});
+    CHECK(e.starts == 1, "build_hook_skip=[] must run the hook for README.md");
+    Run g = run(proj + "/gen/out.c", "exit 2", 30, std::vector<std::string>{"gen/*"});
+    CHECK(g.starts == 0, "a custom path glob must skip gen/out.c");
+    Run h = run(proj + "/README.md", "exit 2", 30, std::vector<std::string>{"gen/*"});
+    CHECK(h.starts == 1, "a custom list replaces the defaults");
+
+    std::string rm = "rm -rf " + tmp;
+    system(rm.c_str());
+    std::cout << "[OK] e2e build hook timeout wording + skip globs\n";
     return true;
 }
 
@@ -1516,6 +1626,7 @@ int main() {
     ok &= test_provider_switch_mid_loop_e2e();
     ok &= test_interrupt_releases_ask_wait_e2e();
     ok &= test_build_hook_cwd_and_failure_e2e();
+    ok &= test_build_hook_timeout_and_skip_e2e();
     ok &= test_build_hook_inherited_pipe_timeout();
     ok &= test_interrupt_scoped_to_session_token();
     ok &= test_concurrent_sessions_run_in_parallel();

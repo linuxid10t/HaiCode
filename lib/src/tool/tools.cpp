@@ -535,9 +535,18 @@ public:
 
 class GrepTool : public Tool {
 public:
+    // Default per-line cap for content output. Long lines (minified files,
+    // one-row-per-line markdown tables) otherwise spend the whole 100 KB
+    // output budget on a handful of matches.
+    static constexpr int kDefaultMaxLineLength = 1000;
+
     std::string name() const override { return "grep"; }
     std::string description() const override {
-        return "Search for a pattern in files using grep (recursive by default).";
+        return "Search for a pattern in files using grep (recursive by default). "
+               "Binary files are skipped and .git is excluded. output_mode "
+               "\"files\" lists matching files, \"count\" gives per-file match "
+               "counts; use them to size a search before reading matches. Long "
+               "matching lines are cut at max_line_length characters.";
     }
     nlohmann::json input_schema() const override {
         return {
@@ -546,7 +555,13 @@ public:
                 {"pattern",      {{"type", "string"}, {"description", "Regular expression (ERE/extended syntax) to search for. Passed to /bin/grep -E -e. Supports alternation (A|B), +, ?, {n,m}."}}},
                 {"path",         {{"type", "string"}, {"description", "File or directory to search. Absolute, or relative to the project directory. Default: project directory."}}},
                 {"include",      {{"type", "string"}, {"description", "Filename glob filter, e.g. '*.cpp' or '*.{h,cpp}'. Restricts which files are scanned."}}},
-                {"line_numbers", {{"type", "boolean"}, {"description", "Prefix each match with `lineno:` (default true)."}}}
+                {"exclude_dirs", {{"type", "array"}, {"items", {{"type", "string"}}},
+                                  {"description", "Directory name globs to skip while recursing, e.g. [\"build\", \"node_modules\"]. .git is always skipped."}}},
+                {"output_mode",  {{"type", "string"}, {"enum", {"content", "files", "count"}},
+                                  {"description", "\"content\" (default): matching lines. \"files\": only the paths of files with a match. \"count\": `path:N` matching-line counts for files with at least one match."}}},
+                {"only_matching", {{"type", "boolean"}, {"description", "content mode: print only the matched part of each line (grep -o), one match per line (default false)."}}},
+                {"max_line_length", {{"type", "integer"}, {"description", "content mode: cut each output line after this many bytes and note how many were dropped (default 1000; 0 = no limit)."}}},
+                {"line_numbers", {{"type", "boolean"}, {"description", "content mode: prefix each match with `lineno:` (default true)."}}}
             }},
             {"required", nlohmann::json::array({"pattern"})}
         };
@@ -582,13 +597,47 @@ public:
             path = ctx.working_dir.empty() ? "." : ctx.working_dir;
         }
 
+        std::string mode = "content";
+        if (input.contains("output_mode") && input["output_mode"].is_string())
+            mode = input["output_mode"].get<std::string>();
+        if (mode != "content" && mode != "files" && mode != "count")
+            return {false, "", "grep: output_mode must be \"content\", \"files\", or \"count\""};
+
+        std::vector<std::string> exclude_dirs = {".git"};
+        if (input.contains("exclude_dirs")) {
+            const auto& ex = input["exclude_dirs"];
+            if (ex.is_string()) {
+                exclude_dirs.push_back(ex.get<std::string>());
+            } else if (ex.is_array()) {
+                for (const auto& d : ex)
+                    if (d.is_string()) exclude_dirs.push_back(d.get<std::string>());
+            } else {
+                return {false, "", "grep: exclude_dirs must be an array of strings"};
+            }
+        }
+
         bool line_numbers = input.value("line_numbers", true);
+        bool only_matching = input.value("only_matching", false);
+        long max_line = kDefaultMaxLineLength;
+        if (input.contains("max_line_length") && input["max_line_length"].is_number())
+            max_line = input["max_line_length"].get<long>();
         std::string include = input.value("include", "");
 
-        // Build command with all arguments properly single-quoted
-        std::string cmd = "/bin/grep -r -E --color=never";
-        if (line_numbers) cmd += " -n";
+        // Build command with all arguments properly single-quoted. -I skips
+        // binary files (object files and executables under build/ otherwise
+        // each print a "binary file matches" line).
+        std::string cmd = "/bin/grep -r -E -I --color=never";
+        if (mode == "files") {
+            cmd += " -l";
+        } else if (mode == "count") {
+            cmd += " -c -H";  // -H: a single-file search still prints path:N
+        } else {
+            if (line_numbers) cmd += " -n";
+            if (only_matching) cmd += " -o";
+        }
         if (!include.empty()) cmd += " --include=" + sq(include);
+        for (const auto& d : exclude_dirs)
+            if (!d.empty()) cmd += " --exclude-dir=" + sq(d);
         cmd += " -e " + sq(pattern);
         cmd += " " + sq(path);
 
@@ -598,9 +647,53 @@ public:
         if (r.exit_code == 2 || r.timed_out || r.interrupted)
             return {false, r.output, r.timed_out ? "grep timed out"
                         : r.interrupted ? "grep interrupted" : "grep error"};
-        if (r.truncated) r.output += "\n[output truncated]";
 
-        return {true, r.output.empty() ? "(no matches)" : r.output, ""};
+        std::string out;
+        if (mode == "count") out = drop_zero_counts(r.output);
+        else if (mode == "content" && max_line > 0) out = cap_line_length(r.output, (size_t)max_line);
+        else out = std::move(r.output);
+        if (r.truncated) out += "\n[output truncated]";
+
+        return {true, out.empty() ? "(no matches)" : out, ""};
+    }
+
+    // grep -c prints `path:0` for every scanned file; keep only real hits.
+    static std::string drop_zero_counts(const std::string& in) {
+        std::string out;
+        size_t pos = 0;
+        while (pos < in.size()) {
+            size_t nl = in.find('\n', pos);
+            size_t end = nl == std::string::npos ? in.size() : nl;
+            std::string_view line(in.data() + pos, end - pos);
+            bool zero = line.size() >= 2 && line.substr(line.size() - 2) == ":0";
+            if (!zero && !line.empty()) { out.append(line); out += '\n'; }
+            pos = end + 1;
+        }
+        return out;
+    }
+
+    // Cut each line after `max` bytes (backing off to a UTF-8 boundary) and
+    // note how many bytes were dropped.
+    static std::string cap_line_length(const std::string& in, size_t max) {
+        std::string out;
+        out.reserve(in.size());
+        size_t pos = 0;
+        while (pos < in.size()) {
+            size_t nl = in.find('\n', pos);
+            size_t end = nl == std::string::npos ? in.size() : nl;
+            size_t len = end - pos;
+            if (len <= max) {
+                out.append(in, pos, len);
+            } else {
+                size_t cut = max;
+                while (cut > 0 && ((unsigned char)in[pos + cut] & 0xC0) == 0x80) --cut;
+                out.append(in, pos, cut);
+                out += " [... +" + std::to_string(len - cut) + " bytes]";
+            }
+            if (nl != std::string::npos) out += '\n';
+            pos = end + 1;
+        }
+        return out;
     }
 };
 
@@ -1372,12 +1465,59 @@ class GitTool : public Tool {
         "merge", "rebase", "pull", "push", "fetch", "tag",
         "shortlog", "describe", "rev-parse", "ls-files",
         "merge-base", "rev-list", "ls-tree", "cat-file", "grep",
-        "range-diff", "for-each-ref",
+        "range-diff", "for-each-ref", "apply",
     };
 
     static bool is_allowed(const std::string& sub) {
         for (auto* s : kAllowed) if (sub == s) return true;
         return false;
+    }
+
+    // A refusal message when an invocation needs a terminal, or "" when it
+    // can run. The runner gives git an empty stdin and no terminal, so
+    // interactive modes (add -p, rebase -i, ...) can never be answered; say
+    // so up front instead of letting git fail or silently do nothing. Exact
+    // spellings, plus short clusters for add/reset (none of their short
+    // options take a value); scanning stops at the `--` pathspec separator.
+    // Editors are handled separately: GIT_EDITOR=false makes a commit
+    // without -m fail at once.
+    static std::string interactive_refusal(const std::string& sub,
+                                           const std::vector<std::string>& args) {
+        std::set<std::string> flags;
+        std::string cluster_letters;
+        if (sub == "add") {
+            flags = {"-p", "--patch", "-i", "--interactive", "-e", "--edit"};
+            cluster_letters = "pie";
+        } else if (sub == "commit") {
+            flags = {"-p", "--patch", "--interactive"};
+        } else if (sub == "checkout" || sub == "reset") {
+            flags = {"-p", "--patch"};
+            if (sub == "reset") cluster_letters = "p";
+        } else if (sub == "stash") {
+            // `stash list -p` / `stash show -p` print patches; only the
+            // push forms (explicit or implied) select hunks interactively.
+            if (!args.empty() && (args[0] == "list" || args[0] == "show"))
+                return "";
+            flags = {"-p", "--patch"};
+        } else if (sub == "rebase") {
+            flags = {"-i", "--interactive", "--edit-todo"};
+        } else {
+            return "";
+        }
+        for (const auto& a : args) {
+            if (a == "--") break;
+            bool hit = flags.count(a) > 0;
+            if (!hit && !cluster_letters.empty() && a.size() > 2
+                    && a[0] == '-' && a[1] != '-')
+                hit = a.find_first_of(cluster_letters, 1) != std::string::npos;
+            if (hit)
+                return "git: `" + sub + " " + a + "` is interactive and needs a "
+                       "terminal, which this tool does not have. To stage part of "
+                       "a file, write the hunks to a patch file and run "
+                       "`apply --cached <patch>`; for a rebase, use the bash tool "
+                       "or the external_terminal tool.";
+        }
+        return "";
     }
 
 public:
@@ -1386,8 +1526,12 @@ public:
         return "Run a git subcommand (status, diff, log, show, blame, grep, add, commit, "
                "branch, stash, checkout, reset, remote, merge, rebase, pull, push, fetch, "
                "tag, shortlog, describe, rev-parse, rev-list, merge-base, ls-files, "
-               "ls-tree, cat-file, for-each-ref, range-diff) in the project directory. "
-               "Pass extra flags via the args array. Output over 100 KB is truncated, so "
+               "ls-tree, cat-file, for-each-ref, range-diff, apply) in the project "
+               "directory. Pass extra flags via the args array. There is no terminal: "
+               "interactive modes (add -p, rebase -i) are refused and no editor opens, "
+               "so give commit and tag messages with -m (or --no-edit). To stage only "
+               "some hunks, write them to a patch file and run apply --cached <patch>. "
+               "Output over 100 KB is truncated, so "
                "keep it bounded: always pass -n N to log; to review a branch, find the "
                "base (merge-base HEAD main), list commits (log --oneline <base>..HEAD), "
                "get the shape (diff --stat <base>...HEAD), then diff one file at a time "
@@ -1422,6 +1566,18 @@ public:
             for (const auto& a : input["args"])
                 if (a.is_string()) args.push_back(a.get<std::string>());
         }
+        if (std::string why = interactive_refusal(sub, args); !why.empty())
+            return {false, "", why};
+        // apply refuses patch paths outside the working tree unless told
+        // otherwise; keep it that way (`--uns` is the shortest unambiguous
+        // abbreviation git accepts — `--un` also matches --unidiff-zero).
+        if (sub == "apply") {
+            for (const auto& a : args) {
+                if (a == "--") break;
+                if (a.size() >= 5 && std::string("--unsafe-paths").rfind(a, 0) == 0)
+                    return {false, "", "git: apply --unsafe-paths is not allowed"};
+            }
+        }
 
         // Read-only invocations (the gate's bypass path, and everything git
         // may run in Plan mode) must not honor repo-local config that can
@@ -1443,6 +1599,10 @@ public:
             // instead of hanging the 300 s timeout on a terminal that will
             // never answer.
             {"GIT_TERMINAL_PROMPT", "0"},
+            // Same for editors: with no terminal an editor can never be
+            // used, so a commit/tag/amend without a message fails at once.
+            {"GIT_EDITOR", "false"},
+            {"GIT_SEQUENCE_EDITOR", "false"},
         };
         const bool readonly = git_invocation_is_readonly(sub, args, ctx.working_dir);
         if (readonly) {
@@ -1479,6 +1639,8 @@ public:
 
         if (exit_code != 0 && output.empty())
             return {false, "", "git exited with code " + std::to_string(exit_code)};
+        if (exit_code != 0 && output.find("problem with the editor") != std::string::npos)
+            output += "\n[no editor is available: pass the message with -m, or use --no-edit]";
 
         return {exit_code == 0, output, exit_code == 0 ? "" : output};
     }

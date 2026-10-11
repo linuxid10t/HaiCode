@@ -223,6 +223,77 @@ static bool merge_instructions_appended() {
     return true;
 }
 
+// build_timeout is clamped to [10, 3600]; build_hook_skip is absent
+// (defaults apply) unless the file sets it, and an explicit [] is kept as
+// "skip nothing". Neither key grants authority, so neither is trust-gated.
+static bool cfg_build_hook_tuning() {
+    const std::string p = "/tmp/tfc_build_tune.json";
+    haicode::ConfigLoader loader;
+    write_file(p, R"({"build_command":"make","build_timeout":900,"build_hook_skip":["*.md","gen/*",""]})");
+    auto cfg = loader.load_file(p);
+    CHECK(cfg.build_timeout == 900, "build_timeout mismatch");
+    CHECK(cfg.build_hook_skip && *cfg.build_hook_skip == std::vector<std::string>({"*.md", "gen/*"}),
+          "build_hook_skip parsed, empty entries dropped");
+    write_file(p, R"({"build_timeout":1})");
+    CHECK(loader.load_file(p).build_timeout == haicode::kMinBuildTimeoutSec, "low clamp");
+    write_file(p, R"({"build_timeout":1e12})");
+    CHECK(loader.load_file(p).build_timeout == haicode::kMaxBuildTimeoutSec, "high clamp, no overflow");
+    write_file(p, R"({"build_hook_skip":[]})");
+    auto empty = loader.load_file(p);
+    CHECK(empty.build_hook_skip && empty.build_hook_skip->empty(), "explicit [] kept");
+    write_file(p, R"({"build_command":"make"})");
+    auto absent = loader.load_file(p);
+    CHECK(!absent.build_hook_skip, "absent build_hook_skip stays unset");
+    CHECK(absent.build_timeout == haicode::kDefaultBuildTimeoutSec, "default timeout");
+
+    haicode::AppConfig b, o;
+    b.build_timeout = 600;
+    o.build_timeout = 1200;
+    o.build_hook_skip = std::vector<std::string>{};
+    auto m = haicode::merge(make_layer(b, {"build_timeout"}),
+                            make_layer(o, {"build_timeout", "build_hook_skip"}));
+    CHECK(m.build_timeout == 1200 && m.build_hook_skip && m.build_hook_skip->empty(),
+          "project overlay wins for both keys");
+    auto kept = haicode::merge(make_layer(b, {"build_timeout"}), haicode::ConfigLayer{});
+    CHECK(kept.build_timeout == 600 && !kept.build_hook_skip, "absent overlay keeps base");
+
+    haicode::ConfigLayer proj;
+    proj.values.build_timeout = 1200;
+    proj.values.build_hook_skip = std::vector<std::string>{"*"};
+    proj.present = {"build_timeout", "build_hook_skip"};
+    CHECK(!haicode::has_gated_keys(proj), "build tuning keys are not gated");
+    std::remove(p.c_str());
+    std::cout << "[OK] build_timeout clamp + build_hook_skip parse/merge, ungated\n";
+    return true;
+}
+
+static bool build_hook_skip_matching() {
+    const auto& d = haicode::default_build_hook_skip();
+    const std::string proj = "/p/proj";
+    auto skips = [&](const std::string& path) {
+        return haicode::build_hook_skips_path(path, proj, d);
+    };
+    CHECK(skips("/p/proj/README.md"), "README.md skipped");
+    CHECK(skips("/p/proj/docs/guide.md"), "nested .md skipped (name glob)");
+    CHECK(skips("docs/notes.rst"), "relative .rst skipped");
+    CHECK(skips("./fix.patch"), "./ prefix stripped");
+    CHECK(skips("/p/proj/.haicode/plans/plan_1.md"), ".haicode/ subtree skipped");
+    CHECK(skips("/p/proj/.haicode/config.json"), ".haicode/config.json skipped");
+    CHECK(skips("/p/proj/.git/info/exclude"), ".git/ subtree skipped");
+    CHECK(!skips("/p/proj/CMakeLists.txt"), "CMakeLists.txt runs the hook");
+    CHECK(!skips("/p/proj/src/main.cpp"), "sources run the hook");
+    CHECK(!skips("/p/proj/docs.md.in"), "only the real extension counts");
+    CHECK(!skips("/p/proj2/.haicode/x.json"), "sibling dir with a shared prefix is outside");
+    CHECK(!skips("/elsewhere/.haicode/x.json"), "path globs apply only inside the project");
+    CHECK(skips("/elsewhere/notes.md"), "name globs apply anywhere");
+    CHECK(!skips(""), "empty path never skips");
+    CHECK(!haicode::build_hook_skips_path("/p/proj/README.md", proj, {}), "[] skips nothing");
+    CHECK(haicode::build_hook_skips_path("/p/proj/gen/a/b.c", proj + "/", {"gen/*"}),
+          "trailing slash on the project dir");
+    std::cout << "[OK] build_hook_skip glob matching\n";
+    return true;
+}
+
 static bool merge_build_command_overlay() {
     haicode::AppConfig b, o;
     b.build_command = "make base";
@@ -1979,6 +2050,8 @@ int main() {
     ok &= cfg_permissions();
     ok &= cfg_permission_default_resource();
     ok &= cfg_build_command();
+    ok &= cfg_build_hook_tuning();
+    ok &= build_hook_skip_matching();
     ok &= cfg_web_search();
     ok &= cfg_instructions();
     ok &= cfg_providers();

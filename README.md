@@ -177,7 +177,9 @@ New sessions start in `default_mode` (`"plan"` unless you change it in
 | [docs/configuration.md](docs/configuration.md) | Config files and merge rules, project trust, providers, model database, skills, web tools, build hook, key reference |
 | [docs/sessions.md](docs/sessions.md) | Auto-compaction, prompt queueing, `/retry`, image handling, deletion, cleanup, storage housekeeping, autonaming |
 | [docs/architecture.md](docs/architecture.md) | `lib/` and `gui/` layout, key headers, SQLite schema, where the deep detail lives |
-| [`CLAUDE.md`](CLAUDE.md) | Agent-facing guide to this repository: build/test commands, the test suite, per-tool behavior, implementation constraints |
+| [docs/testing.md](docs/testing.md) | What each test binary covers, running one, adding a test |
+| [docs/tools.md](docs/tools.md) | Per-tool behavior: arguments, limits, timeouts, permission actions, mode availability |
+| [`CLAUDE.md`](CLAUDE.md) | Agent-facing guide to this repository: build/test commands, architecture, implementation constraints |
 | [`MODEL_NUMBERS.md`](MODEL_NUMBERS.md) | Sourced model context windows, output caps, and pricing |
 
 ## Architecture

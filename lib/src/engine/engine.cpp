@@ -186,9 +186,14 @@ std::string render_dynamic_prompt(const std::string& model,
     std::string base = render_prompt(kDynamicSystemPromptNeutral, model,
                                      os_info, project_dir, steps_left);
     if (steps_left <= 4) {
+        // Name the way out: finishing the todo in progress renews the
+        // budget. "Produce your final answer now" alone pushed models to
+        // abandon pending edits and skip verification.
         base += "\nCRITICAL: only " + std::to_string(steps_left)
-              + " step(s) left. Stop exploring. Produce your final answer now, "
-                "or summarize what is done and what remains.";
+              + " step(s) left. Start no new exploration. Finish the todo in "
+                "progress and mark it completed (that renews the budget); if it "
+                "cannot be finished in time, summarize what is done and what "
+                "remains.";
     } else if (steps_left <= 14) {
         base += "\nBudget is getting tight (" + std::to_string(steps_left)
               + " steps left). Wrap up the current sub-task and avoid starting "
@@ -2741,30 +2746,48 @@ void SessionEngine::agentic_loop(const std::string& session_id) {
 
             // After a successful write or edit, run the configured build command
             // so compile errors reach the model in the same tool result.
+            // Paths matching build_hook_skip (docs, patches, .haicode/) don't
+            // run it: no build reads them.
+            const std::string written_path =
+                (call.input.contains("path") && call.input["path"].is_string())
+                    ? call.input["path"].get<std::string>() : std::string();
             if (result.success && !config_.build_command.empty()
-                    && (call.name == "write" || call.name == "edit")) {
+                    && (call.name == "write" || call.name == "edit")
+                    && !build_hook_skips_path(written_path, session.directory,
+                           config_.build_hook_skip.value_or(default_build_hook_skip()))) {
                 nlohmann::json started;
                 started["session_id"] = session_id;
                 started["call_id"] = call.id;
                 bus_.publish(events::EventType::BuildHookStarted, started);
-                constexpr int kBuildHookTimeoutSec = 300;
+                const int timeout_sec = config_.build_timeout;
                 auto [bec, build_out] = detail::run_build_hook(config_.build_command,
-                    session.directory, kBuildHookTimeoutSec, interrupt_flag);
+                    session.directory, timeout_sec, interrupt_flag);
                 nlohmann::json bev;
                 bev["session_id"] = session_id;
                 bev["call_id"] = call.id;
                 bev["success"] = (bec == 0);
                 bev["exit_code"] = bec;
+                bev["timed_out"] = (bec == 124);
+                bev["timeout_sec"] = timeout_sec;
                 bus_.publish(events::EventType::BuildHookResult, bev);
 
+                // The change itself landed either way; say so first, so a
+                // failed result is never read as "the edit did not apply"
+                // (retrying it would then fail on the already-changed text).
+                const char* applied = call.name == "write"
+                    ? "The file was written" : "The edit was applied";
                 if (bec == 124) {
-                    result.output += "\n\n[build_hook] Build timed out after "
-                                   + std::to_string(kBuildHookTimeoutSec)
-                                   + "s\n" + build_out;
+                    result.output += std::string("\n\n[build_hook] ") + applied
+                                   + ", but the build did not finish within "
+                                   + std::to_string(timeout_sec)
+                                   + "s (build_timeout) and was stopped, so the "
+                                     "change is unverified. Output so far:\n"
+                                   + build_out;
                     result.success = false;
                     result.error = result.output;
                 } else if (bec != 0) {
-                    result.output += "\n\n[build_hook] Build failed (exit "
+                    result.output += std::string("\n\n[build_hook] ") + applied
+                                   + ", but the build failed (exit "
                                    + std::to_string(bec) + "):\n" + build_out;
                     result.success = false;
                     result.error = result.output;
