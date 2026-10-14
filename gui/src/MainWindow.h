@@ -86,6 +86,9 @@ private:
     void _LoadHistory(const std::string& session_id);
     void _RestoreSessionTotals(const std::string& session_id);
     void _RefreshSessionList();
+    // Rows were re-sorted in place by SessionListView; resync the
+    // index-parallel session id/label vectors to the view's new order.
+    void _OnSessionListReordered();
 
     void _HandleTextDelta(BMessage* msg);
     void _HandleReasoningDelta(BMessage* msg);

@@ -68,6 +68,7 @@
 #include <cctype>
 #include <cstdio>
 #include <algorithm>
+#include <functional>
 #include <fstream>
 #include <sstream>
 
@@ -146,6 +147,12 @@ public:
     // settings changes via MainWindow::SetEngine.
     void SetEngine(haicode::SessionEngine* engine) { engine_ = engine; }
 
+    // Called synchronously after an in-place reorder so MainWindow can
+    // resync its index-parallel session_ids_/session_labels_ vectors within
+    // the same looper turn — a posted message would leave a window where a
+    // click maps CurrentSelection() through a stale session_ids_.
+    void SetReorderNotify(std::function<void()> cb) { reorder_notify_ = std::move(cb); }
+
     void AttachedToWindow() override
     {
         BListView::AttachedToWindow();
@@ -210,8 +217,10 @@ public:
                 item->SetSpinnerFrame(spinner_frame_);
             if (item->SetRunning(now_running)) {
                 _InvalidateGutter(i);
-                // A run that just ended last touched time_updated; show it now.
-                if (!now_running) times_due_ = true;
+                // Both transitions bump time_updated (the prompt row persists
+                // at start, the last results at end); re-sort on the next
+                // pulse so the row takes its place at the top right away.
+                times_due_ = true;
             }
             any = any || now_running;
         }
@@ -315,7 +324,12 @@ private:
 
     // One non-blocking query for every row's time_updated (rows are the
     // store's newest sessions, so list()'s order and limit cover them). A
-    // busy connection or a failed read retries on the next pulse.
+    // busy connection or a failed read retries on the next pulse. Rows then
+    // re-sort in place by the fresh times — newest first — so a session you
+    // work in bubbles to the top without a full rebuild (which would reset
+    // scroll and flash every row). Membership changes (a session created or
+    // deleted elsewhere) are NOT handled here; those go through
+    // _RefreshSessionList.
     void _SyncModifiedTimes(bigtime_t now)
     {
         std::vector<std::pair<std::string, int64_t>> times;
@@ -328,19 +342,64 @@ private:
             return;
         }
         std::map<std::string, int64_t> by_id(times.begin(), times.end());
-        for (int32 i = 0; i < CountItems(); ++i) {
+        // Sort only when membership is unchanged: every row present in the
+        // fresh data and no extra ids (a session created or deleted since
+        // the last rebuild goes through _RefreshSessionList instead).
+        bool ids_match = by_id.size() == (size_t)CountItems();
+        for (int32 i = 0; ids_match && i < CountItems(); ++i) {
             auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item) continue;
+            if (!item) { ids_match = false; break; }
             auto it = by_id.find(item->SessionId());
-            if (it != by_id.end() && item->SetModifiedTime(it->second))
+            if (it == by_id.end()) { ids_match = false; break; }
+            if (item->SetModifiedTime(it->second))
                 InvalidateItem(i);
         }
+        if (ids_match && _SortByModifiedTime() && reorder_notify_)
+            reorder_notify_();
         last_times_refresh_ = now;
         times_due_ = false;
     }
 
+    // SortItems comparison: time_updated descending, session id descending
+    // as the tie-break (matching the store's ORDER BY, so an in-place sort
+    // and a full rebuild always agree). SortItems is stable only through
+    // this total order, never qsort's own.
+    static int _CompareByModified(const void* a, const void* b)
+    {
+        auto* left = static_cast<SessionListItem*>(
+            *static_cast<BListItem* const*>(a));
+        auto* right = static_cast<SessionListItem*>(
+            *static_cast<BListItem* const*>(b));
+        if (left->ModifiedTime() != right->ModifiedTime())
+            return left->ModifiedTime() > right->ModifiedTime() ? -1 : 1;
+        if (left->SessionId() != right->SessionId())
+            return left->SessionId() > right->SessionId() ? -1 : 1;
+        return 0;
+    }
+
+    // Returns whether the row order changed. SortItems keeps each item's
+    // selected flag with the item and rescans selection indices, so the
+    // selection follows its row and no Select() echo is produced.
+    bool _SortByModifiedTime()
+    {
+        std::vector<std::string> before;
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item) return false;
+            before.push_back(item->SessionId());
+        }
+        SortItems(_CompareByModified);
+        for (int32 i = 0; i < CountItems(); ++i) {
+            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
+            if (!item) return false;
+            if (item->SessionId() != before[size_t(i)]) return true;
+        }
+        return false;
+    }
+
     haicode::SessionStore& store_;
     haicode::SessionEngine* engine_ = nullptr;
+    std::function<void()> reorder_notify_;
     bigtime_t last_times_refresh_ = 0;
     bool times_due_ = false;
     int spinner_frame_ = 0;
@@ -674,6 +733,8 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // ---- Session list (left sidebar) ----
     session_list_ = new SessionListView(store_);
     static_cast<SessionListView*>(session_list_)->SetEngine(engine_);
+    static_cast<SessionListView*>(session_list_)->SetReorderNotify(
+        [this]() { _OnSessionListReordered(); });
     session_scroll_ = new BScrollView("session_scroll", session_list_,
                                       0, false, true, B_FANCY_BORDER);
     session_scroll_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
@@ -1477,6 +1538,35 @@ MainWindow::_RefreshSessionList()
         session_ids_.push_back(si.id);
     }
     static_cast<SessionListView*>(session_list_)->ReplaceItems(items);
+    _RefreshSessionBadges();
+}
+
+// SessionListView re-sorted its rows in place (SortItems — nothing removed,
+// selection follows the items). session_ids_/session_labels_ are parallel to
+// the OLD view order; rebuild both from the view's new order so index-based
+// handlers (selection, deletion, badges) keep mapping to the right sessions
+// within this same looper turn.
+void
+MainWindow::_OnSessionListReordered()
+{
+    if (session_ids_.empty()) return;
+    std::map<std::string, std::string> label_by_id;
+    for (size_t i = 0; i < session_ids_.size(); ++i)
+        label_by_id.emplace(session_ids_[i], session_labels_[i]);
+
+    std::vector<std::string> ids;
+    std::vector<std::string> labels;
+    for (int32 i = 0; i < session_list_->CountItems(); ++i) {
+        auto* item = dynamic_cast<SessionListItem*>(session_list_->ItemAt(i));
+        if (!item) return;
+        auto it = label_by_id.find(item->SessionId());
+        if (it == label_by_id.end()) return;
+        ids.push_back(item->SessionId());
+        labels.push_back(it->second);
+    }
+    if (ids.empty()) return;
+    session_ids_ = std::move(ids);
+    session_labels_ = std::move(labels);
     _RefreshSessionBadges();
 }
 

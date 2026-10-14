@@ -364,7 +364,7 @@ std::vector<SessionInfo> SessionStore::list(int limit) {
         "SELECT id, project_id, title, directory, agent, model_json,"
         " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
         " tok_last_input, time_created, time_updated, project_used"
-        " FROM session ORDER BY time_updated DESC LIMIT ?");
+        " FROM session ORDER BY time_updated DESC, id DESC LIMIT ?");
     stmt.bind(1, limit);
 
     std::vector<SessionInfo> results;
@@ -396,7 +396,7 @@ bool SessionStore::try_update_times(
     std::unique_lock<std::mutex> lock(conn_mu_, std::try_to_lock);
     if (!lock.owns_lock()) return false;
     DbStmt stmt(db_.handle(),
-        "SELECT id, time_updated FROM session ORDER BY time_updated DESC LIMIT ?");
+        "SELECT id, time_updated FROM session ORDER BY time_updated DESC, id DESC LIMIT ?");
     stmt.bind(1, limit);
     std::vector<std::pair<std::string, int64_t>> rows;
     while (stmt.expect_row())

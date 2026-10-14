@@ -51,6 +51,7 @@ public:
     bool IsChatOnly() const { return chat_only_; }
     const std::string& SessionId() const { return session_id_; }
     const std::string& ModifiedLabel() const { return modified_label_; }
+    int64_t ModifiedTime() const { return modified_time_; }
     bool IsRunning() const { return running_; }
 
     // SetRunning returns whether the state changed (the glyph gutter needs a

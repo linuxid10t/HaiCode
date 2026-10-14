@@ -40,9 +40,16 @@ main()
     CHECK(item.SetModifiedTime(now + 5 * minute));
     CHECK(item.ModifiedLabel() != "Modified: unknown");
 
+    // ModifiedTime tracks the raw value the sort comparator needs.
+    CHECK(item.ModifiedTime() == now + 5 * minute);
+    // Back to the earlier time: the label reverts, so this IS a change.
+    CHECK(item.SetModifiedTime(now));
+    CHECK(item.ModifiedTime() == now);
+
     // Unset timestamps degrade instead of showing 1970.
     CHECK(item.SetModifiedTime(0));
     CHECK(item.ModifiedLabel() == "Modified: unknown");
+    CHECK(item.ModifiedTime() == 0);
 
     // Three text lines: height must exceed a two-line row.
     item.SetModifiedTime(now);
