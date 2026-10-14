@@ -321,6 +321,41 @@ static void test_limits() {
     TEST_REQUIRE(users == 4, "all image submissions recorded");
 }
 
+static void test_initial_mode() {
+    for (const auto& default_mode : {"plan", "build", "chat"}) {
+        Fixture fx;
+        fx.config.default_mode = default_mode;
+        fx.config.default_skills = {"example.md"};
+        fx.start();
+        TEST_REQUIRE(json::parse(fx.store.get(fx.sid)->model_json)["mode"] == default_mode,
+            "omitted initial mode preserves configured default");
+        auto check = [&](const std::string& sid, SessionMode mode, const char* name) {
+            auto session = fx.store.get(sid);
+            TEST_REQUIRE(session.has_value(), "explicit initial mode creates session");
+            auto model = json::parse(session->model_json);
+            TEST_REQUIRE(model["mode"] == name && fx.engine->get_mode(sid) == mode,
+                "initial mode persisted and returned without a mode switch");
+            TEST_REQUIRE(model["id"] == "text-model" && model["provider_id"] == "custom"
+                && model["skills"] == json::array({"example.md"}),
+                "initial mode preserves model, provider, and skills");
+            TEST_REQUIRE(!session->project_used && fx.store.load_messages(sid).empty(),
+                "initial mode does not create project use or conversation rows");
+        };
+        auto plan = fx.engine->create_session("/tmp", "", "", "custom", SessionMode::Plan);
+        auto build = fx.engine->create_session("/tmp", "", "", "custom", SessionMode::Build);
+        auto chat = fx.engine->create_session("/tmp", "", "", "custom", SessionMode::Chat);
+        check(plan, SessionMode::Plan, "plan");
+        check(build, SessionMode::Build, "build");
+        check(chat, SessionMode::Chat, "chat");
+        fx.engine.reset();
+        fx.engine = std::make_unique<SessionEngine>(fx.store, fx.registry, fx.tools,
+            fx.permissions, fx.bus, fx.config);
+        check(plan, SessionMode::Plan, "plan");
+        check(build, SessionMode::Build, "build");
+        check(chat, SessionMode::Chat, "chat");
+    }
+}
+
 static void test_no_provider() {
     Fixture fx;
     ProviderRegistry empty;
@@ -355,6 +390,7 @@ int main() {
     test_aging_and_parse();
     test_expired_backfill();
     test_limits();
+    test_initial_mode();
     test_no_provider();
     test_max_tokens_finish_reason();
     std::puts("engine correctness tests passed");

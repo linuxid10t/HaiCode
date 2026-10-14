@@ -13,6 +13,7 @@
 #include <atomic>
 #include <mutex>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace haicode {
@@ -129,7 +130,8 @@ public:
     std::string create_session(const std::string& project_dir,
                                 const std::string& agent_id = "",
                                 const std::string& model_id = "",
-                                const std::string& provider_id = "");
+                                const std::string& provider_id = "",
+                                std::optional<SessionMode> initial_mode = std::nullopt);
 
     void submit_prompt(const std::string& session_id, const std::string& text);
     // Submit with attachments (images and text files). The engine reads each

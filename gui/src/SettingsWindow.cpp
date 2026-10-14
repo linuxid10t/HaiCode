@@ -468,11 +468,14 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
             "(when the default model is text-only, this vision-capable pair"
             " describes images for it; (none) disables)"))
         .Add(new BSeparatorView(B_HORIZONTAL))
-        .Add(new BStringView("mode_label", "New-session start mode:"))
+        .Add(new BStringView("mode_label", "New Session Work Mode:"))
         .AddGroup(B_VERTICAL)
             .Add(mode_plan_radio_)
             .Add(mode_build_radio_)
         .End()
+        .Add(new BStringView("mode_hint",
+            "New sessions remember Chat or Work from the open session."
+            "\nThis setting chooses the starting mode for Work sessions."))
         .Add(new BSeparatorView(B_HORIZONTAL))
         .Add(thinking_field_)
         .AddGlue();

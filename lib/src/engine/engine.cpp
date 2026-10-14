@@ -973,7 +973,8 @@ void SessionEngine::cancel_pending_asks(const std::string& session_id) {
 std::string SessionEngine::create_session(const std::string& project_dir,
                                            const std::string& agent_id,
                                            const std::string& model_id,
-                                           const std::string& provider_id) {
+                                           const std::string& provider_id,
+                                           std::optional<SessionMode> initial_mode) {
     std::string eff_model = model_id.empty() ? config_.model : model_id;
     std::string eff_agent = agent_id.empty() ? config_.agent : agent_id;
 
@@ -997,7 +998,10 @@ std::string SessionEngine::create_session(const std::string& project_dir,
     nlohmann::json model_json;
     model_json["id"]          = eff_model;
     model_json["provider_id"] = eff_provider;
-    model_json["mode"]        = config_.default_mode;
+    model_json["mode"]        = initial_mode
+        ? (*initial_mode == SessionMode::Plan ? "plan"
+           : *initial_mode == SessionMode::Chat ? "chat" : "build")
+        : config_.default_mode;
     model_json["skills"]      = config_.default_skills;
 
     try {

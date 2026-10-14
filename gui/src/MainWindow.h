@@ -32,6 +32,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <optional>
 
 // Forward declaration
 class InputTextView;
@@ -207,6 +208,7 @@ private:
     std::string             default_model_;
     std::string             default_provider_ = "anthropic";
     std::string             active_session_id_;
+    std::optional<bool>      last_session_chat_;
     std::string             pending_plan_path_;
 
     GuiEventRelay*          relay_ = nullptr;

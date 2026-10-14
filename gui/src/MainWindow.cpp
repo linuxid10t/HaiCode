@@ -1579,7 +1579,17 @@ MainWindow::_NewSession()
     // with repopulation and menu-mark timing.
     std::string model = default_model_;
     std::string provider = default_provider_;
-    std::string sid = engine_->create_session(project_dir_, "", model, provider);
+    auto chat = last_session_chat_;
+    if (!active_session_id_.empty() && store_.get(active_session_id_))
+        chat = engine_->get_mode(active_session_id_) == haicode::SessionMode::Chat;
+    std::optional<haicode::SessionMode> initial_mode;
+    if (chat.has_value()) {
+        initial_mode = *chat ? haicode::SessionMode::Chat
+            : engine_->config().default_mode == "build" ? haicode::SessionMode::Build
+                                                       : haicode::SessionMode::Plan;
+    }
+    std::string sid = engine_->create_session(project_dir_, "", model, provider, initial_mode);
+    if (sid.empty()) return;
     _SaveActiveDraft();
     active_session_id_ = sid;
     if (relay_) relay_->set_active_session(sid);
@@ -3216,8 +3226,11 @@ MainWindow::_RefreshModeButton()
     if (!mode_menu_) return;
     int index = 0;
     haicode::SessionMode m = haicode::SessionMode::Build;
-    if (!active_session_id_.empty() && engine_)
+    if (!active_session_id_.empty() && engine_) {
         m = engine_->get_mode(active_session_id_);
+        if (store_.get(active_session_id_))
+            last_session_chat_ = m == haicode::SessionMode::Chat;
+    }
     index = (m == haicode::SessionMode::Plan) ? 1
           : (m == haicode::SessionMode::Chat) ? 2 : 0;
     if (BMenuItem* it = mode_menu_->ItemAt(index)) it->SetMarked(true);
