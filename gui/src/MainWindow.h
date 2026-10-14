@@ -18,6 +18,7 @@
 #include <TextControl.h>
 
 #include "ChatView.h"
+#include "Glyphs.h"
 #include "SnapshotMenu.h"
 
 #include <haicode/engine.h>
@@ -282,6 +283,11 @@ private:
     BMenuBar*      menu_bar_        = nullptr;
     BMenuItem*     offline_item_    = nullptr;
     BStringView*   status_strip_    = nullptr;
+    // Custom strip: plain-font text with the state glyph drawn in the
+    // directly-loaded emoji font when astral (gui/src/Glyphs.cpp).
+    haicode_gui::StatusStripView* strip_view_ = nullptr;
+    // State glyphs resolved once at construction (see gui/src/Glyphs.cpp).
+    haicode_gui::StatusGlyphs status_glyphs_;
 
     // Todos side panel
     BStringView*   todos_header_    = nullptr;

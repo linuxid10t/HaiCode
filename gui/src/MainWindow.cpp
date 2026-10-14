@@ -700,10 +700,18 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     attach_row_ = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
 
     // ---- Status strip (engine state, token counts, context size) ----
-    status_strip_ = new BStringView("status_strip", "[BUILD] \xe2\x9c\x93 idle");
     BFont status_font(*be_plain_font);
     status_font.SetSize(11.0f);
-    status_strip_->SetFont(&status_font);
+    // Custom view: the state glyph may be astral-plane emoji, which
+    // Haiku's render fallback chain draws as boxes even with noto_emoji
+    // installed — those are drawn with a directly-loaded NotoEmoji font.
+    status_strip_ = nullptr;
+    strip_view_ = new haicode_gui::StatusStripView("status_strip",
+                                                   status_font);
+    status_glyphs_ = haicode_gui::ResolveStatusGlyphs(status_font);
+    strip_view_->SetText((std::string("[BUILD] ") + status_glyphs_.idle
+                          + " idle").c_str());
+    strip_view_->SetGlyphRange(0, 0);
 
     // Compact button — sits immediately right of the status text on the left.
     compact_btn_ = new BButton("compact", "Compact",
@@ -711,7 +719,7 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     BGroupView* status_row = new BGroupView(B_HORIZONTAL, B_USE_SMALL_SPACING);
     BLayoutBuilder::Group<>(status_row)
-        .Add(status_strip_)
+        .Add(strip_view_)
         .Add(compact_btn_)
         .AddGlue()
     .End();
@@ -1744,9 +1752,9 @@ MainWindow::_HandleAttachRefs(BMessage* msg)
 void
 MainWindow::_NotifyAttachmentLimit(const std::string& note)
 {
-    BString text(status_strip_->Text());
+    BString text(strip_view_->Text());
     text << "   |   " << note.c_str();
-    status_strip_->SetText(text);
+    strip_view_->SetText(text);
 }
 
 void
@@ -3413,7 +3421,7 @@ static std::string format_cost(double usd)
 void
 MainWindow::_UpdateStatusStrip()
 {
-    if (!status_strip_) return;
+    if (!strip_view_) return;
 
     // Mode badge
     std::string badge = "[BUILD]";
@@ -3423,10 +3431,11 @@ MainWindow::_UpdateStatusStrip()
         else if (m == haicode::SessionMode::Chat)  badge = "[CHAT]";
     }
 
-    // State glyph + label
+    // State glyph + label (glyphs resolved from the strip font at
+    // construction — see ResolveStatusGlyphs)
     std::string glyph, label;
     if (compacting_) {
-        glyph = "\xe2\x9c\x8e";  // LOWER RIGHT PENCIL
+        glyph = status_glyphs_.compacting;
         label = "compacting context\xe2\x80\xa6";
         if (compaction_progress_ >= 0) {
             char pct[16];
@@ -3434,21 +3443,21 @@ MainWindow::_UpdateStatusStrip()
             label += pct;
         }
     } else if (!engine_running_) {
-        glyph = "\xe2\x9c\x93";  // CHECK MARK
+        glyph = status_glyphs_.idle;
         label = "idle";
     } else if (!build_call_id_.empty()) {
-        glyph = "\xf0\x9f\x94\xa7";
+        glyph = status_glyphs_.building;
         label = "building\xe2\x80\xa6";
     } else if (streaming_state_ == "streaming") {
-        glyph = "\xf0\x9f\x92\xac";  // 💬
+        glyph = status_glyphs_.streaming;
         label = "streaming\xe2\x80\xa6";
     } else if (streaming_state_ == "tool") {
-        glyph = "\xf0\x9f\x94\xa7";  // 🔧
+        glyph = status_glyphs_.tool;
         label = "running tool";
         if (!current_tool_name_.empty()) label += ": " + current_tool_name_;
     } else {
         // thinking / before first token
-        glyph = "\xf0\x9f\x92\xa1";  // 💡
+        glyph = status_glyphs_.thinking;
         label = "thinking\xe2\x80\xa6";
     }
     if (queued_prompts_ > 0)
@@ -3507,7 +3516,10 @@ MainWindow::_UpdateStatusStrip()
         s += "   context: \xe2\x80\x94 / " + format_tokens(max_context_);
     }
 
-    status_strip_->SetText(s.c_str());
+    // The glyph follows the "[BUILD] " badge; tell the strip which bytes
+    // to draw in the emoji font.
+    strip_view_->SetText(s.c_str());
+    strip_view_->SetGlyphRange(badge.size() + 1, (int32)glyph.size());
 
     if (compact_btn_)
         compact_btn_->SetEnabled(!compacting_ && !engine_running_

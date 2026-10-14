@@ -4,7 +4,7 @@ A native coding-agent app for **Haiku R1** — a native GUI (BeAPI) frontend bac
 by a C++20 agentic loop. Talks to Anthropic and OpenAI-compatible providers, runs
 tools with per-action permissions, and persists every session to SQLite.
 
-> Status: preview. The 1.0 feature work is complete and 40 test binaries pass;
+> Status: preview. The 1.0 feature work is complete and 41 test binaries pass;
 > packaging, install, and the remaining GUI items are still open
 > ([release tasks](RELEASE_1.0_TASKS.md)). Built and tested on Haiku R1~beta6 /
 > development tip.
@@ -71,6 +71,7 @@ pkgman install haiku_devel nlohmann_json sqlite_devel curl_devel openssl3_devel 
 | Package | Why |
 |---------|-----|
 | `git` | the built-in `git` tool wraps it; only needed if you want in-app git operations |
+| `noto_emoji` | real emoji state glyphs (💡💬🔧) in the status strip, drawn monochrome through a directly-loaded NotoEmoji. Without it the strip uses BMP symbols (✓ ✢ ▶ ⚙ ✎). Emoji inside model output in the transcript renders as boxes either way — native Haiku views don't draw astral-plane characters through the normal font stack. |
 
 ### API credentials
 

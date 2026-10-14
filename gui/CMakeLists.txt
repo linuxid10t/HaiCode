@@ -48,6 +48,13 @@ target_include_directories(test_session_list_item PRIVATE ${CMAKE_CURRENT_SOURCE
 target_link_libraries(test_session_list_item PRIVATE ${BE_LIB} ${ROOT_LIB})
 add_test(NAME session_list_item COMMAND test_session_list_item)
 
+# Status-strip glyph resolution: state glyphs must degrade to covered BMP
+# symbols (never missing-glyph boxes) when no emoji font is installed.
+add_executable(test_status_glyphs tests/test_status_glyphs.cpp src/Glyphs.cpp)
+target_include_directories(test_status_glyphs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_status_glyphs PRIVATE ${BE_LIB} ${ROOT_LIB})
+add_test(NAME status_glyphs COMMAND test_status_glyphs)
+
 # ChatView markdown rendering: streamed / batched / re-laid-out transcripts
 # must show byte-for-byte (text and per-byte font/color) the same view.
 add_executable(test_chat_view tests/test_chat_view.cpp src/ChatView.cpp
