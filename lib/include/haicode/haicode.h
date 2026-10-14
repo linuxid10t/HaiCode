@@ -34,4 +34,10 @@ std::shared_ptr<Provider> make_codex_provider(const std::string& id = "chatgpt",
 void register_builtin_tools(ToolRegistry& registry);
 // Register web_search and web_extract tools. Called by register_builtin_tools.
 void register_web_tools(ToolRegistry& registry);
+// Parse an Exa ("exa") or Z.ai (any other engine) search API response into
+// web_search's result array ([{title, url, snippet}], snippets capped at 400
+// bytes on a UTF-8 boundary). Exposed for tests.
+nlohmann::json parse_search_api_results(const std::string& engine,
+                                        const nlohmann::json& response,
+                                        int max_results);
 } // namespace haicode

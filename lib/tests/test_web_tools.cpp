@@ -144,6 +144,82 @@ static bool web_extract_in_range_max_chars_respected() {
     return true;
 }
 
+// max_chars landing inside a multibyte character: the cut must back off to a
+// UTF-8 boundary. A plain resize left an orphaned lead byte and the JSON dump
+// threw type_error.316, failing the whole fetch.
+static bool web_extract_max_chars_keeps_utf8_boundary() {
+    int fd = -1;
+    int port = bind_ephemeral(fd);
+    CHECK(port > 0, "ephemeral bind failed");
+    const std::string url = "http://127.0.0.1:" + std::to_string(port) + "/vi";
+    std::string para = "ab";
+    for (int i = 0; i < 200; ++i) para += "\xE1\xBB\x87";  // U+1EC7 (ệ)
+    std::thread srv([&] {
+        serve_html_once(fd, "<html><body><p>" + para + "</p></body></html>");
+    });
+
+    WebFixture fx;
+    auto r = fx.reg.execute("web_extract",
+                            {{"url", url}, {"max_chars", 100}}, fx.ctx, fx.gate);
+    srv.join();
+    close(fd);
+
+    CHECK(r.success, "mid-character max_chars must still succeed: " + r.error);
+    auto out = nlohmann::json::parse(r.output, nullptr, false);
+    CHECK(out.is_object(), "output must be a JSON object");
+    std::string text = out.value("text", "");
+    CHECK(!text.empty() && text.size() <= 100,
+          "text must be cut at or below max_chars, got "
+          + std::to_string(text.size()));
+    CHECK(haicode::util::sanitize_utf8(text) == text, "text must be valid UTF-8");
+    CHECK(out.value("truncated", false), "cut at max_chars sets truncated");
+    std::cout << "[OK] web_extract max_chars keeps a UTF-8 boundary\n";
+    return true;
+}
+
+// web_search API snippets (Exa highlights, Z.ai content) are capped at 400
+// bytes. A Vietnamese snippet whose byte 400 falls inside a character used to
+// keep the orphaned lead byte; dumping the result array then threw
+// "type_error.316 invalid UTF-8 byte at index 400: 0xE2" (repro from a Z.ai
+// search for Vietnamese sources).
+static bool web_search_snippet_cap_keeps_utf8_boundary() {
+    // 399 ASCII bytes, then "…" (E2 80 A6) straddling byte 400.
+    std::string content(399, 'x');
+    for (int i = 0; i < 50; ++i) content += "\xE2\x80\xA6";
+    std::string highlight = "a";
+    for (int i = 0; i < 300; ++i) highlight += "\xE1\xBB\x87";  // ệ
+
+    nlohmann::json zai = {{"search_result", {
+        {{"title", "t"}, {"link", "https://example.vn"}, {"content", content}}}}};
+    nlohmann::json exa = {{"results", {
+        {{"title", "t"}, {"url", "https://example.vn"},
+         {"highlights", {highlight}}}}}};
+
+    for (auto& [engine, resp] : {std::pair{std::string("zai"), zai},
+                                 std::pair{std::string("exa"), exa}}) {
+        nlohmann::json arr;
+        std::string dumped;
+        try {
+            arr = haicode::parse_search_api_results(engine, resp, 5);
+            dumped = arr.dump(2);
+        } catch (const std::exception& e) {
+            CHECK(false, engine + " snippet dump threw: " + e.what());
+        }
+        CHECK(arr.size() == 1, engine + " should yield one result");
+        std::string snip = arr[0].value("snippet", "");
+        const std::string ell = "\xE2\x80\xA6";
+        CHECK(snip.size() > ell.size()
+                  && snip.compare(snip.size() - ell.size(), ell.size(), ell) == 0,
+              engine + " capped snippet ends with the ellipsis marker");
+        CHECK(snip.size() - ell.size() <= 400,
+              engine + " snippet body must stay within 400 bytes");
+        CHECK(haicode::util::sanitize_utf8(snip) == snip,
+              engine + " snippet must be valid UTF-8");
+    }
+    std::cout << "[OK] web_search snippet cap keeps a UTF-8 boundary\n";
+    return true;
+}
+
 // Over-cap request: max_chars is clamped to the shared 100 KB budget. The
 // serialized JSON then crosses MAX_OUTPUT itself, so the observable is the
 // capped output plus the marker (the JSON is deliberately cut there).
@@ -215,6 +291,8 @@ int main() {
     ok &= web_extract_in_range_max_chars_respected();
     ok &= web_extract_over_cap_max_chars_clamped();
     ok &= web_extract_download_cap_flags_truncated();
+    ok &= web_extract_max_chars_keeps_utf8_boundary();
+    ok &= web_search_snippet_cap_keeps_utf8_boundary();
 
     std::cout << (ok ? "\nAll web tool tests passed!\n"
                      : "\nSome tests FAILED.\n");
