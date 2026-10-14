@@ -336,13 +336,13 @@ bool tool_allowed_in_mode(const std::string& tool_name, SessionMode mode) {
             "web_search", "web_extract",
             "diff", "todo_write", "ask_user",
             "propose_plan", "discard_plan",
-            "screenshot",
+            "screenshot", "date_time",
         };
         return plan_allowed.count(tool_name) > 0;
     }
     case SessionMode::Chat: {
         static const std::set<std::string> chat_allowed = {
-            "web_search", "web_extract", "todo_write", "ask_user",
+            "web_search", "web_extract", "todo_write", "ask_user", "date_time",
         };
         return chat_allowed.count(tool_name) > 0;
     }
@@ -754,6 +754,10 @@ AuthorizationDecision ToolRegistry::evaluate(const std::string& name,
     }
     if (name == "propose_plan" || name == "todo_write" || name == "ask_user") {
         exemption = builtin("Built-in interaction tool exemption");
+        has_exemption = true;
+    }
+    if (name == "date_time") {
+        exemption = builtin("Built-in date/time tool exemption");
         has_exemption = true;
     }
     if (name == "screenshot") {

@@ -72,6 +72,7 @@ R"HPCODE(
 - diff: Unified diff of a file against proposed new content; use to preview edits before applying. It does not compare revisions — use `git diff` for that.
 - git: Run a git subcommand in the project directory, passing extra flags via `args`. Read-only invocations (status, diff, log, show, blame, grep, ...) run without approval; output over 100 KB is truncated, so bound `log` with `-n` and diff large changes per file.
 - process: Inspect and manage running processes (list, kill, check_port).
+- date_time: Get the current date and time, including timezone, UTC time, and Unix timestamp. No parameters required.
 - external_terminal: Open a command in a new Haiku Terminal window; for interactive programs (editors, ncurses apps, REPLs) that `bash` cannot host.
 - web_search: Search the web. Use FIRST for research — it's cheap; read the snippets before fetching anything.
 - web_extract: Fetch a URL and return its cleaned main-body text. Use selectively.
@@ -214,7 +215,7 @@ constexpr const char* kPlanModeInstructions = R"HPCODE(
 
 You are in PLAN MODE. The session is read-only. The user wants either a researched implementation strategy before any code changes, or — when they ask for a review, analysis, or explanation — a researched answer.
 
-- Available tools this turn: read, glob, grep, ls, find, symbols, git (read-only), diff, todo_write, ask_user, web_search, web_extract, screenshot (vision models only), propose_plan, discard_plan.
+- Available tools this turn: read, glob, grep, ls, find, symbols, git (read-only), diff, todo_write, ask_user, web_search, web_extract, date_time, screenshot (vision models only), propose_plan, discard_plan.
 - bash, write, edit, external_terminal are NOT available. `git` only runs read-only invocations — status, diff, log, show, blame, grep, ls-files, ls-tree, cat-file, rev-parse, rev-list, merge-base, for-each-ref, describe, shortlog, and the listing forms of branch/tag/stash; anything that could modify the repository is refused.
 - **Reviews and questions are answered directly.** If the user asks you to review changes, a branch, a commit, or a diff, or to explain or analyze code, do NOT call `propose_plan` — it is only for implementation strategies. Research, then reply with your findings: most severe first, each with the file path, the function or symbol, what is wrong, and why it matters. If the user then wants the findings fixed, propose a plan for that.
 - **Reviewing with git:** find the base (`git merge-base HEAD main`, or `git branch -a` / `git log --oneline -n 20` to identify it); list the commits (`git log --oneline <base>..HEAD`); get the shape (`git diff --stat <base>...HEAD`); then read the diff one file at a time (`git diff <base>...HEAD -- <path>`) — a whole-branch diff is truncated at 100 KB. For uncommitted work use `git status`, `git diff` (unstaged), and `git diff --cached` (staged). `git show <rev>:<path>` prints a file as it was before the change; `git show <rev>` shows one commit; `git blame -L <start>,<end> <path>` narrows blame to lines. Always bound `git log` with `-n`. Read the surrounding code with `read`/`symbols`, not just the diff hunks.
@@ -227,17 +228,15 @@ You are in PLAN MODE. The session is read-only. The user wants either a research
 )HPCODE";
 
 // Appended to the system prompt only when the session is in Chat mode.
-// The engine filters the toolset down to a fail-closed allowlist
-// (web_search, web_extract, todo_write, ask_user) when this block is active,
-// so the model literally cannot touch the local machine.
+// The engine filters the toolset down to a fail-closed allowlist.
 constexpr const char* kChatModeInstructions = R"HPCODE(
 
 # Chat mode active
 
-You are in CHAT MODE. The user wants conversation and online research only — zero access to the local computer.
+You are in CHAT MODE. The user wants conversation and online research, not file access or command execution.
 
-- Available tools this turn: web_search, web_extract, todo_write, ask_user. That is the complete list.
-- There is NO access to local files, the shell, the codebase, or any tool that reads or modifies this machine. Do not claim to have run, read, or checked anything locally.
+- Available tools this turn: web_search, web_extract, todo_write, ask_user, date_time. That is the complete list.
+- There is NO access to local files, the shell, or the codebase. Do not claim to have run commands or read or checked files locally.
 - Answer conversationally. Use `web_search` / `web_extract` when the question needs current information or facts you are unsure of; cite URLs you actually fetched.
 - For multi-part research questions, use `todo_write` to track the parts, marking them in_progress/completed as you go.
 - If the request is ambiguous — unclear scope, missing constraints, multiple valid interpretations — call `ask_user` with a focused question and 2-5 concrete options, then stop and wait for the reply.

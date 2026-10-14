@@ -441,6 +441,111 @@ main()
         }
     }
 
+    {
+        const std::string output = R"({"local":"2026-10-14T18:30:00+00:00","utc":"2026-10-14T18:30:00Z","timezone":"UTC","unix_timestamp":1792002600})";
+        for (bool batch : {false, true}) {
+            live.Clear();
+            if (batch) live.BeginBatch();
+            live.AppendToolCalled("date_time", "{}");
+            live.AppendToolResult(output, true, "clock");
+            live.AppendTextDelta("After the tool: [docs](https://example.org)");
+            live.EndStreaming();
+            if (batch) live.EndBatch();
+            const auto collapsed = Snap(live);
+            CHECK(collapsed.text.find(output) == std::string::npos,
+                  "collapsed date_time result does not display the full JSON");
+            CHECK(collapsed.text.find("[OK] 14 Oct 2026, 18:30:00 UTC") != std::string::npos,
+                  "collapsed date_time shows a readable date and timezone");
+            CHECK(collapsed.text.find("unix_timestamp") == std::string::npos,
+                  "collapsed date_time hides JSON field names");
+            const int tool = live.FindBlockAt(collapsed.text.find("[Tool: date_time]"));
+            CHECK(tool == 0, "tool header remains clickable");
+            live.ToggleBlock(tool);
+            const auto expanded = Snap(live);
+            CHECK(expanded.text.find("[OK] Local: 14 Oct 2026, 18:30:00 UTC (UTC+00:00)\n"
+                  "UTC:   14 Oct 2026, 18:30:00\nUnix timestamp: 1792002600") != std::string::npos,
+                  "expanded date_time displays readable local, UTC, and Unix details");
+            CHECK(expanded.text.find(output) == std::string::npos,
+                  "expanded date_time does not display raw JSON");
+            CHECK(expanded.links.size() == 1, "expansion preserves later links");
+            live.ToggleBlock(tool);
+            std::string why;
+            CHECK(Same(Snap(live), collapsed, &why), "collapse restores preview: " + why);
+
+            const std::string updated = output + "\nupdated result details";
+            CHECK(live.UpdateToolResult("clock", updated, false), "update finds paired result");
+            CHECK(Snap(live).text.find("updated result details") == std::string::npos,
+                  "updated result stays collapsed");
+            live.ToggleBlock(tool);
+            CHECK(Snap(live).text.find("[ERR] " + updated) != std::string::npos,
+                  "expanded updated result shows full output and status");
+            const auto updated_live = Snap(live);
+            fresh.Clear();
+            fresh.BeginBatch();
+            fresh.AppendToolCalled("date_time", "{}");
+            fresh.AppendToolResult(updated, false, "clock");
+            fresh.AppendTextDelta("After the tool: [docs](https://example.org)");
+            fresh.EndStreaming();
+            fresh.EndBatch();
+            fresh.ToggleBlock(0);
+            CHECK(Same(updated_live, Snap(fresh), &why), "expanded replay matches live: " + why);
+        }
+
+        live.Clear();
+        live.AppendToolCalled("date_time", "{}");
+        live.AppendToolCalled("read", "{}");
+        const std::string unicode = std::string(99, "x"[0]) + "\xe2\x82\xac tail";
+        live.AppendToolResult(unicode, true);
+        live.AppendToolResult("first line\nsecond line", true);
+        CHECK(Snap(live).text.find(std::string(99, "x"[0]) + " \xe2\x80\xa6")
+                  != std::string::npos, "preview truncation preserves UTF-8 boundaries");
+        live.ToggleBlock(0);
+        CHECK(Snap(live).text.find(unicode) != std::string::npos, "first paired result expands");
+        CHECK(Snap(live).text.find("second line") == std::string::npos,
+              "expanding one tool leaves another result collapsed");
+        live.ToggleBlock(1);
+        CHECK(Snap(live).text.find("first line\nsecond line") != std::string::npos,
+              "multiline results also expand fully");
+    }
+
+    {
+        const std::string output = R"({"local":"2026-01-01T00:15:00+05:45","utc":"2025-12-31T18:30:00Z","timezone":"","unix_timestamp":1767205800})";
+        live.Clear();
+        live.AppendToolCalled("date_time", "{}");
+        live.AppendToolResult(output, true, "clock");
+        CHECK(Snap(live).text.find("[OK] 1 Jan 2026, 00:15:00 UTC+05:45") != std::string::npos,
+              "missing timezone name falls back to numeric offset");
+        live.ToggleBlock(0);
+        CHECK(Snap(live).text.find("Local: 1 Jan 2026, 00:15:00 (UTC+05:45)\n"
+              "UTC:   31 Dec 2025, 18:30:00") != std::string::npos,
+              "formatting preserves fractional offsets and different local/UTC dates");
+        const std::string negative = R"({"local":"2025-12-31T13:30:00-05:00","utc":"2025-12-31T18:30:00Z","timezone":"EST","unix_timestamp":1767205800})";
+        CHECK(live.UpdateToolResult("clock", negative, true), "update formatted result");
+        CHECK(Snap(live).text.find("Local: 31 Dec 2025, 13:30:00 EST (UTC-05:00)")
+              != std::string::npos, "updated results retain readable negative offsets");
+        live.ToggleBlock(0);
+        CHECK(Snap(live).text.find("[OK] 31 Dec 2025, 13:30:00 EST") != std::string::npos,
+              "updated result has a readable collapsed summary");
+
+        for (const std::string raw : {
+                std::string("not JSON"), std::string("{}"),
+                std::string(R"({"local":false,"utc":null,"timezone":12,"unix_timestamp":0})"),
+                std::string(R"({"local":"2026-99-14T18:30:00+00:00","utc":"2026-10-14T18:30:00Z","timezone":"UTC","unix_timestamp":0})")}) {
+            live.Clear();
+            live.AppendToolCalled("date_time", "{}");
+            live.AppendToolResult(raw, true);
+            live.ToggleBlock(0);
+            CHECK(Snap(live).text.find("[OK] " + raw) != std::string::npos,
+                  "malformed date_time data falls back to ordinary result rendering");
+        }
+        live.Clear();
+        live.AppendToolCalled("read", "{}");
+        live.AppendToolResult(output, true);
+        live.ToggleBlock(0);
+        CHECK(Snap(live).text.find(output) != std::string::npos,
+              "date_time presentation does not change other tools returning JSON");
+    }
+
     // What a click would do (planned only — nothing is launched here).
     {
         char tmpl[] = "/tmp/haicode_linktest_XXXXXX";

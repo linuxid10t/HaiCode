@@ -32,8 +32,8 @@ wins:
 
 Above all of these sits the session's **mode**, which no grant can override: it
 is checked before any rule layer, so Plan can never write (its `git` runs only
-read-only invocations, for reviewing history and diffs) and Chat can never touch
-the local system regardless of toggles, grants, or configured rules.
+read-only invocations, for reviewing history and diffs) and Chat cannot access
+files or execute commands regardless of toggles, grants, or configured rules.
 
 | Mode | Writes / `bash` | Reads | Local `git` |
 |------|-----------------|-------|-------------|
@@ -55,7 +55,8 @@ What the fallback layer covers (`ToolRegistry::evaluate`,
 `symbols` inside the session's working directory; `glob` when its literal prefix
 before the first wildcard resolves inside the project; read-only `git`
 invocations; `web_search`/`web_extract`; `propose_plan`, `todo_write`,
-`ask_user`; `screenshot`; and `process list`/`check_port`.
+`ask_user`; `screenshot`; `date_time` (available in all modes); and
+`process list`/`check_port`.
 
 Two details worth knowing when writing rules:
 

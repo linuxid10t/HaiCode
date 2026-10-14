@@ -2190,7 +2190,56 @@ public:
     }
 };
 
+class DateTimeTool : public Tool {
+public:
+    std::string name() const override { return "date_time"; }
+    std::string description() const override {
+        return "Get the current date and time, including local time with UTC offset, "
+               "UTC time, timezone, and Unix timestamp. No parameters required.";
+    }
+    nlohmann::json input_schema() const override {
+        return {{"type", "object"}, {"properties", nlohmann::json::object()},
+                {"additionalProperties", false}};
+    }
+    std::string resource(const nlohmann::json&, const ToolContext&) const override {
+        return "current time";
+    }
+    ToolResult execute(const nlohmann::json& input, const ToolContext&) override {
+        if (!input.is_object() || !input.empty())
+            return {false, "", "date_time: expected an empty object (no parameters)"};
+
+        const std::time_t now = std::time(nullptr);
+        std::tm local{}, utc{};
+        if (now == static_cast<std::time_t>(-1)
+                || !localtime_r(&now, &local) || !gmtime_r(&now, &utc))
+            return {false, "", "date_time: unable to obtain current date and time"};
+
+        char local_text[32], utc_text[32], offset[16], timezone[128]{};
+        if (!std::strftime(local_text, sizeof(local_text), "%Y-%m-%dT%H:%M:%S", &local)
+                || !std::strftime(utc_text, sizeof(utc_text), "%Y-%m-%dT%H:%M:%SZ", &utc))
+            return {false, "", "date_time: unable to format current date and time"};
+        if (!std::strftime(timezone, sizeof(timezone), "%Z", &local))
+            timezone[0] = '\0';
+
+        // Haiku strftime(%z) renders negative offsets as unsigned values.
+        const long offset_minutes = static_cast<long>(local.tm_gmtoff) / 60;
+        const long magnitude = offset_minutes < 0 ? -offset_minutes : offset_minutes;
+        const int length = std::snprintf(offset, sizeof(offset), "%c%02ld:%02ld",
+            offset_minutes < 0 ? '-' : '+', magnitude / 60, magnitude % 60);
+        if (length != 6)
+            return {false, "", "date_time: unable to format UTC offset"};
+        nlohmann::json output = {
+            {"local", std::string(local_text) + offset},
+            {"utc", utc_text},
+            {"timezone", timezone},
+            {"unix_timestamp", now}
+        };
+        return {true, output.dump(), ""};
+    }
+};
+
 void register_builtin_tools(ToolRegistry& registry) {
+    registry.register_tool(std::make_shared<DateTimeTool>());
     registry.register_tool(std::make_shared<BashTool>());
     registry.register_tool(std::make_shared<ReadTool>());
     registry.register_tool(std::make_shared<WriteTool>());

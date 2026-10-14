@@ -38,8 +38,9 @@ struct ChatEntry {
     std::string text;       // content, input_json for ToolCalled
     std::string name;       // tool name for ToolCalled, header for CompactionSummary
     bool        success   = true;
-    bool        collapsed = false;  // meaningful for ToolCalled and Reasoning
+    bool        collapsed = false;  // meaningful for ToolCalled, Reasoning, CompactionSummary
     std::string call_id;            // ToolResult: the call it answers
+    int         tool_call_index = -1;
 };
 
 // How [Thinking] blocks display by default; the user's manual

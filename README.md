@@ -13,11 +13,11 @@ tools with per-action permissions, and persists every session to SQLite.
 
 - **Agentic loop** — a renewable 50-step tool budget per turn (configurable per
   agent, with a hard ceiling), and atomic interruption between steps.
-- **Twenty-one built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`,
+- **Twenty-two built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`,
   `ls`, `find`, `symbols`, `diff`, `git`, `process`, `external_terminal`,
   `todo_write`, `ask_user`, `propose_plan`, `discard_plan`, `write_agents_md`,
-  `screenshot`, `web_search`, `web_extract` — each with safe argument handling and
-  a 100 KB output cap, all shelling out through one cancellable subprocess runner.
+  `screenshot`, `web_search`, `web_extract`, `date_time` — with safe argument handling
+  and bounded output; tools that spawn commands share one cancellable subprocess runner.
 - **Complete tool exchanges** — denied, interrupted, or plan-stopped batches
   persist an explicit failed result for each skipped call, so provider context
   never drifts from the stored transcript. See

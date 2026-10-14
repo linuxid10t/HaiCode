@@ -158,8 +158,11 @@ target_link_libraries(test_propose_plan haicode)
 add_executable(test_markdown tests/test_markdown.cpp)
 target_link_libraries(test_markdown haicode)
 
+add_executable(test_date_time tests/test_date_time.cpp)
+target_link_libraries(test_date_time haicode)
+
 # Register every test executable with CTest (ctest --test-dir build).
-foreach(t test_db test_diff test_git_find test_process test_file_tools
+foreach(t test_date_time test_db test_diff test_git_find test_process test_file_tools
          test_config_permission test_step_budget test_compaction
          test_checkpoint test_model_context test_openai_translate
          test_text_attachment test_screenshot test_tool_safety

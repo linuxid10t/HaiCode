@@ -12,12 +12,56 @@
 #include <TextView.h>
 #include <Window.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <memory>
+#include <regex>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+static bool
+FormatDateTimeResult(const std::string& raw, bool collapsed, std::string& text)
+{
+    auto data = nlohmann::json::parse(raw, nullptr, false);
+    if (!data.is_object()) return false;
+    for (const char* key : {"local", "utc", "timezone"}) {
+        if (!data.contains(key) || !data[key].is_string()) return false;
+    }
+    if (!data.contains("unix_timestamp") || !data["unix_timestamp"].is_number_integer())
+        return false;
+
+    const auto local = data["local"].get<std::string>();
+    const auto utc = data["utc"].get<std::string>();
+    const auto zone = data["timezone"].get<std::string>();
+    static const std::regex iso(
+        R"(\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(Z|[+-]\d{2}:\d{2}))");
+    if (local.size() != 25 || utc.size() != 20
+        || !std::regex_match(local, iso) || !std::regex_match(utc, iso))
+        return false;
+
+    auto readable = [](const std::string& stamp) {
+        static const char* months[] = {
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+        };
+        return std::to_string(std::stoi(stamp.substr(8, 2))) + " "
+            + months[std::stoi(stamp.substr(5, 2)) - 1] + " " + stamp.substr(0, 4)
+            + ", " + stamp.substr(11, 8);
+    };
+    const std::string local_time = readable(local);
+    const std::string offset = "UTC" + local.substr(19);
+    if (collapsed) {
+        text = local_time + " " + (zone.empty() ? offset : zone);
+    } else {
+        text = "Local: " + local_time + (zone.empty() ? "" : " " + zone)
+            + " (" + offset + ")\nUTC:   " + readable(utc)
+            + "\nUnix timestamp: " + data["unix_timestamp"].dump();
+    }
+    return true;
+}
 
 // Color palette
 static const rgb_color kColorUser           = {  30, 100, 220, 255 };
@@ -370,8 +414,18 @@ ChatView::_RenderEntry(int i, RenderBuf& out) const
 
     case ChatEntry::ToolResult: {
         std::string summary = e.text;
-        auto nl = summary.find('\n');
-        if (nl != std::string::npos) summary = summary.substr(0, nl) + " \xe2\x80\xa6";
+        const ChatEntry* tool = e.tool_call_index < 0 ? nullptr : &model_[e.tool_call_index];
+        const bool collapsed = !tool || tool->collapsed;
+        const bool formatted = tool && tool->name == "date_time" && e.success
+            && FormatDateTimeResult(e.text, collapsed, summary);
+        if (!formatted && collapsed) {
+            size_t end = std::min(summary.find('\n'), size_t(100));
+            if (end < summary.size()) {
+                while (end > 0 && (static_cast<unsigned char>(summary[end]) & 0xc0) == 0x80)
+                    --end;
+                summary = summary.substr(0, end) + " \xe2\x80\xa6";
+            }
+        }
         rgb_color color = e.success ? kColorToolOk : kColorToolErr;
         separator(color);
         out.Add((e.success ? "[OK] " : "[ERR] ") + summary, color);
@@ -780,8 +834,10 @@ ChatView::AppendToolResult(const std::string& output, bool success,
     streaming_ = false;
     // Collapse the oldest tool call still waiting for its result — in place,
     // without touching the rest of the transcript.
+    int tool_call_index = -1;
     if (!pending_tools_.empty()) {
         int idx = pending_tools_.front();
+        tool_call_index = idx;
         pending_tools_.pop_front();
         if (idx >= 0 && idx < (int)model_.size() && !model_[idx].collapsed) {
             model_[idx].collapsed = true;
@@ -789,7 +845,7 @@ ChatView::AppendToolResult(const std::string& output, bool success,
         }
     }
     _AppendEntry(_PushEntry({ChatEntry::ToolResult, output, "", success, false,
-                             call_id}));
+                             call_id, tool_call_index}));
     _FollowScroll(anchor);
 }
 
@@ -1049,5 +1105,12 @@ ChatView::ToggleBlock(int model_idx)
     // into view; scrolled up, the user's reading position stays put.
     ScrollAnchor anchor = _AnchorScroll();
     _ReplaceEntry(model_idx);
+    if (model_[model_idx].kind == ChatEntry::ToolCalled) {
+        for (int i = model_idx + 1; i < (int)model_.size(); ++i) {
+            if (model_[i].kind == ChatEntry::ToolResult
+                && model_[i].tool_call_index == model_idx)
+                _ReplaceEntry(i);
+        }
+    }
     _FollowScroll(anchor);
 }
