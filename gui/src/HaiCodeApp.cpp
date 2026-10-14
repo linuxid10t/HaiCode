@@ -525,20 +525,24 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             if (msg->FindInt32("reply_what", &requested_what) == B_OK
                     && requested_what != 0)
                 reply_what = requested_what;
+            bool restore_selection = false;
+            msg->FindBool("restore_selection", &restore_selection);
             if (!provider) {
                 // No key configured — send empty list so dropdown shows "(none available)"
                 BMessage reply(reply_what);
                 reply.AddString("provider_id", provider_id.c_str());
+                reply.AddBool("restore_selection", restore_selection);
                 reply_to.SendMessage(&reply);
                 break;
             }
 
             BMessenger win_msgr(reply_to);
-            std::thread([provider, provider_id, win_msgr, reply_what]() {
+            std::thread([provider, provider_id, win_msgr, reply_what, restore_selection]() {
                 std::string err;
                 auto models = provider->list_models(err);
                 BMessage reply(reply_what);
                 reply.AddString("provider_id", provider_id.c_str());
+                reply.AddBool("restore_selection", restore_selection);
                 reply.AddString("error", err.c_str());
                 for (auto& m : models)
                     reply.AddString("model", m.c_str());

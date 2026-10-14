@@ -90,6 +90,44 @@ int main() {
         std::cout << "[OK] list()/try_update_times() order: time DESC, id DESC" << std::endl;
     }
 
+    {
+        auto older = store.create("/boot/home", "default",
+            "{ \"provider_id\": \"anthropic\", \"id\": \"stored-model\" }");
+        haicode::DbStmt set_time(db.handle(),
+            "UPDATE session SET time_updated=1000 WHERE id=?");
+        set_time.bind(1, older.id).expect_done();
+        const auto original_json = store.get(older.id)->model_json;
+
+        store.load_messages(older.id);
+        store.list_complete_checkpoints(older.id);
+        store.update_provider_model(older.id, "anthropic", "stored-model");
+        store.update_provider_model(older.id, "", "stored-model");
+        store.update_provider_model(older.id, "anthropic", "");
+        store.update_provider_model(older.id, "", "");
+        TEST_REQUIRE(store.get(older.id)->time_updated == 1000,
+                     "opening/unchanged provider-model saves must not modify timestamp");
+        TEST_REQUIRE(store.get(older.id)->model_json == original_json,
+                     "unchanged saves must preserve stored JSON bytes");
+        TEST_REQUIRE(store.list().back().id == older.id,
+                     "opening an older session must not reorder it");
+
+        store.update_provider_model(older.id, "anthropic", "new-model");
+        TEST_REQUIRE(store.get(older.id)->time_updated > 1000,
+                     "actual model change must update timestamp");
+        TEST_REQUIRE(store.list().front().id == older.id,
+                     "actual model change must move session to top");
+
+        haicode::DbStmt reset_time(db.handle(),
+            "UPDATE session SET time_updated=1000 WHERE id=?");
+        reset_time.bind(1, older.id).expect_done();
+        store.append_message(older.id, "user_prompted", "{\"text\":\"Do something\"}");
+        TEST_REQUIRE(store.get(older.id)->time_updated > 1000,
+                     "new message must update timestamp");
+        TEST_REQUIRE(store.list().front().id == older.id,
+                     "new message must move session to top");
+        std::cout << "[OK] reads/unchanged saves preserve modified time; edits reorder" << std::endl;
+    }
+
     std::cout << std::endl << "All Phase 1 tests passed!" << std::endl;
     return 0;
 }

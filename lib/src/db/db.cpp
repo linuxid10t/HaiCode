@@ -620,8 +620,10 @@ void SessionStore::update_provider_model(const std::string& session_id,
     try {
         auto j = nlohmann::json::parse(model_json, nullptr, false);
         if (j.is_discarded() || !j.is_object()) j = nlohmann::json::object();
+        const auto original = j;
         if (!provider_id.empty()) j["provider_id"] = provider_id;
         if (!model_id.empty())    j["id"]          = model_id;
+        if (j == original) return;
         model_json = j.dump();
     } catch (...) {
         return;

@@ -1473,16 +1473,25 @@ MainWindow::MessageReceived(BMessage* msg)
             // default_model_ to match.
             // A completed load (even an empty one) is not a failure — only the
             // explicit error branch below re-arms the click-to-retry flag.
+            bool restore_selection = false;
+            msg->FindBool("restore_selection", &restore_selection);
             models_load_failed_ = false;
             std::vector<SnapshotMenu::Entry> entries;
             int32 selected = 0;
+            bool model_found = false;
             const char* model = nullptr;
             for (int32 i = 0; msg->FindString("model", i, &model) == B_OK; ++i) {
                 BMessage selection(MSG_MODEL_SELECTED);
                 selection.AddString("model_id", model);
                 entries.push_back({short_model_label(model), selection});
-                if (default_model_ == model)
+                if (default_model_ == model) {
                     selected = entries.size() - 1;
+                    model_found = true;
+                }
+            }
+            if (restore_selection && !model_found && !default_model_.empty()) {
+                selected = entries.size();
+                entries.push_back(SnapshotMenu::Placeholder(short_model_label(default_model_)));
             }
             if (entries.empty()) {
                 std::string label = "(none available)";
@@ -1492,7 +1501,7 @@ MainWindow::MessageReceived(BMessage* msg)
                     models_load_failed_ = true;
                 }
                 entries.push_back(SnapshotMenu::Placeholder(label));
-            } else {
+            } else if (!restore_selection) {
                 entries[selected].message.FindString("model_id", &model);
                 default_model_ = model;
             }
@@ -1500,12 +1509,11 @@ MainWindow::MessageReceived(BMessage* msg)
                                  default_provider_, BMessenger(this));
             model_menu_->UpdateLabel(model_field_);
             _UpdateMaxContext();
-            // Sync the engine: without this, switching provider leaves the
-            // active session's stored model stale (the auto-marked default
-            // never reaches the DB), so the next prompt goes out against
-            // the wrong API.
-            _ApplyProviderModelToActiveSession();
-            _PersistProviderModel();
+            // Restoration is read-only, even if the stored model is no longer listed.
+            if (!restore_selection) {
+                _ApplyProviderModelToActiveSession();
+                _PersistProviderModel();
+            }
             break;
         }
         case MSG_PERMISSION_WINDOW_CLOSED:
@@ -1693,7 +1701,8 @@ MainWindow::_SelectSession(int idx)
             // present in the new list (default_model_ is preserved).
             BMessage fetch(MSG_FETCH_MODELS);
             fetch.AddString("provider_id", provider_id.c_str());
-            PostMessage(&fetch);
+            fetch.AddBool("restore_selection", true);
+            be_app->PostMessage(&fetch);
         }
     }
 
