@@ -433,6 +433,28 @@ static std::string resolve_search_api_key(const ToolContext& ctx,
     return "";
 }
 
+// Cap an API snippet at 400 bytes on a UTF-8 boundary: a plain resize cuts
+// a multibyte character (Vietnamese diacritics, "…", CJK) in half, and the
+// orphaned lead byte makes the result array's dump() throw type_error.316.
+static void cap_snippet(std::string& snippet) {
+    constexpr size_t kSnippetCap = 400;
+    if (snippet.size() <= kSnippetCap) return;
+    snippet = util::truncate_utf8(snippet, kSnippetCap);
+    snippet += "…";
+}
+
+static nlohmann::json results_to_json(const std::vector<SearchResult>& results) {
+    nlohmann::json arr = nlohmann::json::array();
+    for (auto& r : results) {
+        arr.push_back({
+            {"title",   r.title},
+            {"url",     r.url},
+            {"snippet", r.snippet}
+        });
+    }
+    return arr;
+}
+
 // Parse Exa /search JSON: {"results": [{"title", "url", "highlights": [...]}]}.
 static std::vector<SearchResult> parse_exa_results(const nlohmann::json& j,
                                                    int max_results) {
@@ -448,10 +470,7 @@ static std::vector<SearchResult> parse_exa_results(const nlohmann::json& j,
             sr.snippet = r["highlights"][0].get<std::string>();
         // Highlights can run to thousands of chars on long documents; cap
         // them so 10 results stay well under the tool-output budget.
-        if (sr.snippet.size() > 400) {
-            sr.snippet.resize(400);
-            sr.snippet += "…";
-        }
+        cap_snippet(sr.snippet);
         if (!sr.title.empty() || !sr.url.empty())
             out.push_back(std::move(sr));
     }
@@ -471,10 +490,7 @@ static std::vector<SearchResult> parse_zai_results(const nlohmann::json& j,
         sr.title = r.value("title", "");
         sr.url   = r.value("link", "");
         sr.snippet = r.value("content", "");
-        if (sr.snippet.size() > 400) {
-            sr.snippet.resize(400);
-            sr.snippet += "…";
-        }
+        cap_snippet(sr.snippet);
         if (!sr.title.empty() || !sr.url.empty())
             out.push_back(std::move(sr));
     }
@@ -744,18 +760,9 @@ public:
         if (results.empty())
             return {true, "(no results)", ""};
 
-        nlohmann::json arr = nlohmann::json::array();
-        for (auto& r : results) {
-            arr.push_back({
-                {"title",   r.title},
-                {"url",     r.url},
-                {"snippet", r.snippet}
-            });
-        }
-
-        std::string out = arr.dump(2);
+        std::string out = results_to_json(results).dump(2);
         if (out.size() > MAX_OUTPUT) {
-            out.resize(MAX_OUTPUT);
+            out = util::truncate_utf8(out, MAX_OUTPUT);
             out += "\n[output truncated]";
         }
         return {true, out, ""};
@@ -836,7 +843,7 @@ public:
 
         bool text_truncated = false;
         if ((int)text.size() > max_chars) {
-            text.resize(max_chars);
+            text = util::truncate_utf8(text, max_chars);
             text_truncated = true;
         }
 
@@ -847,7 +854,7 @@ public:
         };
         std::string dumped = out.dump(2);
         if (dumped.size() > MAX_OUTPUT) {
-            dumped.resize(MAX_OUTPUT);
+            dumped = util::truncate_utf8(dumped, MAX_OUTPUT);
             dumped += "\n[output truncated]";
         }
         return {true, dumped, ""};
@@ -860,6 +867,13 @@ private:
 // ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
+
+nlohmann::json parse_search_api_results(const std::string& engine,
+                                        const nlohmann::json& response,
+                                        int max_results) {
+    return results_to_json(engine == "exa" ? parse_exa_results(response, max_results)
+                                           : parse_zai_results(response, max_results));
+}
 
 void register_web_tools(ToolRegistry& registry) {
     registry.register_tool(std::make_shared<WebSearchTool>());
