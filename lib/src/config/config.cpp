@@ -83,6 +83,22 @@ std::string find_project_instructions_file(const std::string& project_dir,
     return found;
 }
 
+std::string project_instructions_write_target(const std::string& project_dir) {
+    std::string agents_path = find_project_instructions_file(project_dir,
+                                                             kAgentsMdFilename);
+    std::string claude_path = find_project_instructions_file(project_dir,
+                                                             kClaudeMdFilename);
+    // Same content test as load_with_layers: an empty or unreadable
+    // agents.md falls through to claude.md.
+    if (!agents_path.empty() && !read_file(agents_path).empty())
+        return agents_path;
+    if (!claude_path.empty() && !read_file(claude_path).empty())
+        return claude_path;
+    if (!agents_path.empty()) return agents_path;
+    if (!claude_path.empty()) return claude_path;
+    return project_dir + "/" + kAgentsMdFilename;
+}
+
 AppConfig load_with_layers(const ConfigLayer& global_layer,
                            const std::string& project_dir,
                            ProjectTrust* trust_state) {
