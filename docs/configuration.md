@@ -206,7 +206,7 @@ seconds.
 | `default_mode` | both | `"plan"` | Initial mode for new sessions: `plan`, `build`, `chat`. |
 | `agent` / `agents` | project (gated) | — | Named agents: `model`, `system_prompt`, `max_steps`, `permissions`, `color`. |
 | `instructions` | both (append) | — | Extra system-prompt text appended per layer. |
-| `agents.md` | file, not JSON | — | `<project>/agents.md` (or `claude.md` fallback, case-insensitive) is read verbatim into the system prompt. |
+| `agents.md` | file, not JSON | — | `<project>/agents.md` (or `claude.md` fallback, case-insensitive) is read verbatim into the system prompt. The `write_agents_md` tool updates whichever of the two is loaded (it never creates `agents.md` beside a populated `claude.md`). |
 | `thinking_display` | global | `"off"` | `off`, `on`, or `on_while_thinking` for reasoning blocks in the chat view. |
 | `vision_fallback` | global | — | `{"provider": "…", "model": "…"}` — a vision-capable model used to describe images for text-only primaries. |
 | `trusted_projects` | global (app-owned) | — | Fingerprint map written by the trust prompt. |

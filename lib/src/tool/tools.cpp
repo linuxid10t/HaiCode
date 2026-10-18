@@ -465,17 +465,166 @@ public:
 
 // ---- GlobTool ----
 
+// Recursive ("globstar") expansion for patterns with a `**` segment, which
+// POSIX glob() reads as a plain `*` — `src/**/*.cpp` silently matched only
+// src/<one dir>/*.cpp. A whole `**` segment matches zero or more directories
+// (bash globstar semantics); `**` inside a segment stays a plain `*`.
+// Like glob(): leading dots must be matched explicitly (FNM_PERIOD), and `**`
+// never enters hidden directories (keeps recursion out of .git). Below the
+// pattern's literal prefix NO segment descends through a symlinked
+// directory: the permission gate resolves only that prefix (glob_base_dir),
+// so following a deeper link could read outside the checked tree — and
+// skipping links also rules out link loops.
+// Results are sorted and unique. Stops at kGlobMaxVisits directory entries
+// (`*stopped` set) so `/**/x` can't walk the whole volume.
+static const size_t kGlobMaxVisits = 200000;
+
+namespace {
+struct GlobstarWalk {
+    std::vector<std::string> segs;
+    std::set<std::string> out;
+    size_t visits = 0;
+    bool stopped = false;
+    const std::atomic<bool>* interrupt = nullptr;
+
+    static std::string join(const std::string& dir, const std::string& name) {
+        if (dir == "/") return "/" + name;
+        return dir + "/" + name;
+    }
+    static bool has_magic(const std::string& seg) {
+        return seg.find_first_of("*?[\\") != std::string::npos;
+    }
+    // Following symlinks: only for the start directory (the literal prefix
+    // the gate already resolved).
+    static bool is_dir(const std::string& path) {
+        struct stat st;
+        return ::stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+    // A real (non-symlink) directory: the only kind the walk descends into.
+    static bool is_real_dir(const std::string& path) {
+        struct stat st;
+        return ::lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+    }
+    bool halted() {
+        if (interrupt && interrupt->load()) stopped = true;
+        return stopped;
+    }
+    // Directory entries minus . and .., counted against the visit budget.
+    std::vector<std::string> list(const std::string& dir) {
+        std::vector<std::string> names;
+        DIR* d = opendir(dir.c_str());
+        if (!d) return names;
+        struct dirent* ent;
+        while ((ent = readdir(d)) != nullptr) {
+            if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+                continue;
+            if (++visits > kGlobMaxVisits) { stopped = true; break; }
+            names.push_back(ent->d_name);
+        }
+        closedir(d);
+        return names;
+    }
+
+    void walk(const std::string& dir, size_t i) {
+        if (halted()) return;
+        const std::string& seg = segs[i];
+        const bool last = i + 1 == segs.size();
+        if (seg == "**") {
+            // Zero directories: the rest of the pattern applies right here.
+            // A trailing `**` matches everything below `dir` instead.
+            if (!last) walk(dir, i + 1);
+            for (const auto& name : list(dir)) {
+                if (halted()) return;
+                if (name[0] == '.') continue;
+                std::string path = join(dir, name);
+                if (last) out.insert(path);
+                if (is_real_dir(path)) walk(path, i);  // one more directory
+            }
+            return;
+        }
+        if (!has_magic(seg)) {
+            std::string path = join(dir, seg);
+            struct stat st;
+            if (::lstat(path.c_str(), &st) != 0) return;
+            if (last) out.insert(path);
+            else if (is_real_dir(path)) walk(path, i + 1);
+            return;
+        }
+        for (const auto& name : list(dir)) {
+            if (halted()) return;
+            if (fnmatch(seg.c_str(), name.c_str(), FNM_PERIOD) != 0) continue;
+            std::string path = join(dir, name);
+            if (last) out.insert(path);
+            else if (is_real_dir(path)) walk(path, i + 1);
+        }
+    }
+};
+}  // namespace
+
+static bool pattern_has_globstar(const std::string& pattern) {
+    size_t pos = 0;
+    while ((pos = pattern.find("**", pos)) != std::string::npos) {
+        bool starts = pos == 0 || pattern[pos - 1] == '/';
+        bool ends = pos + 2 == pattern.size() || pattern[pos + 2] == '/';
+        if (starts && ends) return true;
+        pos += 2;
+    }
+    return false;
+}
+
+// Expand `full_pattern` (absolute, or relative to the cwd) with globstar
+// semantics. The leading run of wildcard-free segments is the start
+// directory; the walk matches the rest.
+static std::vector<std::string> globstar_expand(const std::string& full_pattern,
+                                                const std::atomic<bool>* interrupt,
+                                                bool* stopped) {
+    GlobstarWalk w;
+    w.interrupt = interrupt;
+    std::string root = full_pattern[0] == '/' ? "/" : "";
+    std::vector<std::string> segs;
+    size_t pos = 0;
+    while (pos <= full_pattern.size()) {
+        size_t slash = full_pattern.find('/', pos);
+        if (slash == std::string::npos) slash = full_pattern.size();
+        std::string seg = full_pattern.substr(pos, slash - pos);
+        if (!seg.empty()) segs.push_back(seg);
+        pos = slash + 1;
+    }
+    // Collapse `**/**` runs — same match set, exponentially less walking.
+    for (const auto& seg : segs) {
+        if (seg == "**" && !w.segs.empty() && w.segs.back() == "**") continue;
+        w.segs.push_back(seg);
+    }
+    size_t first_magic = 0;
+    while (first_magic < w.segs.size()
+           && !GlobstarWalk::has_magic(w.segs[first_magic]))
+        ++first_magic;
+    std::string start = root;
+    for (size_t i = 0; i < first_magic; ++i)
+        start = start.empty() ? w.segs[i] : GlobstarWalk::join(start, w.segs[i]);
+    if (start.empty()) start = ".";
+    w.segs.erase(w.segs.begin(), w.segs.begin() + first_magic);
+    if (!w.segs.empty() && GlobstarWalk::is_dir(start))
+        w.walk(start, 0);
+    *stopped = w.stopped;
+    return {w.out.begin(), w.out.end()};
+}
+
 class GlobTool : public Tool {
 public:
     std::string name() const override { return "glob"; }
     std::string description() const override {
-        return "Find files matching a glob pattern. Note: '**' recursive matching is not supported; use grep or bash find for recursive searches.";
+        return "Find files and directories whose paths match a glob pattern. "
+               "A `**` path segment matches zero or more directories, so "
+               "'**/*.cpp' finds .cpp files at any depth (`**` skips hidden "
+               "directories, and `**` patterns do not descend through "
+               "symlinked directories). Results are full paths, sorted.";
     }
     nlohmann::json input_schema() const override {
         return {
             {"type", "object"},
             {"properties", {
-                {"pattern", {{"type", "string"}, {"description", "POSIX glob pattern (e.g. '*.cpp', 'src/*.h'). Patterns starting with '/' are treated as absolute. NOTE: '**' recursive matching is NOT supported — use grep or `bash find` for recursive searches."}}},
+                {"pattern", {{"type", "string"}, {"description", "Glob pattern (e.g. '*.cpp', 'src/*.h', 'lib/**/*.cpp', '**/CMakeLists.txt'). `*`, `?`, and `[...]` match within one path segment; a whole `**` segment matches any number of directories. Patterns starting with '/' are treated as absolute."}}},
                 {"path",    {{"type", "string"}, {"description", "Base directory to search. Default: the project directory."}}}
             }},
             {"required", nlohmann::json::array({"pattern"})}
@@ -505,27 +654,39 @@ public:
             full_pattern = base + "/" + pattern;
         }
 
-        glob_t g{};
-        // No GLOB_MARK to avoid trailing slash confusion
-        int rc = glob(full_pattern.c_str(), GLOB_TILDE, nullptr, &g);
+        std::vector<std::string> matches;
+        bool stopped = false;
+        if (pattern_has_globstar(full_pattern)) {
+            matches = globstar_expand(full_pattern, ctx.interrupt, &stopped);
+            if (ctx.interrupt && ctx.interrupt->load())
+                return {false, "", "Glob interrupted"};
+        } else {
+            glob_t g{};
+            // No GLOB_MARK to avoid trailing slash confusion
+            int rc = glob(full_pattern.c_str(), GLOB_TILDE, nullptr, &g);
+            if (rc == 0)
+                matches.assign(g.gl_pathv, g.gl_pathv + g.gl_pathc);
+            // globfree is always safe to call regardless of rc
+            globfree(&g);
+            if (rc != 0 && rc != GLOB_NOMATCH)
+                return {false, "", "Glob error (code " + std::to_string(rc) + ")"};
+        }
 
         std::string output;
-        if (rc == 0) {
-            for (size_t i = 0; i < g.gl_pathc; i++) {
-                output += g.gl_pathv[i];
-                output += '\n';
-                if (output.size() >= MAX_OUTPUT) {
-                    output.resize(MAX_OUTPUT);
-                    output += "\n[output truncated]";
-                    break;
-                }
+        for (const auto& m : matches) {
+            output += m;
+            output += '\n';
+            if (output.size() >= MAX_OUTPUT) {
+                output.resize(MAX_OUTPUT);
+                output += "\n[output truncated]";
+                break;
             }
         }
-        // globfree is always safe to call regardless of rc
-        globfree(&g);
-
-        if (rc != 0 && rc != GLOB_NOMATCH)
-            return {false, "", "Glob error (code " + std::to_string(rc) + ")"};
+        if (stopped) {
+            if (!output.empty() && output.back() != '\n') output += '\n';
+            output += "[glob stopped after visiting " + std::to_string(kGlobMaxVisits)
+                    + " directory entries — results are partial; narrow the pattern]";
+        }
 
         return {true, output.empty() ? "(no matches)" : output, ""};
     }
@@ -1019,11 +1180,14 @@ class WriteAgentsMdTool : public Tool {
 public:
     std::string name() const override { return "write_agents_md"; }
     std::string description() const override {
-        return "Create or overwrite agents.md in the project root. "
-               "agents.md is appended verbatim to HaiCode's system prompt for "
-               "every session in this project — use it to record the project "
-               "description, build/run commands, and coding conventions so "
-               "future sessions start with full context. "
+        return "Create or overwrite the project instructions file in the "
+               "project root: agents.md, or the project's existing claude.md "
+               "when that is the file HaiCode loads (it is updated in place, "
+               "never shadowed by a new agents.md). The file is appended "
+               "verbatim to HaiCode's system prompt for every session in this "
+               "project — use it to record the project description, build/run "
+               "commands, and coding conventions so future sessions start with "
+               "full context. Content replaces the whole file. "
                "The file takes effect starting from the next session.";
     }
     nlohmann::json input_schema() const override {
@@ -1033,7 +1197,7 @@ public:
                 {"content", {
                     {"type", "string"},
                     {"description",
-                     "Full markdown content for agents.md. Should include at "
+                     "Full markdown content for the instructions file. Should include at "
                      "minimum: a # Project section (what the project is), a "
                      "# Build & run section (how to build, test, run), and a "
                      "# Conventions section (style, naming, workflow rules)."}
@@ -1045,13 +1209,8 @@ public:
     std::string required_permission() const override { return "write"; }
     std::string resource(const nlohmann::json& /*input*/,
                          const ToolContext& ctx) const override {
-        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
-        while (!base.empty() && base.back() == '/') base.pop_back();
-        // Mirror execute(): an existing case variant (AGENTS.md) is the
-        // real destination.
-        std::string existing = find_project_instructions_file(base,
-                                                              kAgentsMdFilename);
-        return existing.empty() ? base + "/" + kAgentsMdFilename : existing;
+        // Mirror execute() so the gate sees the file actually written.
+        return target_path(ctx);
     }
 
     ToolResult execute(const nlohmann::json& input,
@@ -1060,27 +1219,31 @@ public:
         if (content.empty())
             return {false, "", "write_agents_md: content must not be empty."};
 
-        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
-        while (!base.empty() && base.back() == '/') base.pop_back();
-        // Update an existing case variant in place (AGENTS.md stays
-        // AGENTS.md); create agents.md only when no variant exists, so the
-        // write never shadows the file the loader actually reads.
-        std::string path = find_project_instructions_file(base,
-                                                          kAgentsMdFilename);
-        if (path.empty())
-            path = base + "/" + kAgentsMdFilename;
+        // Update the file the loader reads in place (AGENTS.md stays
+        // AGENTS.md, a populated CLAUDE.md stays CLAUDE.md); create agents.md
+        // only when no instructions file exists, so the write never shadows
+        // the file the loader actually reads.
+        std::string path = target_path(ctx);
 
         std::string err = util::atomic_write_file(path, content);
         if (!err.empty())
             return {false, "", err};
 
+        std::string file = path.substr(path.rfind('/') + 1);
         nlohmann::json out = {
             {"path",          path},
             {"bytes_written", static_cast<int>(content.size())},
-            {"note", "agents.md written. It will be included in the system "
+            {"note", file + " written. It will be included in the system "
                      "prompt starting from the next session."}
         };
         return {true, out.dump(2), ""};
+    }
+
+private:
+    static std::string target_path(const ToolContext& ctx) {
+        std::string base = ctx.working_dir.empty() ? "." : ctx.working_dir;
+        while (!base.empty() && base.back() == '/') base.pop_back();
+        return project_instructions_write_target(base);
     }
 };
 

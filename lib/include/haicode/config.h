@@ -255,6 +255,14 @@ AppConfig load_with_layers(const ConfigLayer& global_layer,
 std::string find_project_instructions_file(const std::string& project_dir,
                                            const char* base_name);
 
+// Where write_agents_md writes: the instructions file load_with_layers
+// reads (agents.md when it has content, else claude.md when IT has content),
+// else an existing empty agents.md, else an existing empty claude.md, else a
+// new <project_dir>/agents.md. Writing anywhere else would either be ignored
+// or — a new agents.md beside a populated claude.md — silently stop the
+// loader reading the hand-maintained file.
+std::string project_instructions_write_target(const std::string& project_dir);
+
 // One configurable permission source (global or project file), kept
 // un-merged so the policy editor can show and edit each independently.
 struct PermissionPolicyDocument {
