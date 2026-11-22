@@ -270,7 +270,7 @@ Switching to Build mode. You may now use bash, write, edit, and external_termina
 // Mirrors the Plan notice so the model has an explicit signal in the chat
 // history rather than relying on the system-prompt change alone.
 constexpr const char* kSwitchedToChatMessage = R"HPCODE(
-Switching to Chat mode. From here on this is conversation and online research only — you have no access to local files, the shell, or the codebase. Your only tools are web_search, web_extract, todo_write, and ask_user.
+Switching to Chat mode. From here on this is conversation and online research only — you have no access to local files, the shell, or the codebase. Your only tools are web_search, web_extract, todo_write, ask_user, and date_time.
 )HPCODE";
 
 }  // namespace haicode

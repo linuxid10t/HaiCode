@@ -1,5 +1,6 @@
 #include <haicode/haicode.h>
 #include <haicode/tool.h>
+#include <haicode/default_prompt.h>
 #include "test_check.h"
 #include <ctime>
 #include <cstdlib>
@@ -137,6 +138,19 @@ int main() {
                 TEST_REQUIRE(asked == (effect == PermissionEffect::Ask), "Ask routes to approval");
             }
         }
+    }
+    // Drift guard: every Chat-allowed tool must appear in BOTH Chat prompt
+    // strings that enumerate the toolset. kSwitchedToChatMessage once
+    // omitted date_time while kChatModeInstructions listed it, so a
+    // mid-conversation switch fed the model two conflicting lists.
+    for (const auto& definition : registry.definitions()) {
+        if (!tool_allowed_in_mode(definition.name, SessionMode::Chat)) continue;
+        TEST_REQUIRE(std::string(kChatModeInstructions).find(definition.name)
+            != std::string::npos, "kChatModeInstructions lists Chat tool "
+            + definition.name);
+        TEST_REQUIRE(std::string(kSwitchedToChatMessage).find(definition.name)
+            != std::string::npos, "kSwitchedToChatMessage lists Chat tool "
+            + definition.name);
     }
     std::cout << "[OK] date_time registration, output, availability, and permissions\n";
     return 0;
