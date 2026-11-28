@@ -14,6 +14,8 @@
 #include <View.h>
 #include <TextView.h>
 #include <ScrollView.h>
+#include <ScrollBar.h>
+#include <ctime>
 #include <Button.h>
 #include <MenuBar.h>
 #include <Menu.h>
@@ -49,6 +51,7 @@
 #include <haicode/default_prompt.h>
 #include <haicode/model_info.h>
 #include <haicode/pricing.h>
+#include <haicode/session_groups.h>
 #include <haicode/skills.h>
 #include <haicode/tool.h>
 #include <haicode/util.h>
@@ -67,6 +70,7 @@
 #include <climits>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <functional>
 #include <fstream>
@@ -76,6 +80,9 @@ using json = nlohmann::json;
 
 // 120ms activity-glyph tick, posted to SessionListView by BMessageRunner.
 constexpr uint32 kMsgSpinnerTick = 'spnt';
+
+static bool session_is_chat_only(const haicode::SessionInfo& si);
+static std::string session_display_title(const haicode::SessionInfo& si);
 
 // ---------------------------------------------------------------------------
 // PermissionMenu — prompt-row permission popup anchored to the field border
@@ -122,6 +129,9 @@ protected:
 
 class SessionListView : public BListView {
 public:
+    // How session rows are split into sections.
+    enum class Grouping { ByDay, ByProject };
+
     explicit SessionListView(haicode::SessionStore& store)
         : BListView("session_list", B_SINGLE_SELECTION_LIST), store_(store)
     {
@@ -147,10 +157,9 @@ public:
     // settings changes via MainWindow::SetEngine.
     void SetEngine(haicode::SessionEngine* engine) { engine_ = engine; }
 
-    // Called synchronously after an in-place reorder so MainWindow can
-    // resync its index-parallel session_ids_/session_labels_ vectors within
-    // the same looper turn — a posted message would leave a window where a
-    // click maps CurrentSelection() through a stale session_ids_.
+    // Resync MainWindow's index-parallel vectors before returning to the
+    // looper after a background rebuild. A posted message would leave
+    // queued input using indices from the old layout.
     void SetReorderNotify(std::function<void()> cb) { reorder_notify_ = std::move(cb); }
 
     void AttachedToWindow() override
@@ -173,30 +182,123 @@ public:
         BListView::MessageReceived(msg);
     }
 
+    status_t Invoke(BMessage* message = nullptr) override
+    {
+        return restoring_selection_ ? B_OK : BListView::Invoke(message);
+    }
+
+    // ---- Grouping + search ----
+
+    void SetGrouping(Grouping g) { grouping_ = g; }
+    Grouping GetGrouping() const { return grouping_; }
+
+    // Substring filter over title / directory / id, case-insensitive. Empty
+    // shows everything. Returns true when the filter changed.
+    bool SetQuery(const std::string& text)
+    {
+        if (query_ == text) return false;
+        query_ = text;
+        return true;
+    }
+    const std::string& Query() const { return query_; }
+
+    // The newest full row set handed to the view (before filtering). Kept so
+    // a query/grouping change can rebuild without another store round trip.
+    const std::vector<haicode::SessionInfo>& Sessions() const { return sessions_; }
+
     // Swap in a rebuilt row set (MainWindow::_RefreshSessionList). Running
     // flags carry over by session id so a rebuild — a rename lands right as
     // a session's first turn starts — never blanks a spinner; a fresh poll
     // then corrects them. The old rows are deleted (MakeEmpty alone leaks
-    // them).
-    void ReplaceItems(const std::vector<SessionListItem*>& items)
+    // them). Sections are emitted per the current grouping.
+    void ReplaceItems(const std::vector<haicode::SessionInfo>& sessions)
     {
-        std::set<std::string> was_running;
-        std::vector<BListItem*> old;
+        sessions_ = sessions;
+        _RebuildRows();
+    }
+
+    // Re-emit rows from the kept set (after a query or grouping change).
+    void RebuildRows() { _RebuildRows(); }
+
+    // Session id of the row at `idx`, or null for a section header / out of
+    // range, independent of MainWindow's index-parallel vectors.
+    const std::string* SessionAt(int32 idx) const
+    {
+        auto* item = idx >= 0 ? dynamic_cast<SessionListItem*>(ItemAt(idx)) : nullptr;
+        return item ? &item->SessionId() : nullptr;
+    }
+
+    bool IsSection(int32 idx) const
+    {
+        return idx >= 0 && dynamic_cast<SessionSectionItem*>(ItemAt(idx)) != nullptr;
+    }
+
+    // Index of the row for `session_id`, or -1.
+    int32 IndexOfSession(const std::string& session_id) const
+    {
         for (int32 i = 0; i < CountItems(); ++i) {
-            old.push_back(ItemAt(i));
             auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (item && item->IsRunning()) was_running.insert(item->SessionId());
+            if (item && item->SessionId() == session_id) return i;
         }
-        MakeEmpty();
-        for (BListItem* item : old) delete item;
-        for (SessionListItem* item : items) {
-            if (was_running.count(item->SessionId()) > 0) {
-                item->SetRunning(true);
-                item->SetSpinnerFrame(spinner_frame_);
+        return -1;
+    }
+
+    // Handle pointer selection here: BListView's single-selection drag
+    // path can temporarily select even a disabled item.
+    void MouseDown(BPoint where) override
+    {
+        tracking_selection_ = false;
+        int32 idx = IndexOf(where);
+        const auto* id = SessionAt(idx);
+        if (!id) return;
+
+        int32 buttons = 0;
+        Window()->CurrentMessage()->FindInt32("buttons", &buttons);
+        if (buttons & B_SECONDARY_MOUSE_BUTTON) {
+            BMessage* del_msg = new BMessage(MSG_DELETE_SESSION);
+            del_msg->AddString("session_id", id->c_str());
+            Select(idx);
+
+            BPopUpMenu menu("session_ctx", false, false);
+            menu.AddItem(new BMenuItem("Delete Session", del_msg));
+            menu.SetTargetForItems(BMessenger(Window()));
+            ConvertToScreen(&where);
+            menu.Go(where, true, true, false);
+        } else if (buttons & B_PRIMARY_MOUSE_BUTTON) {
+            MakeFocus();
+            tracking_selection_ = SetMouseEventMask(B_POINTER_EVENTS,
+                B_NO_POINTER_HISTORY) == B_OK;
+            Select(idx);
+        }
+    }
+
+    void MouseUp(BPoint where) override
+    {
+        if (!tracking_selection_) return;
+        tracking_selection_ = false;
+        if (!Bounds().Contains(where)) return;
+        int32 idx = IndexOf(where);
+        if (SessionAt(idx)) Select(idx);
+    }
+
+    // Keyboard navigation must step over headers too: arrow keys would
+    // otherwise land on an unselectable row and silently lose the selection.
+    void KeyDown(const char* bytes, int32 numBytes) override
+    {
+        if (numBytes == 1 && (bytes[0] == B_UP_ARROW || bytes[0] == B_DOWN_ARROW)) {
+            int32 cur = CurrentSelection();
+            int dir = bytes[0] == B_UP_ARROW ? -1 : 1;
+            int32 next = cur < 0 ? (dir > 0 ? 0 : CountItems() - 1) : cur + dir;
+            while (next >= 0 && next < CountItems() && IsSection(next))
+                next += dir;
+            if (next >= 0 && next < CountItems()) {
+                Select(next, false);
+                ScrollToSelection();
+                return;
             }
-            AddItem(item);
+            return;
         }
-        SyncRunning();
+        BListView::KeyDown(bytes, numBytes);
     }
 
     // Re-read which sessions are running: every window pulse (500 ms) and
@@ -235,9 +337,8 @@ public:
             _SyncModifiedTimes(now);
     }
 
-    void MouseMoved(BPoint where, uint32 transit, const BMessage* dragMessage) override
+    void MouseMoved(BPoint where, uint32 transit, const BMessage*) override
     {
-        BListView::MouseMoved(where, transit, dragMessage);
         auto* item = transit == B_EXITED_VIEW ? nullptr
             : dynamic_cast<SessionListItem*>(ItemAt(IndexOf(where)));
         SetToolTip(item ? item->DetailLabel().c_str() : nullptr);
@@ -248,38 +349,14 @@ public:
     // selection under the user).
     void SetChatOnly(const std::string& session_id, bool chat_only)
     {
-        for (int32 i = 0; i < CountItems(); ++i) {
-            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item || item->SessionId() != session_id) continue;
+        int32 idx = IndexOfSession(session_id);
+        if (idx >= 0) {
+            auto* item = static_cast<SessionListItem*>(ItemAt(idx));
             if (item->SetChatOnly(chat_only))
-                InvalidateItem(i);
-            return;
+                InvalidateItem(idx);
         }
     }
 
-    void MouseDown(BPoint where) override
-    {
-        int32 buttons = 0;
-        if (Window()->CurrentMessage()->FindInt32("buttons", &buttons) == B_OK
-            && (buttons & B_SECONDARY_MOUSE_BUTTON))
-        {
-            // Right-click: select the item under the cursor first
-            int32 idx = IndexOf(where);
-            if (idx >= 0) Select(idx);
-
-            BPopUpMenu* menu = new BPopUpMenu("session_ctx", false, false);
-            BMessage* del_msg = new BMessage(MSG_DELETE_SESSION);
-            del_msg->AddInt32("index", idx >= 0 ? idx : CurrentSelection());
-            menu->AddItem(new BMenuItem("Delete Session", del_msg));
-            menu->SetTargetForItems(BMessenger(Window()));
-
-            ConvertToScreen(&where);
-            menu->Go(where, true, true, false);   // async=false: block until dismissed
-            delete menu;                          // safe now — tracking is done
-        } else {
-            BListView::MouseDown(where);
-        }
-    }
 
 private:
     void _Spin()
@@ -322,89 +399,227 @@ private:
         Invalidate(frame);
     }
 
-    // One non-blocking query for every row's time_updated (rows are the
-    // store's newest sessions, so list()'s order and limit cover them). A
-    // busy connection or a failed read retries on the next pulse. Rows then
-    // re-sort in place by the fresh times — newest first — so a session you
-    // work in bubbles to the top without a full rebuild (which would reset
-    // scroll and flash every row). Membership changes (a session created or
-    // deleted elsewhere) are NOT handled here; those go through
-    // _RefreshSessionList.
-    void _SyncModifiedTimes(bigtime_t now)
+    // Poll timestamps without waiting on the store. Keep the working set in
+    // store order; a membership change belongs to _RefreshSessionList.
+    bool _ReadModifiedTimes(bool& changed)
     {
         std::vector<std::pair<std::string, int64_t>> times;
+        if (!store_.try_update_times(times,
+                std::max<int32>(50, int32(sessions_.size()) + 1)))
+            return false;
+        if (times.size() != sessions_.size()) return true;
+
+        std::map<std::string, int64_t> by_id(times.begin(), times.end());
+        for (const auto& si : sessions_) {
+            if (!by_id.count(si.id)) return true;
+        }
+        for (auto& si : sessions_) {
+            int64_t time = by_id.at(si.id);
+            if (si.time_updated != time) {
+                si.time_updated = time;
+                changed = true;
+            }
+        }
+        if (changed) {
+            std::sort(sessions_.begin(), sessions_.end(),
+                [](const haicode::SessionInfo& a, const haicode::SessionInfo& b) {
+                    if (a.time_updated != b.time_updated)
+                        return a.time_updated > b.time_updated;
+                    return a.id > b.id;
+                });
+        }
+        return true;
+    }
+
+    static int64_t _LocalDay(int64_t now_ms)
+    {
+        time_t seconds = now_ms / 1000;
+        tm local{};
+        return localtime_r(&seconds, &local)
+            ? int64_t(local.tm_year) * 366 + local.tm_yday
+            : now_ms / 86400000;
+    }
+
+    void _SyncModifiedTimes(bigtime_t now)
+    {
+        bool changed = false;
+        bool read_finished = true;
         try {
-            if (!store_.try_update_times(times, std::max<int32>(50, CountItems())))
-                return;
+            read_finished = _ReadModifiedTimes(changed);
         } catch (const std::exception& e) {
             fprintf(stderr, "haicode: sidebar refresh: %s\n", e.what());
+        }
+        if (read_finished) {
             last_times_refresh_ = now;
-            return;
+            times_due_ = false;
         }
-        std::map<std::string, int64_t> by_id(times.begin(), times.end());
-        // Sort only when membership is unchanged: every row present in the
-        // fresh data and no extra ids (a session created or deleted since
-        // the last rebuild goes through _RefreshSessionList instead).
-        bool ids_match = by_id.size() == (size_t)CountItems();
-        for (int32 i = 0; ids_match && i < CountItems(); ++i) {
-            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item) { ids_match = false; break; }
-            auto it = by_id.find(item->SessionId());
-            if (it == by_id.end()) { ids_match = false; break; }
-            if (item->SetModifiedTime(it->second))
-                InvalidateItem(i);
+
+        const int64_t now_ms = haicode::util::now_ms();
+        const bool by_day = grouping_ == Grouping::ByDay;
+        const int64_t day = by_day ? _LocalDay(now_ms) : projected_day_;
+        if (!changed && day == projected_day_) return;
+
+        // Compare the visible rows, not the full set: a timestamp change
+        // outside the filter should not redraw or move anything on screen.
+        auto sections = _ProjectSections(now_ms);
+        projected_day_ = day;
+        if (_ProjectedOrderDiffers(sections)) {
+            _RebuildRows(sections, true);
+            if (reorder_notify_) reorder_notify_();
+        } else if (changed) {
+            int32 row = 0;
+            for (const auto& section : sections) {
+                ++row; // header
+                for (const auto* si : section.members) {
+                    auto* item = static_cast<SessionListItem*>(ItemAt(row));
+                    if (item->SetModifiedTime(si->time_updated)) InvalidateItem(row);
+                    ++row;
+                }
+            }
         }
-        if (ids_match && _SortByModifiedTime() && reorder_notify_)
-            reorder_notify_();
-        last_times_refresh_ = now;
-        times_due_ = false;
     }
 
-    // SortItems comparison: time_updated descending, session id descending
-    // as the tie-break (matching the store's ORDER BY, so an in-place sort
-    // and a full rebuild always agree). SortItems is stable only through
-    // this total order, never qsort's own.
-    static int _CompareByModified(const void* a, const void* b)
+    struct Section {
+        std::string key;
+        std::string label;
+        std::vector<const haicode::SessionInfo*> members;
+    };
+
+    std::vector<Section> _ProjectSections(int64_t now_ms) const
     {
-        auto* left = static_cast<SessionListItem*>(
-            *static_cast<BListItem* const*>(a));
-        auto* right = static_cast<SessionListItem*>(
-            *static_cast<BListItem* const*>(b));
-        if (left->ModifiedTime() != right->ModifiedTime())
-            return left->ModifiedTime() > right->ModifiedTime() ? -1 : 1;
-        if (left->SessionId() != right->SessionId())
-            return left->SessionId() > right->SessionId() ? -1 : 1;
-        return 0;
+        std::string lowered = query_;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char c) { return (char)std::tolower(c); });
+        std::vector<Section> sections;
+        std::map<std::string, size_t> section_index;
+        // The store is newest-first: first encounter orders the sections,
+        // and append order keeps each section's members newest-first.
+        for (const auto& si : sessions_) {
+            if (!_matches_query(si, lowered)) continue;
+            auto [key, label] = _section_for(si, now_ms);
+            auto [it, inserted] = section_index.try_emplace(key, sections.size());
+            if (inserted)
+                sections.push_back({std::move(key), std::move(label), {}});
+            sections[it->second].members.push_back(&si);
+        }
+        return sections;
     }
 
-    // Returns whether the row order changed. SortItems keeps each item's
-    // selected flag with the item and rescans selection indices, so the
-    // selection follows its row and no Select() echo is produced.
-    bool _SortByModifiedTime()
+    bool _ProjectedOrderDiffers(const std::vector<Section>& sections) const
     {
-        std::vector<std::string> before;
+        int32 row = 0;
+        for (const auto& section : sections) {
+            auto* header = dynamic_cast<SessionSectionItem*>(ItemAt(row++));
+            if (!header || header->Key() != section.key) return true;
+            for (const auto* si : section.members) {
+                const auto* id = SessionAt(row++);
+                if (!id || *id != si->id) return true;
+            }
+        }
+        return row != CountItems();
+    }
+
+    // ---- Row construction ----
+
+    static bool _matches_query(const haicode::SessionInfo& si,
+                               const std::string& lowered)
+    {
+        if (lowered.empty()) return true;
+        auto has = [&](std::string s) {
+            std::transform(s.begin(), s.end(), s.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            return s.find(lowered) != std::string::npos;
+        };
+        return has(si.title) || has(si.directory) || has(si.id);
+    }
+
+    // Section key + display label for a session under the current grouping.
+    std::pair<std::string, std::string> _section_for(
+        const haicode::SessionInfo& si, int64_t now_ms) const
+    {
+        if (grouping_ == Grouping::ByProject) {
+            if (si.directory.empty() || session_is_chat_only(si))
+                return {"", "No project directory"};
+            return {si.directory, si.directory};
+        }
+        haicode::DayBucket b = haicode::session_day_bucket(si.time_updated, now_ms);
+        std::string key(1, char('0' + int(b)));
+        return {key, haicode::day_bucket_label(b)};
+    }
+
+    void _RebuildRows()
+    {
+        const int64_t now_ms = haicode::util::now_ms();
+        if (grouping_ == Grouping::ByDay) projected_day_ = _LocalDay(now_ms);
+        _RebuildRows(_ProjectSections(now_ms), false);
+    }
+
+    void _RebuildRows(const std::vector<Section>& sections, bool preserve_scroll)
+    {
+        const float scroll_y = Bounds().top;
+        std::set<std::string> was_running;
+        std::string selected_id;
+        int32 sel = CurrentSelection();
+        if (auto* item = sel >= 0 ? dynamic_cast<SessionListItem*>(ItemAt(sel)) : nullptr)
+            selected_id = item->SessionId();
         for (int32 i = 0; i < CountItems(); ++i) {
             auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item) return false;
-            before.push_back(item->SessionId());
+            if (item && item->IsRunning()) was_running.insert(item->SessionId());
         }
-        SortItems(_CompareByModified);
-        for (int32 i = 0; i < CountItems(); ++i) {
-            auto* item = dynamic_cast<SessionListItem*>(ItemAt(i));
-            if (!item) return false;
-            if (item->SessionId() != before[size_t(i)]) return true;
+
+        std::vector<BListItem*> items;
+        for (const auto& section : sections) {
+            auto* header = new SessionSectionItem(section.label);
+            header->SetKey(section.key);
+            items.push_back(header);
+            for (const auto* si : section.members) {
+                auto* item = new SessionListItem(session_display_title(*si), si->directory,
+                    si->id, si->time_updated, session_is_chat_only(*si));
+                if (was_running.count(si->id)) {
+                    item->SetRunning(true);
+                    item->SetSpinnerFrame(spinner_frame_);
+                }
+                items.push_back(item);
+            }
         }
-        return false;
+
+        // Re-emit every row: mutating mixed-height rows individually left
+        // BListView's cached geometry stale and clipped session rows.
+        tracking_selection_ = false;
+        std::vector<BListItem*> old;
+        for (int32 i = 0; i < CountItems(); ++i) old.push_back(ItemAt(i));
+        MakeEmpty();
+        for (BListItem* item : old) delete item;
+        for (BListItem* item : items) AddItem(item);
+
+        if (!selected_id.empty()) {
+            int32 idx = IndexOfSession(selected_id);
+            if (idx >= 0) {
+                restoring_selection_ = true;
+                Select(idx);
+                restoring_selection_ = false;
+            }
+        }
+        if (preserve_scroll) {
+            if (auto* scrollbar = ScrollBar(B_VERTICAL)) scrollbar->SetValue(scroll_y);
+        }
+        SyncRunning();
     }
 
     haicode::SessionStore& store_;
     haicode::SessionEngine* engine_ = nullptr;
     std::function<void()> reorder_notify_;
     bigtime_t last_times_refresh_ = 0;
+    int64_t projected_day_ = 0;
     bool times_due_ = false;
+    bool tracking_selection_ = false;
+    bool restoring_selection_ = false;
     int spinner_frame_ = 0;
     float last_width_ = -1;
     std::unique_ptr<BMessageRunner> spinner_runner_;
+    Grouping grouping_ = Grouping::ByDay;
+    std::string query_;
+    std::vector<haicode::SessionInfo> sessions_;
 };
 
 // ---------------------------------------------------------------------------
@@ -594,7 +809,9 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                        haicode::SessionStore& store,
                        const std::string& project_dir,
                        const std::string& default_model,
-                       const std::string& default_provider)
+                       const std::string& default_provider,
+                       const std::string& last_session_id,
+                       bool start_new_session)
     : BWindow(BRect(100, 100, 1100, 750),
               "HaiCode",
               B_TITLED_WINDOW,
@@ -739,6 +956,34 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
                                       0, false, true, B_FANCY_BORDER);
     session_scroll_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNLIMITED));
 
+    // ---- Sidebar search + grouping (above the list) ----
+    // Live substring filter over title / directory / id. The modification
+    // message fires per keystroke; the handler only rebuilds rows from the
+    // set already in hand, so typing never hits the store.
+    session_search_ = new BTextControl("session_search", "Search:", "", nullptr);
+    session_search_->SetModificationMessage(new BMessage(MSG_SESSION_SEARCH));
+    session_search_->SetToolTip("Filter sessions by title, directory, or id");
+    // Group: Day (Today / Yesterday / This week / …) | Project (directory).
+    session_group_menu_ = new BPopUpMenu("session_group");
+    BMessage* day_msg = new BMessage(MSG_SESSION_GROUP);
+    day_msg->AddString("grouping", "day");
+    session_group_menu_->AddItem(new BMenuItem("Day", day_msg));
+    BMessage* proj_msg = new BMessage(MSG_SESSION_GROUP);
+    proj_msg->AddString("grouping", "project");
+    session_group_menu_->AddItem(new BMenuItem("Project", proj_msg));
+    session_group_menu_->SetRadioMode(true);
+    session_group_menu_->ItemAt(1)->SetMarked(true);
+    session_group_menu_->SetTargetForItems(be_app);
+    session_group_field_ = new BMenuField("session_group_field", "Group:",
+        session_group_menu_, true);
+    session_group_field_->ShowPopUpMarker();
+    // Use the bar's content width; any narrower ellipsizes the selected label.
+    auto* group_bar = session_group_field_->MenuBar();
+    group_bar->SetExplicitMinSize(BSize(group_bar->MaxSize().width, B_SIZE_UNSET));
+    session_group_field_->SetExplicitMaxSize(BSize(
+        session_group_field_->PreferredSize().width, B_SIZE_UNSET));
+    session_group_menu_->ItemAt(0)->SetMarked(true);
+
     // ---- ChatView ----
     chat_view_ = new ChatView("chat_view");
     chat_view_->SetBaseDirectory(project_dir_);
@@ -841,10 +1086,17 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
 
     // Sessions tab
     auto* sessions_tab_view = new BView("sessions_tab", B_SUPPORTS_LAYOUT);
-    BLayoutBuilder::Group<>(sessions_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
-        .SetInsets(B_USE_SMALL_INSETS)
-        .Add(session_scroll_)
-    .End();
+    {
+        BLayoutBuilder::Group<>(sessions_tab_view, B_VERTICAL, B_USE_SMALL_SPACING)
+            .SetInsets(B_USE_SMALL_INSETS)
+            .AddGroup(B_HORIZONTAL, B_USE_SMALL_SPACING)
+                .Add(session_search_)
+                .Add(session_group_field_)
+            .End()
+            .Add(session_scroll_)
+        .End();
+        session_search_->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, B_SIZE_UNSET));
+    }
 
     // Inference tab — per-session model/agentic controls.
     inf_max_tokens_  = new BTextControl("max_tokens", "Max tokens:", "", nullptr);
@@ -939,12 +1191,19 @@ MainWindow::MainWindow(haicode::SessionEngine& engine,
     // Todos tab hidden (no badge) until todos arrive; selected on demand.
 
 
-    // Populate session list and open/create initial session
-    _RefreshSessionList();
-    if (!session_ids_.empty()) {
-        _SwitchToSession(0);
-    } else {
+    // Populate session list and open/create initial session.
+    if (start_new_session) {
         _NewSession();
+    } else {
+        _RefreshSessionList();
+        auto* list = static_cast<SessionListView*>(session_list_);
+        int32 row = last_session_id.empty() ? -1 : list->IndexOfSession(last_session_id);
+        if (row < 0 && !list->Sessions().empty())
+            row = list->IndexOfSession(list->Sessions().front().id);
+        if (row >= 0)
+            _SwitchToSession(row);
+        else
+            _NewSession();
     }
 
 }
@@ -1125,23 +1384,20 @@ MainWindow::MessageReceived(BMessage* msg)
             int32 idx = session_list_->CurrentSelection();
             if (idx < 0)
                 msg->FindInt32("index", &idx);
-            if (idx < 0 || idx >= (int32)session_ids_.size())
-                break;
-            if (session_ids_[idx] == active_session_id_)
+            const std::string* sid = _SessionIdAt(idx);
+            if (!sid || *sid == active_session_id_)
                 break;
             _SelectSession(static_cast<int>(idx));
             break;
         }
         case MSG_DELETE_SESSION: {
-            int32 idx = -1;
-            msg->FindInt32("index", &idx);
-            if (idx < 0 || idx >= (int32)session_ids_.size())
+            const char* id = nullptr;
+            if (msg->FindString("session_id", &id) != B_OK || !id || !*id)
                 break;
-            // Stable id captured synchronously — the list index may shift
-            // under asynchronous work; the id cannot.
-            std::string sid = session_ids_[idx];
+            std::string sid(id);
             auto si = store_.get(sid);
-            std::string title = (si && !si->title.empty()) ? si->title
+            if (!si) break;
+            std::string title = !si->title.empty() ? si->title
                 : (sid.size() > 8 ? sid.substr(sid.size() - 8) : sid);
             bool running = engine_ && engine_->is_running(sid);
             BString text;
@@ -1240,6 +1496,15 @@ MainWindow::MessageReceived(BMessage* msg)
                     break;
                 }
             }
+            break;
+        }
+        case MSG_SESSION_SEARCH:
+            _HandleSessionSearch();
+            break;
+        case MSG_SESSION_GROUP_CHANGED: {
+            const char* grouping = nullptr;
+            if (msg->FindString("grouping", &grouping) == B_OK && grouping)
+                _ApplySessionGrouping(grouping);
             break;
         }
         case MSG_PLAN_DECISION:
@@ -1533,49 +1798,86 @@ MainWindow::MessageReceived(BMessage* msg)
 void
 MainWindow::_RefreshSessionList()
 {
-    session_ids_.clear();
-    session_labels_.clear();
-
-    auto sessions = store_.list(50);
-    std::vector<SessionListItem*> items;
-    for (auto& si : sessions) {
-        std::string title = session_display_title(si);
-        session_labels_.push_back(title);
-        items.push_back(new SessionListItem(title, si.directory, si.id,
-            si.time_updated, session_is_chat_only(si)));
-        session_ids_.push_back(si.id);
-    }
-    static_cast<SessionListView*>(session_list_)->ReplaceItems(items);
+    // Uncapped: the sidebar groups and scrolls instead of truncating, so
+    // every stored session is reachable. Section headers are emitted by
+    // the view from the current grouping.
+    haicode::SessionStore::SessionQuery all;
+    static_cast<SessionListView*>(session_list_)->ReplaceItems(
+        store_.list_matching(all));
+    _SyncSessionIdVectors();
     _RefreshSessionBadges();
 }
 
-// SessionListView re-sorted its rows in place (SortItems — nothing removed,
-// selection follows the items). session_ids_/session_labels_ are parallel to
-// the OLD view order; rebuild both from the view's new order so index-based
-// handlers (selection, deletion, badges) keep mapping to the right sessions
-// within this same looper turn.
+// Rebuild session_ids_/session_labels_ parallel to the VIEW's items, so a
+// view index (CurrentSelection, a message's "index") indexes them directly.
+// Section headers occupy their slot with an EMPTY id, so handlers can tell
+// "header" from "session" with one _SessionIdAt(idx) call that returns
+// nullptr for headers and out-of-range.
+void
+MainWindow::_SyncSessionIdVectors()
+{
+    session_ids_.clear();
+    session_labels_.clear();
+    auto* list = static_cast<SessionListView*>(session_list_);
+    for (int32 i = 0; i < list->CountItems(); ++i) {
+        auto* item = dynamic_cast<SessionListItem*>(list->ItemAt(i));
+        session_ids_.push_back(item ? item->SessionId() : std::string());
+        session_labels_.push_back(item ? item->Text() : std::string());
+    }
+}
+
+// Session id for a view index, or nullptr for a section header / no
+// selection / stale index. The one sanctioned view-index -> id mapping.
+const std::string*
+MainWindow::_SessionIdAt(int32 idx) const
+{
+    if (idx < 0 || idx >= (int32)session_ids_.size()) return nullptr;
+    const std::string& sid = session_ids_[size_t(idx)];
+    return sid.empty() ? nullptr : &sid;
+}
+
+// Refresh view-index mappings in the same looper turn as a background rebuild.
 void
 MainWindow::_OnSessionListReordered()
 {
     if (session_ids_.empty()) return;
-    std::map<std::string, std::string> label_by_id;
-    for (size_t i = 0; i < session_ids_.size(); ++i)
-        label_by_id.emplace(session_ids_[i], session_labels_[i]);
-
-    std::vector<std::string> ids;
-    std::vector<std::string> labels;
-    for (int32 i = 0; i < session_list_->CountItems(); ++i) {
-        auto* item = dynamic_cast<SessionListItem*>(session_list_->ItemAt(i));
-        if (!item) return;
-        auto it = label_by_id.find(item->SessionId());
-        if (it == label_by_id.end()) return;
-        ids.push_back(item->SessionId());
-        labels.push_back(it->second);
-    }
-    if (ids.empty()) return;
-    session_ids_ = std::move(ids);
-    session_labels_ = std::move(labels);
+    _SyncSessionIdVectors();
     _RefreshSessionBadges();
+}
+
+void
+MainWindow::_HandleSessionSearch()
+{
+    const char* text = session_search_->Text();
+    auto* list = static_cast<SessionListView*>(session_list_);
+    // Rebuild from the kept full set: filtering never re-queries the store,
+    // so a keystroke is cheap even with hundreds of sessions.
+    if (list->SetQuery(text ? text : ""))
+        list->RebuildRows();
+    _SyncSessionIdVectors();
+    _RefreshSessionBadges();
+}
+
+void
+MainWindow::_ApplySessionGrouping(const std::string& grouping)
+{
+    using G = SessionListView::Grouping;
+    G next = grouping == "project" ? G::ByProject : G::ByDay;
+    auto* list = static_cast<SessionListView*>(session_list_);
+    if (list->GetGrouping() == next) return;
+    list->SetGrouping(next);
+    list->RebuildRows();
+    _SyncSessionIdVectors();
+    _RefreshSessionBadges();
+    // Mirror the menu's mark to whatever be_app persisted (the menu posts to
+    // be_app, so the window never toggles the mark itself).
+    for (int32 i = 0; i < session_group_menu_->CountItems(); ++i) {
+        BMenuItem* item = session_group_menu_->ItemAt(i);
+        const char* v = nullptr;
+        if (item && item->Message()
+                && item->Message()->FindString("grouping", &v) == B_OK && v)
+            item->SetMarked((next == G::ByProject) == (std::string(v) == "project"));
+    }
 }
 
 void
@@ -1647,13 +1949,14 @@ MainWindow::_NewSession()
 void
 MainWindow::_SelectSession(int idx)
 {
-    if (idx < 0 || idx >= (int)session_ids_.size()) return;
+    const std::string* sid = _SessionIdAt(idx);
+    if (!sid) return;
     // Already active: nothing to reload, and any residual programmatic
     // Select() echo becomes a cheap no-op.
-    if (session_ids_[idx] == active_session_id_) return;
+    if (*sid == active_session_id_) return;
 
     _SaveActiveDraft();
-    active_session_id_ = session_ids_[idx];
+    active_session_id_ = *sid;
 
     // Sync be_app's per-session permission flags (the event relay itself is
     // switched by _LoadHistory, right before the transcript load)
@@ -2907,13 +3210,16 @@ void
 MainWindow::_RefreshSessionBadges()
 {
     // Compose "[n] title" for sessions with unresolved approvals so
-    // background requests are visible without switching sessions.
-    for (int i = 0; i < (int)session_ids_.size(); ++i) {
-        BStringItem* item = dynamic_cast<BStringItem*>(
-            session_list_->ItemAt(i));
-        if (!item) continue;
+    // background requests are visible without switching sessions. Section
+    // headers are BStringItems too, so cast to the session row type — a
+    // header must never have its text rewritten to a badge label.
+    for (int32 i = 0; i < session_list_->CountItems(); ++i) {
+        auto* item = dynamic_cast<SessionListItem*>(session_list_->ItemAt(i));
+        if (!item || i >= (int32)session_labels_.size()) continue;
+        // Base title from the pristine vector: Text() may already carry a
+        // badge from a previous pass.
         std::string label = session_labels_[size_t(i)];
-        auto it = perm_pending_sessions_.find(session_ids_[size_t(i)]);
+        auto it = perm_pending_sessions_.find(item->SessionId());
         if (it != perm_pending_sessions_.end() && it->second > 0)
             label = "[" + std::to_string(it->second) + "] " + label;
         item->SetText(label.c_str());

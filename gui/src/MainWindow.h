@@ -44,7 +44,9 @@ public:
                haicode::SessionStore& store,
                const std::string& project_dir,
                const std::string& default_model,
-               const std::string& default_provider);
+               const std::string& default_provider,
+               const std::string& last_session_id = {},
+               bool start_new_session = false);
 
     void MessageReceived(BMessage* msg) override;
     bool QuitRequested() override;
@@ -87,9 +89,19 @@ private:
     void _LoadHistory(const std::string& session_id);
     void _RestoreSessionTotals(const std::string& session_id);
     void _RefreshSessionList();
+    // Rebuild session_ids_/session_labels_ parallel to the view's items.
+    // Section headers occupy their slot with an EMPTY id; resolve a view
+    // index through _SessionIdAt (nullptr for headers / stale indices).
+    void _SyncSessionIdVectors();
+    const std::string* _SessionIdAt(int32 idx) const;
     // Rows were re-sorted in place by SessionListView; resync the
     // index-parallel session id/label vectors to the view's new order.
     void _OnSessionListReordered();
+    // Search box changed: apply the filter to the kept row set and rebuild
+    // the view (no store round trip — the full set is already in hand).
+    void _HandleSessionSearch();
+    // Apply a grouping ("day" | "project") to the view and rebuild.
+    void _ApplySessionGrouping(const std::string& grouping);
 
     void _HandleTextDelta(BMessage* msg);
     void _HandleReasoningDelta(BMessage* msg);
@@ -223,13 +235,19 @@ private:
     // haicode::InFlightStream::row_gen); 0 = nothing loaded from this engine.
     int64                   loaded_row_gen_ = 0;
 
-    // Session list (parallel to UI list)
-    std::vector<std::string> session_ids_;  // indexed to match BListView
+    // Session list (parallel to UI list — section headers occupy their slot
+    // with an empty id; resolve view indices through _SessionIdAt)
+    std::vector<std::string> session_ids_;  // indexed to match BListView items
     std::vector<std::string> session_labels_;  // base titles, pre-badge
 
     // UI widgets (owned by BLooper)
     BListView*     session_list_    = nullptr;
     BScrollView*   session_scroll_  = nullptr;
+    // Sidebar search box (live filter over title / directory / id) and the
+    // Group: Day | Project selector above the session list.
+    BTextControl*  session_search_  = nullptr;
+    BMenuField*    session_group_field_ = nullptr;
+    BPopUpMenu*    session_group_menu_  = nullptr;
     ChatView*      chat_view_       = nullptr;
     InputTextView* input_view_      = nullptr;
     BButton*       send_btn_        = nullptr;

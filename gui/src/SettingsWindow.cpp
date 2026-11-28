@@ -306,7 +306,8 @@ static const uint32 MSG_MODEL_CHANGED = 'MODc';  // model dropdown selection cha
 
 SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
                                BMessenger target,
-                               const std::string& project_dir)
+                               const std::string& project_dir,
+                               bool start_new_session)
     : BWindow(BRect(0, 0, 560, 400),
               "Preferences",
               B_TITLED_WINDOW,
@@ -381,6 +382,14 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
             }
         }
     }
+
+    startup_menu_ = new BPopUpMenu("startup_session");
+    startup_menu_->SetRadioMode(true);
+    startup_menu_->SetLabelFromMarked(true);
+    startup_menu_->AddItem(new BMenuItem("Resume last session", nullptr));
+    startup_menu_->AddItem(new BMenuItem("Start a new session", nullptr));
+    startup_menu_->ItemAt(start_new_session ? 1 : 0)->SetMarked(true);
+    auto* startup_field = new BMenuField("startup_session_field", "On startup:", startup_menu_);
 
     bool mode_is_plan = (config_.default_mode != "build");
     mode_plan_radio_  = new BRadioButton("mode_plan",  "Plan mode (default)", nullptr);
@@ -477,6 +486,7 @@ SettingsWindow::SettingsWindow(const haicode::AppConfig& config,
             "New sessions remember Chat or Work from the open session."
             "\nThis setting chooses the starting mode for Work sessions."))
         .Add(new BSeparatorView(B_HORIZONTAL))
+        .Add(startup_field)
         .Add(thinking_field_)
         .AddGlue();
 
@@ -994,6 +1004,7 @@ SettingsWindow::_Save()
     if (mode_build_radio_ && mode_build_radio_->Value() == B_CONTROL_ON)
         mode = "build";
     saved.AddString("default_mode", mode);
+    saved.AddBool("start_new_session", startup_menu_->ItemAt(1)->IsMarked());
     saved.AddString("thinking_display", _MarkedThinkingDisplay().c_str());
     saved.AddString("build_command",
                     build_cmd_field_ ? build_cmd_field_->Text() : "");

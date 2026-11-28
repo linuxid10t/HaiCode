@@ -82,6 +82,10 @@ private:
     // prompt; "Trust" stores the record and re-merges so they take effect.
     void _MaybePromptProjectTrust();
     std::string project_dir_;
+    // Sidebar session grouping: "day" (default) or "project". A GUI-owned
+    // global config key (like last_directory), persisted on change.
+    std::string session_grouping_ = "day";
+    std::string last_session_id_;
     // Set in the constructor when a command-line project directory argument
     // is invalid (missing or not a directory); shown as a BAlert in
     // ReadyToRun and then cleared. Empty = nothing to report.

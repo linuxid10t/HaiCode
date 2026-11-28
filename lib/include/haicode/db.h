@@ -249,6 +249,18 @@ public:
                        const std::string& model_json);
     std::optional<SessionInfo> get(const std::string& session_id);
     std::vector<SessionInfo> list(int limit = 50);
+    // Substring filter for the sidebar's search box. Every field left at its
+    // default matches everything.
+    struct SessionQuery {
+        std::string text;   // "" = no filter; case-insensitive substring of
+                            // title, directory, or id
+    };
+    // Every session matching `query`, newest first (time_updated DESC, id
+    // DESC). Deliberately uncapped: the sidebar groups and scrolls instead of
+    // truncating, so a session is never invisible merely for being old.
+    std::vector<SessionInfo> list_matching(const SessionQuery& query);
+    // Number of stored sessions (one COUNT(*)).
+    int count();
     // (id, time_updated) of the newest `limit` sessions — list()'s order —
     // without blocking: false (out untouched) when another thread holds the
     // shared connection (e.g. housekeeping's VACUUM), so the sidebar's

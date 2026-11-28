@@ -6,6 +6,55 @@
 #include <algorithm>
 #include <ctime>
 
+// ---- SessionSectionItem ----
+
+void
+SessionSectionItem::Update(BView* owner, const BFont* font)
+{
+    BStringItem::Update(owner, font);
+    font_height metrics;
+    font->GetHeight(&metrics);
+    float line = std::ceil(metrics.ascent + metrics.descent + metrics.leading);
+    // Rule + padding above, one bold line, a little air below.
+    SetHeight(line + 10);
+    BFont bold(*font);
+    bold.SetFace(B_BOLD_FACE);
+    SetWidth(std::max(Width(), bold.StringWidth(Text()) + 12));
+}
+
+void
+SessionSectionItem::DrawItem(BView* owner, BRect frame, bool complete)
+{
+    (void)complete;
+    owner->PushState();
+    rgb_color background = ui_color(B_LIST_BACKGROUND_COLOR);
+    owner->SetLowColor(background);
+    owner->SetHighColor(background);
+    owner->FillRect(frame);
+
+    const rgb_color foreground = ui_color(B_LIST_ITEM_TEXT_COLOR);
+    owner->SetHighColor(mix_color(background, foreground, 64));
+    owner->StrokeLine(BPoint(frame.left + 2, frame.top + 0.5f),
+                      BPoint(frame.right - 2, frame.top + 0.5f));
+
+    // Label: bold, a step dimmer than session titles.
+    BFont font;
+    owner->GetFont(&font);
+    font.SetFace(B_BOLD_FACE);
+    owner->SetFont(&font);
+    owner->SetHighColor(mix_color(background, foreground, 192));
+    font_height metrics;
+    font.GetHeight(&metrics);
+    float width = std::max(0.0f, frame.Width() - 12);
+    BString text(Text());
+    font.TruncateString(&text, B_TRUNCATE_END, width);
+    owner->DrawString(text.String(),
+                      BPoint(frame.left + 6, frame.top + 5 + metrics.ascent));
+    owner->PopState();
+}
+
+// ---- SessionListItem ----
+
 SessionListItem::SessionListItem(const std::string& title,
                                  const std::string& directory,
                                  const std::string& session_id,

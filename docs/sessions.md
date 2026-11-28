@@ -111,6 +111,42 @@ interruption. Context assembly groups each batch's responses into one user messa
 and marks failures, and repairs missing or orphaned results in older histories
 without changing stored messages.
 
+## Finding sessions
+
+The Sessions tab lists **every** stored session — there is no cap — split into
+sections so a long history stays navigable:
+
+- **Group: Day** (the default) sections are *Today*, *Yesterday*, *This week*,
+  *This month*, and *Older*, by the session's last-modified time in your local
+  calendar (weeks start on Monday). The section order follows the newest session
+  in each, so today's work is always at the top.
+- **Group: Project** gives one section per project directory, newest project
+  first. Chat-only sessions that never touched a directory sit under *No project
+  directory*.
+
+Section headers are not selectable: clicking one leaves the current selection
+alone, and the arrow keys step over them. The grouping choice is remembered across
+launches (the `session_grouping` key in `config.json`). Under **Settings →
+Preferences → General → On startup**, choose **Resume last session** (default)
+or **Start a new session**. If the session to resume is no longer available,
+HaiCode opens the most recently modified session, or starts a new one if there
+are none. Changes take effect the next time HaiCode launches. The choice is
+stored in the global config (`"startup_session": "new"` opts out of Resume).
+
+The **Search** box above the list filters as you type, matching a
+case-insensitive substring of the title, the project directory, or the session
+id. An empty box shows everything. Filtering never re-reads the database, so it
+stays responsive with hundreds of sessions. The active session stays open
+when its row is filtered out.
+
+Sidebar headers and blank space have no **Delete Session** menu. Right-click
+an actual session row to delete that session, including in a filtered list.
+
+Rows and sections re-sort by last-modified time as you work. The sidebar
+checks about every five seconds and rebuilds only when the visible layout
+changes, keeping the selected session and scroll position when possible. Day
+sections also update after local midnight, even if no sessions were modified.
+
 ## Deleting a session
 
 Deleting a session asks for confirmation first (a running session is interrupted
@@ -139,8 +175,7 @@ Each deletion names what it targets, counts how many sessions are running and wi
 be interrupted, and confirms with *Cancel* as the default — Enter or Escape
 cancels. Bulk deletion runs through the same retirement path as a single delete, so
 unmatched sessions keep running with their grants intact. Selection is uncapped,
-unlike the 50-row sidebar, so sessions outside that list are still included in
-cleanup.
+like the sidebar, so every stored session is reachable by cleanup.
 
 ## Storage housekeeping
 

@@ -328,16 +328,10 @@ SessionInfo SessionStore::create(const std::string& project_dir,
     return s;
 }
 
-std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
-    std::lock_guard<std::mutex> lock(conn_mu_);
-    DbStmt stmt(db_.handle(),
-        "SELECT id, project_id, title, directory, agent, model_json,"
-        " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
-        " tok_last_input, time_created, time_updated, project_used"
-        " FROM session WHERE id=?");
-    stmt.bind(1, session_id);
-
-    if (!stmt.expect_row()) return std::nullopt;
+namespace {
+// Column order of the session SELECTs in get()/list()/list_matching().
+SessionInfo read_session_row(DbStmt& stmt)
+{
     SessionInfo s;
     s.id         = stmt.text(0);
     s.project_id = stmt.text(1);
@@ -358,37 +352,77 @@ std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
     return s;
 }
 
+const char* const kSessionColumns =
+    "SELECT id, project_id, title, directory, agent, model_json,"
+    " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
+    " tok_last_input, time_created, time_updated, project_used";
+} // namespace
+
+std::optional<SessionInfo> SessionStore::get(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbStmt stmt(db_.handle(),
+        std::string(kSessionColumns) + " FROM session WHERE id=?");
+    stmt.bind(1, session_id);
+
+    if (!stmt.expect_row()) return std::nullopt;
+    return read_session_row(stmt);
+}
+
 std::vector<SessionInfo> SessionStore::list(int limit) {
     std::lock_guard<std::mutex> lock(conn_mu_);
     DbStmt stmt(db_.handle(),
-        "SELECT id, project_id, title, directory, agent, model_json,"
-        " cost, tok_input, tok_output, tok_reasoning, tok_cache_read, tok_cache_write,"
-        " tok_last_input, time_created, time_updated, project_used"
-        " FROM session ORDER BY time_updated DESC, id DESC LIMIT ?");
+        std::string(kSessionColumns)
+        + " FROM session ORDER BY time_updated DESC, id DESC LIMIT ?");
     stmt.bind(1, limit);
 
     std::vector<SessionInfo> results;
-    while (stmt.expect_row()) {
-        SessionInfo s;
-        s.id         = stmt.text(0);
-        s.project_id = stmt.text(1);
-        s.title      = stmt.text(2);
-        s.directory  = stmt.text(3);
-        s.agent      = stmt.text(4);
-        s.model_json = stmt.text(5);
-        s.cost              = stmt.dbl_col(6);
-        s.tokens.input      = stmt.int_col(7);
-        s.tokens.output     = stmt.int_col(8);
-        s.tokens.reasoning  = stmt.int_col(9);
-        s.tokens.cache_read = stmt.int_col(10);
-        s.tokens.cache_write= stmt.int_col(11);
-        s.last_input_tokens = stmt.int_col(12);
-        s.time_created      = stmt.int64_col(13);
-        s.time_updated      = stmt.int64_col(14);
-        s.project_used      = stmt.int_col(15) != 0;
-        results.push_back(std::move(s));
-    }
+    while (stmt.expect_row())
+        results.push_back(read_session_row(stmt));
     return results;
+}
+
+std::vector<SessionInfo> SessionStore::list_matching(const SessionQuery& query) {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    std::string sql = std::string(kSessionColumns) + " FROM session";
+    std::string pattern;
+    if (!query.text.empty()) {
+        // % and _ are LIKE metacharacters; a user typing them means them
+        // literally, so escape and switch on ESCAPE.
+        pattern.reserve(query.text.size() + 2);
+        pattern += '%';
+        for (char c : query.text) {
+            if (c == '%' || c == '_' || c == '\\') pattern += '\\';
+            pattern += c;
+        }
+        pattern += '%';
+        std::string lowered;
+        lowered.reserve(pattern.size());
+        for (char c : pattern)
+            lowered += (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+        sql += " WHERE (LOWER(title) LIKE ? ESCAPE '\\'"
+               " OR LOWER(directory) LIKE ? ESCAPE '\\'"
+               " OR LOWER(id) LIKE ? ESCAPE '\\')";
+        sql += " ORDER BY time_updated DESC, id DESC";
+        DbStmt stmt(db_.handle(), sql);
+        stmt.bind(1, lowered).bind(2, lowered).bind(3, lowered);
+        std::vector<SessionInfo> results;
+        while (stmt.expect_row())
+            results.push_back(read_session_row(stmt));
+        return results;
+    }
+    sql += " ORDER BY time_updated DESC, id DESC";
+    DbStmt stmt(db_.handle(), sql);
+    std::vector<SessionInfo> results;
+    while (stmt.expect_row())
+        results.push_back(read_session_row(stmt));
+    return results;
+}
+
+int SessionStore::count() {
+    std::lock_guard<std::mutex> lock(conn_mu_);
+    DbStmt stmt(db_.handle(), "SELECT COUNT(*) FROM session");
+    if (!stmt.expect_row()) return 0;
+    return stmt.int_col(0);
 }
 
 bool SessionStore::try_update_times(

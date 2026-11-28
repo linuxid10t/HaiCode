@@ -165,6 +165,11 @@ target_link_libraries(test_date_time haicode)
 add_executable(test_glob tests/test_glob.cpp)
 target_link_libraries(test_glob haicode)
 
+# Sidebar "Group by day": local-calendar bucketing at midnight, week (Monday),
+# month, and DST boundaries.
+add_executable(test_session_groups tests/test_session_groups.cpp)
+target_link_libraries(test_session_groups haicode)
+
 # write_agents_md target selection (never shadows claude.md) and
 # external_terminal's permission/mode contract (no Terminal launched).
 add_executable(test_project_tools tests/test_project_tools.cpp)
@@ -181,6 +186,7 @@ foreach(t test_date_time test_db test_diff test_git_find test_process test_file_
          test_subprocess test_turn_integrity test_engine_correctness
          test_session_lifecycle test_session_cleanup test_web_tools test_provider_params
          test_pricing test_codex_params test_propose_plan test_model_db
-         test_markdown test_project_used test_glob test_project_tools)
+         test_markdown test_project_used test_glob test_project_tools
+         test_session_groups)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()

@@ -13,6 +13,7 @@
 #include <cstring>
 #include <memory>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 #include <atomic>
@@ -149,6 +150,98 @@ static bool test_no_list_cap() {
           "empty_only is uncapped too");
 
     std::cout << "[OK] sessions_matching has no 50-row cap\n";
+    return true;
+}
+
+// ---- list_matching / count (sidebar search) ----
+
+static bool test_list_matching() {
+    Fixture f;
+    f.open();
+    const int64_t now = haicode::util::now_ms();
+
+    std::string alpha   = make_session(*f.store, "/proj/Alpha", "Fix the build");
+    std::string beta    = make_session(*f.store, "/proj/beta", "refactor: BUILD errors");
+    std::string chat    = make_session(*f.store, "", "Untitled chat");
+    std::string literal = make_session(*f.store, "/proj/pct", "100% done_now");
+    // Oldest row so ordering is unambiguous.
+    f.set_time("session", "id", alpha, now - 60 * 60 * 1000);
+
+    CHECK(f.store->count() == 4, "count() reports every stored session");
+
+    haicode::SessionStore::SessionQuery all;
+    auto every = f.store->list_matching(all);
+    CHECK(every.size() == 4, "an empty query returns every session");
+    // Newest first: alpha (aged) must be last; the other three keep the
+    // store's id-DESC tie-break among equal times.
+    CHECK(every.back().id == alpha, "empty query is ordered newest first");
+    const std::map<std::string, std::string> expected_titles = {
+        {alpha, "Fix the build"}, {beta, "refactor: BUILD errors"},
+        {chat, "Untitled chat"}, {literal, "100% done_now"},
+    };
+    std::map<std::string, std::string> actual_titles;
+    for (const auto& row : every) actual_titles.emplace(row.id, row.title);
+    CHECK(actual_titles == expected_titles, "each session carries its stored title");
+
+    haicode::SessionStore::SessionQuery q;
+    q.text = "build";
+    auto hits = f.store->list_matching(q);
+    CHECK(hits.size() == 2, "case-insensitive: 'build' matches title and BUILD");
+    q.text = "BUILD";
+    CHECK(f.store->list_matching(q).size() == 2, "query case does not matter");
+
+    q.text = "/proj/al";
+    hits = f.store->list_matching(q);
+    CHECK(hits.size() == 1 && hits[0].id == alpha,
+          "directory is searched, case-insensitively");
+
+    q.text = beta.substr(beta.size() - 6);
+    hits = f.store->list_matching(q);
+    CHECK(hits.size() == 1 && hits[0].id == beta, "session id is searched");
+
+    q.text = "no such thing";
+    CHECK(f.store->list_matching(q).empty(), "no match -> empty result");
+
+    // LIKE metacharacters are literal: '%' and '_' must not widen the match.
+    q.text = "100%";
+    hits = f.store->list_matching(q);
+    CHECK(hits.size() == 1 && hits[0].id == literal,
+          "'%' in the query is literal, not a wildcard");
+    q.text = "done_now";
+    hits = f.store->list_matching(q);
+    CHECK(hits.size() == 1 && hits[0].id == literal,
+          "'_' in the query is literal, not a single-char wildcard");
+    q.text = "donexnow";
+    CHECK(f.store->list_matching(q).empty(), "'_' does not match 'x'");
+
+    // The empty-directory chat session is still reachable by title.
+    q.text = "untitled";
+    hits = f.store->list_matching(q);
+    CHECK(hits.size() == 1 && hits[0].id == chat, "untitled sessions are searchable");
+
+    std::cout << "[OK] list_matching filters and escapes\n";
+    return true;
+}
+
+static bool test_list_matching_uncapped() {
+    Fixture f;
+    f.open();
+    for (int i = 0; i < 75; ++i)
+        make_session(*f.store, "/proj/many", "session " + std::to_string(i));
+
+    CHECK(f.store->count() == 75, "count() sees all 75 sessions");
+    haicode::SessionStore::SessionQuery all;
+    CHECK(f.store->list_matching(all).size() == 75,
+          "list_matching is uncapped: all 75 rows returned");
+    haicode::SessionStore::SessionQuery q;
+    q.text = "session 7";
+    // 7, 70..74 = 6 rows.
+    CHECK(f.store->list_matching(q).size() == 6,
+          "search over a large store returns every matching row");
+    CHECK(f.store->list(50).size() == 50,
+          "list(limit) still honors its cap for callers that want one");
+
+    std::cout << "[OK] list_matching has no cap\n";
     return true;
 }
 
@@ -596,6 +689,8 @@ int main() {
     };
     run("filters", test_filters);
     run("no_list_cap", test_no_list_cap);
+    run("list_matching", test_list_matching);
+    run("list_matching_uncapped", test_list_matching_uncapped);
     run("prune_stale_checkpoints", test_prune_stale_checkpoints);
     run("clear_stale_checkpoint_contexts", test_clear_stale_checkpoint_contexts);
     run("prune_orphans", test_prune_orphans);

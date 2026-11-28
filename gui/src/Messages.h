@@ -129,9 +129,14 @@ static const uint32 MSG_SKILL_TOGGLED   = 'SKtg';
 
 // Session tracking
 static const uint32 MSG_ACTIVE_SESSION  = 'ACSs';  // MainWindow → be_app; "session_id" string
-static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "index" int32
+static const uint32 MSG_DELETE_SESSION  = 'DLss';  // SessionListView → MainWindow; "session_id" string
 static const uint32 MSG_DELETE_SESSION_CONFIRMED = 'DLcf';  // MainWindow → be_app; "session_id" — confirmed, run the retiring worker
 static const uint32 MSG_SESSION_DELETED = 'DLok';  // lifecycle worker → be_app → MainWindow; "session_id" + "ok" bool + "error" string
+
+// Sidebar session list: search filter + section grouping
+static const uint32 MSG_SESSION_SEARCH = 'SLsq';  // search box → MainWindow (modification message, live filter)
+static const uint32 MSG_SESSION_GROUP  = 'SLgp';  // Group menu → be_app; "grouping" = "day" | "project"; persisted
+static const uint32 MSG_SESSION_GROUP_CHANGED = 'SLgc';  // be_app → MainWindow; "grouping" — apply to the view
 
 // Bulk session cleanup (File → Cleanup…)
 static const uint32 MSG_CLEANUP_REQUEST  = 'CLrq';  // menu → window; "criteria" (empty / project / older:N)

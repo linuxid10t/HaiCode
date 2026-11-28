@@ -122,6 +122,23 @@ main()
     CHECK(!item.SetRunning(false));
     CHECK(!item.IsRunning());
 
+    // Section header: one bold line (shorter than a three-line session row),
+    // label preserved, key independent of the display text.
+    SessionSectionItem section("Today");
+    CHECK(std::strcmp(section.Text(), "Today") == 0);
+    CHECK(!section.IsEnabled());
+    CHECK(item.IsEnabled());
+    CHECK(section.Key().empty());
+    section.SetKey("today");
+    CHECK(section.Key() == "today");
+    section.Update(nullptr, font);
+    CHECK(section.Height() > line);
+    CHECK(section.Height() < item.Height());
+    // A dynamic_cast distinguishes headers from session rows at click time.
+    BListItem* as_item = &section;
+    CHECK(dynamic_cast<SessionListItem*>(as_item) == nullptr);
+    CHECK(dynamic_cast<SessionSectionItem*>(as_item) == &section);
+
     if (failures == 0) std::printf("session_list_item: all checks passed\n");
     return failures == 0 ? 0 : 1;
 }

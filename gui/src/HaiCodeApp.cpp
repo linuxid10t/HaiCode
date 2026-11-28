@@ -111,29 +111,30 @@ HaiCodeApp::HaiCodeApp(int argc, char* argv[])
                 + "\" does not exist or is not a directory.";
         }
     }
+    BPath settings_path;
+    if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
+        settings_path.Append("haicode/config.json");
+        std::ifstream f(settings_path.Path());
+        if (f.is_open()) {
+            try {
+                auto j = nlohmann::json::parse(f);
+                if (project_dir_.empty() && j.contains("last_directory")
+                        && j["last_directory"].is_string()) {
+                    std::string saved = j["last_directory"].get<std::string>();
+                    BEntry entry(saved.c_str());
+                    if (entry.Exists() && entry.IsDirectory())
+                        project_dir_ = saved;
+                }
+                if (j.contains("session_grouping") && j["session_grouping"] == "project")
+                    session_grouping_ = "project";
+                if (j.contains("last_session_id") && j["last_session_id"].is_string())
+                    last_session_id_ = j["last_session_id"].get<std::string>();
+            } catch (...) {}
+        }
+    }
     if (project_dir_.empty()) {
-        // Try to load saved directory from settings
-        BPath settings_path;
-        if (find_directory(B_USER_SETTINGS_DIRECTORY, &settings_path) == B_OK) {
-            BPath cfg(settings_path);
-            cfg.Append("haicode/config.json");
-            std::ifstream f(cfg.Path());
-            if (f.is_open()) {
-                try {
-                    nlohmann::json j = nlohmann::json::parse(f);
-                    if (j.contains("last_directory") && j["last_directory"].is_string()) {
-                        std::string saved = j["last_directory"].get<std::string>();
-                        BEntry entry(saved.c_str());
-                        if (entry.Exists() && entry.IsDirectory())
-                            project_dir_ = saved;
-                    }
-                } catch (...) {}
-            }
-        }
-        if (project_dir_.empty()) {
-            char buf[B_PATH_NAME_LENGTH] = {};
-            project_dir_ = getcwd(buf, sizeof(buf)) ? buf : "/boot/home";
-        }
+        char buf[B_PATH_NAME_LENGTH] = {};
+        project_dir_ = getcwd(buf, sizeof(buf)) ? buf : "/boot/home";
     }
 }
 
@@ -272,10 +273,17 @@ HaiCodeApp::ReadyToRun()
     engine_->set_permission_broker(perm_broker_.get());
 
     // --- 11. Create MainWindow ---
-    main_window_ = new MainWindow(*engine_, *store_, project_dir_, config_.model, config_.provider);
+    main_window_ = new MainWindow(*engine_, *store_, project_dir_, config_.model,
+        config_.provider, last_session_id_, global_layer_.values.start_new_session);
     *window_holder_ = main_window_;
     // Populate the provider dropdown from config now that MainWindow exists.
     main_window_->RebuildProviderMenu(config_.providers);
+    // Restore the persisted sidebar grouping before the first paint.
+    if (session_grouping_ != "day") {
+        BMessage grouping(MSG_SESSION_GROUP_CHANGED);
+        grouping.AddString("grouping", session_grouping_.c_str());
+        main_window_->PostMessage(&grouping);
+    }
 
     // --- 12. Create GuiEventRelay and attach to bus ---
     relay_ = std::make_unique<GuiEventRelay>(
@@ -466,6 +474,23 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             }
             break;
         }
+        case MSG_SESSION_GROUP: {
+            // Sidebar Group menu → persist + apply. A GUI-owned key like
+            // last_directory; only "project" is stored (absent = day).
+            const char* grouping = nullptr;
+            if (msg->FindString("grouping", &grouping) != B_OK || !grouping) break;
+            session_grouping_ = std::string(grouping) == "project" ? "project" : "day";
+            std::string value = session_grouping_;
+            save_config_at(haicode::global_config_path(), "the session grouping",
+                [value](nlohmann::json& j) {
+                    if (value == "day") j.erase("session_grouping");
+                    else j["session_grouping"] = value;
+                });
+            BMessage apply(MSG_SESSION_GROUP_CHANGED);
+            apply.AddString("grouping", session_grouping_.c_str());
+            if (main_window_) main_window_->PostMessage(&apply);
+            break;
+        }
         case MSG_DIR_CHANGED: {
             const char* path = nullptr;
             if (msg->FindString("path", &path) != B_OK || !path) break;
@@ -473,7 +498,6 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             std::string dir = path;
             save_config_at(haicode::global_config_path(), "the project directory",
                 [dir](nlohmann::json& j) { j["last_directory"] = dir; });
-
             // Reload project-specific config (picks up agents.md/claude.md in the new dir).
             project_dir_ = path;
             global_layer_ = haicode::load_layer(haicode::global_config_path());
@@ -492,6 +516,11 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             // Session switch: pull that session's persisted flags into the
             // gate (the old toolbar-checkbox restore path, minus the widgets).
             if (sid && *sid) {
+                if (last_session_id_ != sid) {
+                    last_session_id_ = sid;
+                    save_config_at(haicode::global_config_path(), "the last active session",
+                        [id = last_session_id_](nlohmann::json& j) { j["last_session_id"] = id; });
+                }
                 _SyncSessionFlags(sid);
                 _NotifyPermissionUiChanged();
             }
@@ -552,7 +581,7 @@ HaiCodeApp::MessageReceived(BMessage* msg)
         }
         case MSG_SHOW_SETTINGS: {
             SettingsWindow* win = new SettingsWindow(config_, BMessenger(this),
-                                                     project_dir_);
+                project_dir_, global_layer_.values.start_new_session);
             win->Show();
             break;
         }
@@ -784,9 +813,15 @@ HaiCodeApp::MessageReceived(BMessage* msg)
             // permissions/last_directory/... in the file are preserved, and a
             // legacy global build_command is dropped (project-only now).
             {
+                const bool previous_start_new = g.start_new_session;
+                bool start_new;
+                if (msg->FindBool("start_new_session", &start_new) == B_OK)
+                    g.start_new_session = start_new;
+
                 std::string err;
                 if (!haicode::sync_global_scope(g, haicode::global_config_path(),
                                                 err)) {
+                    g.start_new_session = previous_start_new;
                     BString text;
                     text << "Could not save settings:\n\n" << err.c_str();
                     BAlert* alert = new BAlert("Config save failed",

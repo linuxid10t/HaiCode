@@ -34,6 +34,25 @@ constexpr const char* kSpinnerFrames[12] = {
 };
 constexpr int kSpinnerFrameCount = 12;
 
+// Section header row ("Today", "Yesterday", a project directory, …) between
+// session rows. It occupies a view index but has no corresponding session ID.
+class SessionSectionItem : public BStringItem {
+public:
+    explicit SessionSectionItem(const std::string& label)
+        : BStringItem(label.c_str()) { SetEnabled(false); }
+
+    // Stable key the grouping uses to tell sections apart (not necessarily
+    // the display text; two projects could in theory share a label).
+    const std::string& Key() const { return key_; }
+    void SetKey(const std::string& key) { key_ = key; }
+
+    void Update(BView* owner, const BFont* font) override;
+    void DrawItem(BView* owner, BRect frame, bool complete) override;
+
+private:
+    std::string key_;
+};
+
 // Sidebar row: session title on the first line, project directory on the
 // second (or a chat-only note for Chat-mode sessions, which have no local
 // access and so no meaningful directory), and the last-modified time on the

@@ -324,7 +324,10 @@ PermissionsCenterWindow::_RebuildSessionMenu()
 {
     while (session_menu_->CountItems() > 0)
         delete session_menu_->RemoveItem(int32(0));
-    auto sessions = store_.list(50);
+    // Uncapped: every session is reachable in the selector, not just the
+    // newest 50.
+    haicode::SessionStore::SessionQuery all;
+    auto sessions = store_.list_matching(all);
     bool marked = false;
     for (auto& si : sessions) {
         std::string label = si.title.empty()

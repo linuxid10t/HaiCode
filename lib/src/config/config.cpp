@@ -321,6 +321,11 @@ ConfigLayer load_layer(const std::string& path) {
             }
         }
 
+        if (j.contains("startup_session") && j["startup_session"] == "new") {
+            cfg.start_new_session = true;
+            layer.present.insert("startup_session");
+        }
+
         // Thinking-block display: "off", "on", or "on_while_thinking".
         // Unrecognized values are ignored so the struct default stands.
         if (j.contains("thinking_display") && j["thinking_display"].is_string()) {
@@ -415,6 +420,7 @@ AppConfig ConfigLoader::load_file(const std::string& path) {
 AppConfig merge(const ConfigLayer& base, const ConfigLayer& overlay) {
     AppConfig result = base.values;
     const AppConfig& ov = overlay.values;
+    // startup_session belongs to the global layer only.
 
     if (overlay.has("model"))            result.model            = ov.model;
     if (overlay.has("provider"))         result.provider         = ov.provider;
@@ -519,7 +525,7 @@ nlohmann::json providers_to_json(const std::map<std::string, ProviderConfig>& pr
 
 const std::vector<std::string>& global_scope_keys() {
     static const std::vector<std::string> keys = {
-        "provider", "model", "default_mode", "thinking_display",
+        "provider", "model", "default_mode", "thinking_display", "startup_session",
         "providers", "web_search", "skills", "models", "vision",
         "max_output", "vision_fallback", "pricing",
         "auto_compact", "auto_compact_threshold",
@@ -535,6 +541,7 @@ nlohmann::json global_scope_json(const AppConfig& cfg) {
     if (!cfg.provider.empty()) j["provider"] = cfg.provider;
     if (!cfg.model.empty())    j["model"]    = cfg.model;
     if (!cfg.default_mode.empty()) j["default_mode"] = cfg.default_mode;
+    if (cfg.start_new_session) j["startup_session"] = "new";
     // Erase-when-default so the file stays minimal for default behavior:
     // empty is the "unset" sentinel (default = "off"); explicit values —
     // including "off" — are persisted as the user's choice.

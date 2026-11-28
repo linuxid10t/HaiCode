@@ -311,6 +311,39 @@ static bool thinking_display_defaults_to_off() {
     return true;
 }
 
+static bool startup_session_is_global_only() {
+    reset_dir();
+    const std::string gp = std::string(kDir) + "/global.json";
+    const std::string pp = std::string(kDir) + "/project.json";
+    write_file(gp, R"({"startup_session":true,"last_session_id":"s1","session_grouping":"project"})");
+    write_file(pp, R"({"startup_session":"new"})");
+    auto global = haicode::load_layer(gp);
+    auto project = haicode::load_layer(pp);
+    CHECK(!global.values.start_new_session, "invalid startup value defaults to Resume");
+    CHECK(project.values.start_new_session, "'new' is parsed");
+    CHECK(!haicode::merge(global, project).start_new_session,
+          "project cannot override the global startup choice");
+
+    global.values.start_new_session = true;
+    global.values.model = "m";
+    std::string err;
+    CHECK(haicode::sync_global_scope(global.values, gp, err), "save startup and model: " + err);
+    global = haicode::load_layer(gp);
+    CHECK(global.values.start_new_session && global.values.model == "m",
+          "startup choice and model round-trip together");
+    CHECK(haicode::merge(global, {}).start_new_session, "global choice survives merge");
+
+    global.values.start_new_session = false;
+    CHECK(haicode::sync_global_scope(global.values, gp, err), "restore Resume: " + err);
+    const auto j = nlohmann::json::parse(read_file(gp));
+    CHECK(!j.contains("startup_session"), "Resume removes the optional key");
+    CHECK(j["last_session_id"] == "s1" && j["session_grouping"] == "project",
+          "runtime sidebar and resume keys survive a Settings save");
+    CHECK(!haicode::load_layer(gp).values.start_new_session, "absent key means Resume");
+    std::cout << "[OK] startup_session is saved and loaded at global scope\n";
+    return true;
+}
+
 int main() {
     bool ok = true;
     ok &= missing_file_created();
@@ -322,6 +355,7 @@ int main() {
     ok &= writes_owner_only();
     ok &= settings_save_does_not_leak_project_state();
     ok &= thinking_display_defaults_to_off();
+    ok &= startup_session_is_global_only();
     if (ok) {
         std::cout << "\nAll config-write tests passed!\n";
         return 0;

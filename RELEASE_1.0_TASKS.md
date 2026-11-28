@@ -45,7 +45,7 @@ Gate state: `make -C build -j$(nproc)` is clean under `-Wall -Wextra`, and
 | | 27 ChatGPT (Codex) provider | Done |
 | 8 — Smaller fixes | All six items | Done |
 | 9 — Packaging | 28 Identity + packaging | **Not started** |
-| | 29 GUI completeness | **Partly done** (cleanup + popup placement done) |
+| | 29 GUI completeness | **Partly done** (cleanup, popup placement, session list/search/sorting done) |
 | 10 — Documentation | Docs match code | **Done** (all stale statements closed) |
 
 ### Remaining work, in dependency order
@@ -53,10 +53,11 @@ Gate state: `make -C build -j$(nproc)` is clean under `-Wall -Wextra`, and
 1. **Version single-source + `.rdef` completion** — `project(VERSION …)` →
    generated header; `app_shortname`, `app_version`, vector icon; About window;
    `--version`. (Task 28)
-2. **Session list beyond 50** — paging or search, replacing both `list(50)` call
-   sites. (Task 29)
-3. **Session sorting** — by day and by project: store query + sidebar UI.
-   (Task 29)
+2. ~~**Session list beyond 50** — paging or search, replacing both `list(50)` call
+   sites.~~ **Done** — uncapped `SessionStore::list_matching`, live search box,
+   both call sites replaced.
+3. ~~**Session sorting** — by day and by project: store query + sidebar UI.~~
+   **Done** — `Group: Day | Project` sections, persisted.
 4. **Install/packaging** — `install()` rules, HaikuPorts recipe / `.hpkg`,
    runtime vs development deps, clean-system install + first-launch check.
    (Task 28)
@@ -69,7 +70,7 @@ Gate state: `make -C build -j$(nproc)` is clean under `-Wall -Wextra`, and
    (Task 29)
 9. **Performance pass** on a 500+ message session with a long streamed reply.
    (Task 29)
-10. **Docs sweep** — the six stale statements listed under Phase 10.
+10. ~~**Docs sweep** — the six stale statements listed under Phase 10.~~ Done.
 
 One deliberate deviation to confirm: Task 25's optional "consider automatic
 continuation" after a `max_tokens` stop shipped as a **notice** instead.
@@ -901,7 +902,8 @@ HaikuPorts recipe or `.hpkg` build, and a clean-system install/first-launch chec
 Spec:
 
 - Session list is capped at 50 (`store_.list(50)` in `MainWindow` and the
-  Permissions center); add paging or search.
+  Permissions center); add paging or search. — **Done**: both call sites now use
+  the uncapped `SessionStore::list_matching`; a search box filters live.
 - ~~Finish implementing session cleanup.~~ **Done** (`ce49233`): File → Cleanup
   offers Delete Empty / Inactive (7-30-90 days) / All Sessions in This Project,
   with explicit Cancel default and Escape, through
@@ -912,7 +914,12 @@ Spec:
   and aged scratch files are swept; WAL checkpoint + `VACUUM` + checkpoint
   reclaims at least 1 MiB of free pages. See `test_session_cleanup` and
   `test_session_lifecycle`.
-- Session sorting. Options will be by day and by project.
+- Session sorting. Options will be by day and by project. — **Done**: `Group:
+  Day | Project` menu above the list. Day sections (Today / Yesterday / This
+  week / This month / Older) come from the pure `session_day_bucket`
+  (`lib/include/haicode/session_groups.h`, `test_session_groups`); Project
+  sections are one per directory. The choice persists as the GUI-owned
+  `session_grouping` config key.
 - First-run onboarding: provider setup, connection test, model selection.
 - Session export (Markdown/JSON) and a documented backup/restore of `sessions.db`.
 - Clear, categorized error messages (config, provider, database, tool); never
@@ -939,12 +946,19 @@ Done beyond the struck-through cleanup item:
 
 Outstanding:
 
-1. **Session list still capped at 50** — `store_.list(50)` at
-   `MainWindow.cpp:1462` and `PermissionsCenterWindow.cpp:327`. No paging, no
-   sidebar search box. (Bulk cleanup's `sessions_matching` is uncapped; the
-   visible list is not.)
-2. **Session sorting** — only `ORDER BY time_updated DESC` exists
-   (`db.cpp:367,399,431`). No by-day or by-project grouping.
+1. ~~**Session list still capped at 50**~~ **Done** — `MainWindow.cpp` and
+   `PermissionsCenterWindow.cpp` both list every session through
+   `SessionStore::list_matching`; a **Search** box filters title / directory /
+   id live without re-reading the store. Section headers
+   (`SessionSectionItem`) are unselectable rows; `MainWindow::_SessionIdAt`
+   maps a view index to a session or `nullptr` for a header, and every
+   index-driven handler goes through it.
+2. ~~**Session sorting**~~ **Done** — `Group: Day | Project` (`SessionListView::Grouping`).
+   Sections are ordered by their newest matching session, with members kept
+   together and ordered newest-first. The 5 s timestamp refresh rebuilds rows
+   only when the projected layout changes, preserving selection by session ID
+   and restoring scroll position. Day sections update at local midnight on the
+   next refresh. The grouping choice is persisted as `session_grouping`.
 3. **First-run onboarding** — no provider setup flow, connection test, or
    model-selection guidance anywhere in `gui/`.
 4. **Export and backup/restore** — no Markdown/JSON session export; no documented

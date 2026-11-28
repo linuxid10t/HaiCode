@@ -61,7 +61,8 @@ public:
     // are scanned; project entries shadow same-name global ones).
     SettingsWindow(const haicode::AppConfig& config,
                    BMessenger target,
-                   const std::string& project_dir);
+                   const std::string& project_dir,
+                   bool start_new_session);
 
     void MessageReceived(BMessage* msg) override;
 
@@ -125,6 +126,7 @@ private:
     // not a failure and never arms these (matching MainWindow's rule).
     bool         models_load_failed_    = false;
     bool         fb_models_load_failed_ = false;
+    BPopUpMenu*  startup_menu_      = nullptr;
     BRadioButton* mode_plan_radio_   = nullptr;
     BRadioButton* mode_build_radio_  = nullptr;
     // Default thinking-block display in the chat view ("off"/"on"/

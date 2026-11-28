@@ -85,6 +85,8 @@ struct AppConfig {
     // (anything else falls back to build at read time). Defaults to "plan"
     // so new sessions start in Plan mode unless overridden.
     std::string default_mode = "plan";
+    // GUI startup preference; project layers cannot override it.
+    bool start_new_session = false;
     // Thinking-block display in the chat view: "off" (always collapsed),
     // "on" (always expanded), or "on_while_thinking" (expanded while
     // streaming, collapsed after). Empty = "off" (the default).
