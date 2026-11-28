@@ -7,12 +7,14 @@ trust depends on layered config loading).
 
 Verification audited against the working tree at `bc183cb` (2026-10-05). Every
 status claim below was checked in code and tests, not read off commit messages.
+Re-baselined 2026-11-28 against `4889930` (post-`date_time`/status-glyph work):
+gate state re-verified at 45/45 and Task 28's icon item marked done.
 
 ## Status at a glance
 
 Gate state: `make -C build -j$(nproc)` is clean under `-Wall -Wextra`, and
-`ctest --test-dir build` reports **40/40 passing** (37 `lib/tests` + 3
-`gui/tests`). Debug and Release trees both configured and green.
+`ctest --test-dir build` reports **45/45 passing** (41 `lib/tests` + 4
+`gui/tests`).
 
 | Phase | Task | Status |
 |---|---|---|
@@ -44,7 +46,7 @@ Gate state: `make -C build -j$(nproc)` is clean under `-Wall -Wextra`, and
 | | 26 Model metadata | Done |
 | | 27 ChatGPT (Codex) provider | Done |
 | 8 — Smaller fixes | All six items | Done |
-| 9 — Packaging | 28 Identity + packaging | **Not started** |
+| 9 — Packaging | 28 Identity + packaging | **Partly done** (app icon done; version single-source, About/--version, install rules, packaging open) |
 | | 29 GUI completeness | **Partly done** (cleanup, popup placement, session list/search/sorting done) |
 | 10 — Documentation | Docs match code | **Done** (all stale statements closed) |
 
@@ -127,8 +129,8 @@ Verified:
   "re-run cmake" caveat remains in any doc.
 - Default `RelWithDebInfo` at `CMakeLists.txt:8-10`; `-Wall -Wextra` at `:12`.
 - `FATAL_ERROR` guards at `CMakeLists.txt:89-97`, with `openssl3_devel`.
-- `build-debug` (Debug) and `build-release` (Release) both exist; the Release
-  run is 40/40 green.
+- `build-debug` (Debug) and `build-release` (Release) both exist; at the audit
+  the Release run was 40/40 green (45/45 as of the 2026-11-28 re-baseline).
 
 Extras found along the way: a C++20 toolchain pre-flight check for hybrid
 x86_gcc2 systems (`CMakeLists.txt:17-23`) and secondary-arch library path
@@ -879,7 +881,7 @@ Spec:
 
 ## Phase 9 — Release packaging and GUI polish
 
-### Task 28. Application identity and packaging — **Not started**
+### Task 28. Application identity and packaging — **Partly done** (`c610f1b` added the app icon)
 
 Spec:
 
@@ -891,8 +893,11 @@ Spec:
   from development dependencies.
 - Verify install and first launch on a clean Haiku system.
 
-Current state: `gui/haicode.rdef` holds only `app_signature` and `app_flags`.
-Missing: `app_shortname`, `app_version`/copyright, vector icon, a version constant
+Current state: `gui/haicode.rdef` holds `app_signature`, `app_flags`
+(`B_SINGLE_LAUNCH`), and the classic `'ICON'`/`'MICN'` app icon
+(`gui/haicode-icon.rdef`, added by `c610f1b` with resource-rebuild
+dependencies in `gui/CMakeLists.txt`). Missing: vector (HVIF) icon,
+`app_shortname`, `app_version`/copyright, a version constant
 (root `CMakeLists.txt` has `project(haicode CXX)` with no `VERSION` and no
 generated header), an About window, `--version`, any `install()` rule, a
 HaikuPorts recipe or `.hpkg` build, and a clean-system install/first-launch check.

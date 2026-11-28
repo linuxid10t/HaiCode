@@ -17,7 +17,7 @@ headlessly from a test binary.
 | `src/engine/` | The agentic loop: turn accounting, step budget, status updates, compaction triggering, plan seeding. |
 | `src/provider/` | Anthropic, OpenAI-compatible (and the `ollama`/`vllm`/`openrouter`/`lmstudio`/`llamacpp` flavors), and the ChatGPT/Codex Responses-API provider, plus request-body building and error classification. |
 | `src/auth/` | ChatGPT OAuth (PKCE + loopback callback on port 1455, refresh-on-skew, token store). |
-| `src/tool/` | The 21 built-in tools and the `ToolRegistry` gate integration. |
+| `src/tool/` | The 22 built-in tools and the `ToolRegistry` gate integration. |
 | `src/permission/` | `PermissionGate` rule layers, bash pattern segmentation, git read-only classification, approval broker. |
 | `src/db/`, `src/session/` | SQLite storage (`Database`, `SessionStore`), migrations, bulk-query primitives. |
 | `src/compaction/` | Pure checkpoint logic: token budget, history splitting, serialization, summary validation. |
